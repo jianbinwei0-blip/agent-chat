@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.imessage-control-plane</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/python3</string>
+    <string>/ABSOLUTE/PATH/TO/codex-imessage-control-plane/codex_imessage_control_plane.py</string>
+    <string>run</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_IMESSAGE_TO</key>
+    <string>+15555550123</string>
+
+    <key>CODEX_HOME</key>
+    <string>/Users/USERNAME/.codex</string>
+
+    <key>CODEX_IMESSAGE_NOTIFY_MODE</key>
+    <string>route</string>
+
+    <key>CODEX_IMESSAGE_LAUNCHD_LABEL</key>
+    <string>com.codex.imessage-control-plane</string>
+
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USERNAME/Library/Logs/codex-imessage-control-plane.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/USERNAME/Library/Logs/codex-imessage-control-plane.launchd.err.log</string>
+</dict>
+</plist>

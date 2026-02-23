@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: compile-and-test (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile all modules
+        run: python3 -m compileall .
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v

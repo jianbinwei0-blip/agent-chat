@@ -1,0 +1,2434 @@
+import io
+import json
+import plistlib
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import codex_imessage_control_plane as cp
+
+
+class TestCodexIMessageControlPlane(unittest.TestCase):
+    def test_is_supported_python_version_rejects_3_10(self) -> None:
+        self.assertFalse(cp._is_supported_python_version((3, 10, 14)))  # type: ignore[attr-defined]
+        self.assertTrue(cp._is_supported_python_version((3, 11, 0)))  # type: ignore[attr-defined]
+
+    def test_build_python_upgrade_message_mentions_upgrade(self) -> None:
+        text = cp._build_python_upgrade_message(  # type: ignore[attr-defined]
+            executable="/usr/bin/python3",
+            version=(3, 9, 6),
+        )
+        self.assertIn("requires Python 3.11+", text)
+        self.assertIn("Detected: Python 3.9.6", text)
+        self.assertIn("Please upgrade Python", text)
+
+    def test_warn_stderr_prefixes_timestamp_per_line(self) -> None:
+        with (
+            mock.patch.object(cp.time, "strftime", return_value="2026-02-16T12:34:56-0800"),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
+            cp._warn_stderr("line1\nline2\n")  # type: ignore[attr-defined]
+
+        self.assertEqual(
+            err.getvalue(),
+            "[2026-02-16T12:34:56-0800] line1\n"
+            "[2026-02-16T12:34:56-0800] line2\n",
+        )
+
+    def test_warn_chat_db_once_mentions_app_or_python_binary(self) -> None:
+        with (
+            mock.patch.object(cp, "_warn_stderr") as warn_mock,
+            mock.patch.object(cp.time, "time", return_value=100.0),
+        ):
+            cp._chat_db_last_warning_text = None  # type: ignore[attr-defined]
+            cp._chat_db_last_warning_ts = 0.0  # type: ignore[attr-defined]
+            cp._chat_db_last_status = None  # type: ignore[attr-defined]
+            cp._warn_chat_db_once(detail="cannot open chat.db")  # type: ignore[attr-defined]
+
+        warn_mock.assert_called_once()
+        text = warn_mock.call_args.args[0]
+        self.assertIn("app or Python binary", text)
+
+    def test_parse_inbound_command_help(self) -> None:
+        cmd = cp._parse_inbound_command("help")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "help")
+
+    def test_parse_inbound_command_list(self) -> None:
+        cmd = cp._parse_inbound_command("list")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "list")
+
+    def test_parse_inbound_command_status_with_ref(self) -> None:
+        cmd = cp._parse_inbound_command("status @019c33b4")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "status")
+        self.assertEqual(cmd.get("session_ref"), "019c33b4")
+
+    def test_parse_inbound_command_new_session(self) -> None:
+        cmd = cp._parse_inbound_command("new bugfix: inspect failing tests")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "new")
+        self.assertEqual(cmd.get("label"), "bugfix")
+        self.assertEqual(cmd.get("prompt"), "inspect failing tests")
+
+    def test_parse_inbound_command_resume_with_explicit_ref(self) -> None:
+        cmd = cp._parse_inbound_command("@019c33b4 apply patch")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "resume")
+        self.assertEqual(cmd.get("session_ref"), "019c33b4")
+        self.assertEqual(cmd.get("prompt"), "apply patch")
+
+    def test_parse_inbound_command_implicit(self) -> None:
+        cmd = cp._parse_inbound_command("please continue")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "implicit")
+        self.assertEqual(cmd.get("prompt"), "please continue")
+
+    def test_ensure_inbound_cursor_seed_reseeds_when_existing_cursor_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            cursor_path = codex_home / "tmp" / "imessage_inbound_cursor.json"
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            cursor_path.write_text(json.dumps({"last_rowid": 0, "ts": 1}), encoding="utf-8")
+
+            with mock.patch.object(cp.reply, "_max_rowid", return_value=1234):
+                rowid = cp._ensure_inbound_cursor_seed(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    conn=mock.Mock(spec=sqlite3.Connection),
+                    recipient="+15551234567",
+                    handle_ids=["+15551234567"],
+                )
+
+            self.assertEqual(rowid, 1234)
+            saved = json.loads(cursor_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved.get("last_rowid"), 1234)
+            self.assertEqual(saved.get("recipient"), "+15551234567")
+            self.assertEqual(saved.get("handle_ids"), ["+15551234567"])
+
+    def test_ensure_inbound_cursor_seed_reseeds_when_recipient_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            cursor_path = codex_home / "tmp" / "imessage_inbound_cursor.json"
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            cursor_path.write_text(
+                json.dumps(
+                    {
+                        "last_rowid": 500,
+                        "ts": 1,
+                        "recipient": "+15550000000",
+                        "handle_ids": ["+15550000000"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(cp.reply, "_max_rowid", return_value=1234):
+                rowid = cp._ensure_inbound_cursor_seed(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    conn=mock.Mock(spec=sqlite3.Connection),
+                    recipient="+15551234567",
+                    handle_ids=["+15551234567"],
+                )
+
+            self.assertEqual(rowid, 1234)
+            saved = json.loads(cursor_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved.get("last_rowid"), 1234)
+            self.assertEqual(saved.get("recipient"), "+15551234567")
+            self.assertEqual(saved.get("handle_ids"), ["+15551234567"])
+
+    def test_ensure_inbound_cursor_seed_keeps_existing_when_metadata_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            cursor_path = codex_home / "tmp" / "imessage_inbound_cursor.json"
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            cursor_path.write_text(
+                json.dumps(
+                    {
+                        "last_rowid": 500,
+                        "ts": 1,
+                        "recipient": "+15551234567",
+                        "handle_ids": ["+15551234567"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(cp.reply, "_max_rowid") as max_rowid_mock:
+                rowid = cp._ensure_inbound_cursor_seed(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    conn=mock.Mock(spec=sqlite3.Connection),
+                    recipient="+15551234567",
+                    handle_ids=["+15551234567"],
+                )
+
+            self.assertEqual(rowid, 500)
+            max_rowid_mock.assert_not_called()
+
+    def test_extract_notify_context_fields_captures_tmux_socket(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "TMUX_PANE": "%9",
+                "TMUX": "/tmp/tmux-501/default,12345,0",
+                "PWD": "/tmp/project",
+            },
+            clear=True,
+        ):
+            fields = cp._extract_notify_context_fields(  # type: ignore[attr-defined]
+                payload={},
+                params=None,
+            )
+
+        self.assertEqual(fields.get("tmux_pane"), "%9")
+        self.assertEqual(fields.get("tmux_socket"), "/tmp/tmux-501/default")
+        self.assertEqual(fields.get("cwd"), "/tmp/project")
+
+    def test_handle_notify_payload_routes_input_event(self) -> None:
+        payload = {
+            "type": "needs-input",
+            "thread-id": "sid-123",
+            "cwd": "/tmp/project",
+            "call_id": "call-1",
+        }
+        registry: dict[str, object] = {"sessions": {}}
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            with (
+                mock.patch.object(cp, "_load_registry", return_value=registry),
+                mock.patch.object(cp, "_load_message_index", return_value=message_index),
+                mock.patch.object(cp, "_save_registry"),
+                mock.patch.object(cp, "_save_message_index"),
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+                mock.patch("subprocess.Popen") as popen_mock,
+            ):
+                cp._handle_notify_payload(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    payload_text=json.dumps(payload),
+                    dry_run=False,
+                )
+
+        self.assertTrue(any(msg.get("kind") == "needs_input" for msg in sent))
+        self.assertEqual(registry["sessions"]["sid-123"]["awaiting_input"], True)  # type: ignore[index]
+        self.assertEqual(registry["sessions"]["sid-123"]["pending_completion"], True)  # type: ignore[index]
+        popen_mock.assert_not_called()
+
+    def test_handle_notify_payload_completion_accepts_session_id_key(self) -> None:
+        payload = {
+            "type": "agent-turn-complete",
+            "session_id": "sid-123",
+            "last-assistant-message": "done",
+        }
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            with (
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+            ):
+                cp._handle_notify_payload(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    payload_text=json.dumps(payload),
+                    dry_run=False,
+                )
+
+        self.assertTrue(any(msg.get("kind") == "responded" for msg in sent))
+        self.assertTrue(any(msg.get("session_id") == "sid-123" for msg in sent))
+
+    def test_resolve_session_ref_exact_match(self) -> None:
+        registry = {
+            "sessions": {
+                "019c33b4-e0ed-7021-940a-02b1e8147a82": {"alias": "alpha"},
+            }
+        }
+        sid, err = cp._resolve_session_ref(registry=registry, session_ref="019c33b4-e0ed-7021-940a-02b1e8147a82")  # type: ignore[attr-defined]
+        self.assertEqual(sid, "019c33b4-e0ed-7021-940a-02b1e8147a82")
+        self.assertIsNone(err)
+
+    def test_resolve_session_ref_alias(self) -> None:
+        registry = {
+            "sessions": {
+                "019c33b4-e0ed-7021-940a-02b1e8147a82": {"alias": "alpha"},
+            }
+        }
+        sid, err = cp._resolve_session_ref(registry=registry, session_ref="alpha")  # type: ignore[attr-defined]
+        self.assertEqual(sid, "019c33b4-e0ed-7021-940a-02b1e8147a82")
+        self.assertIsNone(err)
+
+    def test_resolve_session_ref_unique_prefix(self) -> None:
+        registry = {
+            "sessions": {
+                "019c33b4-e0ed-7021-940a-02b1e8147a82": {"alias": "alpha"},
+                "019c55aa-e0ed-7021-940a-02b1e8147a81": {"alias": "beta"},
+            }
+        }
+        sid, err = cp._resolve_session_ref(registry=registry, session_ref="019c33b4", min_prefix=6)  # type: ignore[attr-defined]
+        self.assertEqual(sid, "019c33b4-e0ed-7021-940a-02b1e8147a82")
+        self.assertIsNone(err)
+
+    def test_resolve_session_ref_ambiguous_prefix(self) -> None:
+        registry = {
+            "sessions": {
+                "019c33b4-e0ed-7021-940a-02b1e8147a82": {"alias": "alpha"},
+                "019c33b4-1234-7021-940a-02b1e8147a81": {"alias": "beta"},
+            }
+        }
+        sid, err = cp._resolve_session_ref(registry=registry, session_ref="019c33b4", min_prefix=6)  # type: ignore[attr-defined]
+        self.assertIsNone(sid)
+        self.assertIsInstance(err, str)
+        self.assertIn("Ambiguous", err)
+
+    def test_choose_implicit_session_unique_waiting(self) -> None:
+        registry = {
+            "sessions": {
+                "sid1": {"awaiting_input": False, "last_attention_ts": 1},
+                "sid2": {"awaiting_input": True, "last_attention_ts": 2},
+            }
+        }
+        sid, err = cp._choose_implicit_session(registry=registry)  # type: ignore[attr-defined]
+        self.assertEqual(sid, "sid2")
+        self.assertIsNone(err)
+
+    def test_choose_implicit_session_ambiguous(self) -> None:
+        registry = {
+            "sessions": {
+                "sid1": {"awaiting_input": True, "last_attention_ts": 1},
+                "sid2": {"awaiting_input": True, "last_attention_ts": 2},
+            }
+        }
+        sid, err = cp._choose_implicit_session(registry=registry)  # type: ignore[attr-defined]
+        self.assertIsNone(sid)
+        self.assertIsInstance(err, str)
+        self.assertIn("Ambiguous", err)
+
+    def test_dispatch_prompt_prefers_tmux(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_called_once_with(pane="%9", prompt="continue")
+        resume_mock.assert_not_called()
+
+    def test_tmux_discover_codex_pane_for_session_unique_cwd(self) -> None:
+        rec = {"cwd": "/tmp/project"}
+        pane_listing = "\n".join(
+            [
+                "%2\tzsh\t/tmp/project",
+                "%3\tcodex-aarch64-a\t/tmp/other",
+                "%9\tcodex\t/tmp/project",
+            ]
+        )
+
+        with mock.patch(
+            "subprocess.run",
+            return_value=mock.Mock(returncode=0, stdout=pane_listing),
+        ):
+            pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
+                session_rec=rec,
+                tmux_socket="/tmp/tmux-501/default",
+            )
+
+        self.assertEqual(pane, "%9")
+        self.assertEqual(socket, "/tmp/tmux-501/default")
+
+    def test_tmux_discover_codex_pane_for_session_uses_session_id_when_cwd_ambiguous(self) -> None:
+        sid = "019c652e-11a2-7a90-9d30-da780acb95c8"
+        rec = {"cwd": "/Users/testuser"}
+        pane_listing = "\n".join(
+            [
+                "%0\tcodex-aarch64-a\t/Users/testuser",
+                "%2\tcodex-aarch64-a\t/Users/testuser",
+            ]
+        )
+
+        with mock.patch(
+            "subprocess.run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout=pane_listing),
+                mock.Mock(returncode=0, stdout=f"... {sid} ..."),
+                mock.Mock(returncode=0, stdout="... some other session ..."),
+            ],
+        ):
+            pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
+                session_rec=rec,
+                session_id=sid,
+                tmux_socket="/tmp/tmux-501/default",
+            )
+
+        self.assertEqual(pane, "%0")
+        self.assertEqual(socket, "/tmp/tmux-501/default")
+
+    def test_dispatch_prompt_discovers_tmux_pane_when_missing(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        discover_mock = mock.Mock(return_value=("%12", "/tmp/tmux-501/default"))
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", discover_mock),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        self.assertEqual(rec.get("tmux_pane"), "%12")
+        self.assertEqual(rec.get("tmux_socket"), "/tmp/tmux-501/default")
+        discover_mock.assert_called_once_with(
+            session_rec=rec,
+            session_id=sid,
+            tmux_socket=None,
+        )
+        tmux_send_mock.assert_called_once_with(
+            pane="%12",
+            prompt="continue",
+            tmux_socket="/tmp/tmux-501/default",
+        )
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_tmux_stale_pane_discovers_replacement(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%4",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=("%12", None)),
+            mock.patch.object(cp, "_tmux_pane_exists", side_effect=[False, True]),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        self.assertEqual(rec.get("tmux_pane"), "%12")
+        tmux_send_mock.assert_called_once_with(pane="%12", prompt="continue")
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_treats_mismatched_pane_context_as_stale(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=False, create=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=(None, None)),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux_stale")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_not_called()
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_prefers_tmux_with_socket(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "tmux_socket": "/tmp/tmux-501/default",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_called_once_with(
+            pane="%9",
+            prompt="continue",
+            tmux_socket="/tmp/tmux-501/default",
+        )
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_falls_back_to_resume(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=False),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "resume")
+        self.assertEqual(response, "ok")
+        resume_mock.assert_called_once()
+
+    def test_dispatch_prompt_tmux_send_failure_does_not_fallback(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=False) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux_failed")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_called_once_with(pane="%9", prompt="continue")
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_tmux_no_ack_is_unconfirmed_but_not_fallback(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+        submit_keys: list[str] = []
+
+        def _capture_submit(cmd: list[str], **kwargs: object) -> mock.Mock:
+            if "send-keys" in cmd and "-l" not in cmd:
+                submit_keys.append(str(cmd[-1]))
+            return mock.Mock(returncode=1)
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value=None),
+            mock.patch("subprocess.run", side_effect=_capture_submit),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux_unconfirmed")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_called_once_with(pane="%9", prompt="continue")
+        resume_mock.assert_not_called()
+        self.assertEqual(submit_keys, ["C-m", "Enter"])
+
+    def test_dispatch_prompt_tmux_stale_pane_returns_tmux_stale(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%4",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=False, create=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=(None, None)),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "tmux_stale")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_not_called()
+        resume_mock.assert_not_called()
+
+    def test_process_inbound_replies_tmux_stale_falls_back_and_clears_mapping_when_strict_disabled(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "tmux_pane": "%4",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_stale", None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertEqual(registry["sessions"][sid].get("tmux_pane"), "")
+        self.assertTrue(any(m.get("kind") == "responded" and m.get("text") == "fallback response" for m in sent))
+        resume_mock.assert_called_once_with(
+            session_id=sid,
+            cwd="/tmp/project",
+            prompt="continue",
+            codex_home=Path("/tmp/codex-home"),
+            timeout_s=None,
+        )
+
+    def test_process_inbound_replies_recovers_missing_session_record_before_dispatch(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        session_path = f"/tmp/sessions/{sid}.jsonl"
+        registry = {"sessions": {}}
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _dispatch_with_recovery(**kwargs: object):
+            rec = kwargs.get("session_rec")
+            if isinstance(rec, dict) and rec.get("session_path") == session_path:
+                return "tmux", None
+            return "tmux_stale", None
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_disk",
+                return_value={"session_path": session_path, "cwd": "/tmp/project"},
+                create=True,
+            ),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", side_effect=_dispatch_with_recovery),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertTrue(any(m.get("kind") == "accepted" for m in sent))
+
+    def test_process_inbound_replies_tmux_failed_falls_back_when_strict_disabled(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "tmux_pane": "%4",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_failed", None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertTrue(any(m.get("kind") == "responded" and m.get("text") == "fallback response" for m in sent))
+        resume_mock.assert_called_once_with(
+            session_id=sid,
+            cwd="/tmp/project",
+            prompt="continue",
+            codex_home=Path("/tmp/codex-home"),
+            timeout_s=None,
+        )
+
+    def test_process_inbound_replies_tmux_stale_strict_reports_error_without_fallback(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "tmux_pane": "%4",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_stale", None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertEqual(registry["sessions"][sid].get("tmux_pane"), "")
+        self.assertTrue(any(m.get("kind") == "error" and "strict tmux routing" in str(m.get("text", "")).lower() for m in sent))
+        self.assertFalse(any(m.get("kind") == "responded" for m in sent))
+        resume_mock.assert_not_called()
+
+    def test_process_inbound_replies_tmux_failed_strict_reports_error_without_fallback(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "tmux_pane": "%4",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_failed", None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertTrue(any(m.get("kind") == "error" and "strict tmux routing" in str(m.get("text", "")).lower() for m in sent))
+        self.assertFalse(any(m.get("kind") == "responded" for m in sent))
+        resume_mock.assert_not_called()
+
+    def test_create_new_session_in_tmux_uses_session_file_when_command_name_differs(self) -> None:
+        created = Path("/tmp/codex/sessions/rollout-1.jsonl")
+
+        with (
+            mock.patch.object(cp, "_find_all_session_files", return_value=[]),
+            mock.patch.object(cp, "_tmux_ensure_active_session", return_value=("agent", None)),
+            mock.patch.object(cp, "_tmux_start_codex_window", return_value=("%4", "agent-session-000001", None)),
+            mock.patch.object(cp, "_tmux_wait_for_pane_command", return_value=False),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as send_prompt_mock,
+            mock.patch.object(cp, "_wait_for_new_session_file", return_value=created),
+            mock.patch.object(cp.outbound, "_read_session_id", return_value="sid-123"),
+        ):
+            sid, session_path, pane, err = cp._create_new_session_in_tmux(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                prompt="continue",
+                cwd="/tmp/project",
+            )
+
+        self.assertEqual(sid, "sid-123")
+        self.assertEqual(session_path, str(created))
+        self.assertEqual(pane, "%4")
+        self.assertIsNone(err)
+        send_prompt_mock.assert_called_once_with(pane="%4", prompt="continue")
+
+    def test_create_new_session_in_tmux_reports_session_file_failure_not_command_failure(self) -> None:
+        with (
+            mock.patch.object(cp, "_find_all_session_files", side_effect=[[], []]),
+            mock.patch.object(cp, "_tmux_ensure_active_session", return_value=("agent", None)),
+            mock.patch.object(cp, "_tmux_start_codex_window", return_value=("%4", "agent-session-000001", None)),
+            mock.patch.object(cp, "_tmux_wait_for_pane_command", return_value=False),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True),
+            mock.patch.object(cp, "_wait_for_new_session_file", return_value=None),
+        ):
+            sid, session_path, pane, err = cp._create_new_session_in_tmux(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                prompt="continue",
+                cwd="/tmp/project",
+            )
+
+        self.assertIsNone(sid)
+        self.assertIsNone(session_path)
+        self.assertEqual(pane, "%4")
+        self.assertIsInstance(err, str)
+        self.assertIn("could not locate session file", err or "")
+
+    def test_create_new_session_in_tmux_passes_label_to_window_creation(self) -> None:
+        created = Path("/tmp/codex/sessions/rollout-1.jsonl")
+
+        with (
+            mock.patch.object(cp, "_find_all_session_files", return_value=[]),
+            mock.patch.object(cp, "_tmux_ensure_active_session", return_value=("agent", None)),
+            mock.patch.object(cp, "_tmux_start_codex_window", return_value=("%4", "agent-bugfix-120102", None)) as window_mock,
+            mock.patch.object(cp, "_tmux_wait_for_pane_command", return_value=False),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True),
+            mock.patch.object(cp, "_wait_for_new_session_file", return_value=created),
+            mock.patch.object(cp.outbound, "_read_session_id", return_value="sid-123"),
+        ):
+            sid, session_path, pane, err = cp._create_new_session_in_tmux(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                prompt="continue",
+                cwd="/tmp/project",
+                label="bugfix",
+            )
+
+        self.assertEqual(sid, "sid-123")
+        self.assertEqual(session_path, str(created))
+        self.assertEqual(pane, "%4")
+        self.assertIsNone(err)
+        window_mock.assert_called_once_with(session_name="agent", cwd="/tmp/project", label="bugfix")
+
+    def test_process_inbound_replies_auto_create_uses_resume_ref_as_window_label(self) -> None:
+        registry: dict[str, object] = {"sessions": {}}
+        message_index: dict[str, object] = {}
+        captured: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _fake_create_new_session_in_tmux(**kwargs: object):
+            captured.update(kwargs)
+            return "sid-123", "/tmp/sessions/sid-123.jsonl", "%9", None
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "@bugfix continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_ref", return_value=(None, "Session not found.")),
+            mock.patch.object(cp, "_default_new_session_cwd", return_value="/tmp/project"),
+            mock.patch.object(cp, "_create_new_session_in_tmux", side_effect=_fake_create_new_session_in_tmux),
+            mock.patch.object(cp.outbound, "_read_session_cwd", return_value="/tmp/project"),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertEqual(captured.get("label"), "bugfix")
+        self.assertEqual(captured.get("cwd"), "/tmp/project")
+        self.assertIn("sid-123", registry.get("sessions", {}))
+        self.assertTrue(any(msg.get("kind") == "accepted" for msg in sent))
+
+    def test_rewrite_numeric_choice_prompt_single_question(self) -> None:
+        rec = {
+            "pending_request_user_input": {
+                "questions": [
+                    {
+                        "id": "ui_scope",
+                        "question": "Which UI should this optimization plan target as the primary scope?",
+                        "options": [
+                            {"label": "CaptureSetup sticky pane (Recommended)"},
+                            {"label": "IntentForm preview section"},
+                            {"label": "Both surfaces"},
+                            {"label": "None of the above"},
+                        ],
+                    }
+                ]
+            }
+        }
+
+        rewritten, err = cp._rewrite_numeric_choice_prompt(  # type: ignore[attr-defined]
+            prompt="1",
+            session_rec=rec,
+        )
+
+        self.assertIsNone(err)
+        self.assertIsInstance(rewritten, str)
+        self.assertIn('id "ui_scope"', rewritten or "")
+        self.assertIn('option 1 "CaptureSetup sticky pane (Recommended)"', rewritten or "")
+
+    def test_rewrite_numeric_choice_prompt_rejects_out_of_range(self) -> None:
+        rec = {
+            "pending_request_user_input": {
+                "questions": [
+                    {
+                        "id": "ui_scope",
+                        "question": "Which UI should this optimization plan target as the primary scope?",
+                        "options": [
+                            {"label": "CaptureSetup sticky pane (Recommended)"},
+                            {"label": "IntentForm preview section"},
+                        ],
+                    }
+                ]
+            }
+        }
+
+        rewritten, err = cp._rewrite_numeric_choice_prompt(  # type: ignore[attr-defined]
+            prompt="9",
+            session_rec=rec,
+        )
+
+        self.assertIsNone(rewritten)
+        self.assertIsInstance(err, str)
+        self.assertIn("Valid options: 1-2", err or "")
+
+    def test_main_run_continues_without_chat_db(self) -> None:
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"CODEX_IMESSAGE_TO": "+15551234567", "CODEX_HOME": "/tmp/codex-home"},
+                clear=False,
+            ),
+            mock.patch.object(cp, "_acquire_single_instance_lock", return_value=object()),
+            mock.patch.object(cp, "_load_outbound_cursor", return_value=({}, {})),
+            mock.patch.object(cp, "_open_chat_db", return_value=None) as open_db_mock,
+            mock.patch.object(cp, "_process_outbound", return_value=({}, {})) as process_outbound_mock,
+            mock.patch.object(cp, "_save_outbound_cursor"),
+            mock.patch.object(cp, "_process_inbound_replies") as inbound_mock,
+            mock.patch.object(cp, "_save_inbound_cursor") as save_inbound_mock,
+            mock.patch("time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            rc = cp.main(["run", "--poll", "0.01"])
+
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(open_db_mock.call_count, 1)
+        process_outbound_mock.assert_called_once()
+        inbound_mock.assert_not_called()
+        save_inbound_mock.assert_not_called()
+
+    def test_main_run_retries_chat_db_attach(self) -> None:
+        fake_conn = mock.Mock(spec=sqlite3.Connection)
+
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {
+                    "CODEX_IMESSAGE_TO": "+15551234567",
+                    "CODEX_HOME": "/tmp/codex-home",
+                    "CODEX_IMESSAGE_INBOUND_RETRY_S": "0",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_acquire_single_instance_lock", return_value=object()),
+            mock.patch.object(cp, "_load_outbound_cursor", return_value=({}, {})),
+            mock.patch.object(cp, "_open_chat_db", side_effect=[None, fake_conn]) as open_db_mock,
+            mock.patch.object(cp, "_ensure_inbound_cursor_seed", return_value=11) as seed_mock,
+            mock.patch.object(cp, "_process_outbound", return_value=({}, {})),
+            mock.patch.object(cp, "_save_outbound_cursor"),
+            mock.patch.object(cp, "_process_inbound_replies", return_value=12) as inbound_mock,
+            mock.patch.object(cp, "_save_inbound_cursor") as save_inbound_mock,
+            mock.patch("time.sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            rc = cp.main(["run", "--poll", "0.01"])
+
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(open_db_mock.call_count, 2)
+        seed_mock.assert_called_once()
+        self.assertGreaterEqual(inbound_mock.call_count, 1)
+        self.assertGreaterEqual(save_inbound_mock.call_count, 1)
+
+    def test_main_run_seeds_inbound_cursor_when_chat_db_is_ready_at_startup(self) -> None:
+        fake_conn = mock.Mock(spec=sqlite3.Connection)
+
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {
+                    "CODEX_IMESSAGE_TO": "+15551234567",
+                    "CODEX_HOME": "/tmp/codex-home",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_acquire_single_instance_lock", return_value=object()),
+            mock.patch.object(cp, "_load_outbound_cursor", return_value=({}, {})),
+            mock.patch.object(cp, "_open_chat_db", return_value=fake_conn),
+            mock.patch.object(cp, "_ensure_inbound_cursor_seed", return_value=42) as seed_mock,
+            mock.patch.object(cp, "_process_outbound", return_value=({}, {})),
+            mock.patch.object(cp, "_save_outbound_cursor"),
+            mock.patch.object(cp, "_process_inbound_replies", return_value=43) as inbound_mock,
+            mock.patch.object(cp, "_save_inbound_cursor"),
+            mock.patch("time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            rc = cp.main(["run", "--poll", "0.01"])
+
+        self.assertEqual(rc, 0)
+        seed_mock.assert_called_once()
+        self.assertGreaterEqual(inbound_mock.call_count, 1)
+        self.assertEqual(inbound_mock.call_args.kwargs.get("after_rowid"), 42)
+
+    def test_tmux_ensure_active_session_reuses_agent_when_present(self) -> None:
+        calls: list[list[str]] = []
+
+        def _run(cmd: list[str], **kwargs: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["tmux", "has-session", "-t"]:
+                return mock.Mock(returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with (
+            mock.patch.object(cp, "_resolve_tmux_bin", return_value="tmux"),
+            mock.patch("subprocess.run", side_effect=_run),
+        ):
+            session_name, err = cp._tmux_ensure_active_session(cwd="/tmp/project")  # type: ignore[attr-defined]
+
+        self.assertEqual(session_name, "agent")
+        self.assertIsNone(err)
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "agent"]])
+
+    def test_tmux_ensure_active_session_creates_agent_once_when_missing(self) -> None:
+        calls: list[list[str]] = []
+
+        def _run(cmd: list[str], **kwargs: object) -> mock.Mock:
+            calls.append(cmd)
+            if cmd[:3] == ["tmux", "has-session", "-t"]:
+                return mock.Mock(returncode=1)
+            if cmd[:2] == ["tmux", "new-session"]:
+                return mock.Mock(returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with (
+            mock.patch.object(cp, "_resolve_tmux_bin", return_value="tmux"),
+            mock.patch("subprocess.run", side_effect=_run),
+        ):
+            session_name, err = cp._tmux_ensure_active_session(cwd="/tmp/project")  # type: ignore[attr-defined]
+
+        self.assertEqual(session_name, "agent")
+        self.assertIsNone(err)
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "agent"], ["tmux", "new-session", "-d", "-s", "agent", "-c", "/tmp/project"]])
+
+    def test_tmux_start_codex_window_uses_label_in_window_name(self) -> None:
+        captured: dict[str, object] = {}
+
+        def _run(cmd: list[str], **kwargs: object) -> mock.Mock:
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="%4\n")
+
+        with (
+            mock.patch("subprocess.run", side_effect=_run),
+            mock.patch("time.strftime", return_value="120102"),
+        ):
+            pane, window_name, err = cp._tmux_start_codex_window(  # type: ignore[attr-defined]
+                session_name="agent",
+                cwd="/tmp/project",
+                label="Bug Fix",
+            )
+
+        self.assertIsNone(err)
+        self.assertEqual(pane, "%4")
+        self.assertEqual(window_name, "agent-bug-fix-120102")
+        cmd = captured.get("cmd")
+        self.assertIsInstance(cmd, list)
+        cmd_list = cmd if isinstance(cmd, list) else []
+        self.assertIn("-n", cmd_list)
+        idx = cmd_list.index("-n")
+        self.assertEqual(cmd_list[idx + 1], "agent-bug-fix-120102")
+
+    def test_tmux_start_codex_window_uses_session_fallback_when_label_missing(self) -> None:
+        with (
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="%4\n")),
+            mock.patch("time.strftime", return_value="120102"),
+        ):
+            pane, window_name, err = cp._tmux_start_codex_window(  # type: ignore[attr-defined]
+                session_name="agent",
+                cwd="/tmp/project",
+                label=None,
+            )
+
+        self.assertIsNone(err)
+        self.assertEqual(pane, "%4")
+        self.assertEqual(window_name, "agent-session-120102")
+
+    def test_tmux_start_codex_window_uses_configured_codex_bin(self) -> None:
+        captured: dict[str, object] = {}
+
+        def _run(cmd: list[str], **kwargs: object) -> mock.Mock:
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="%4\n")
+
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"CODEX_IMESSAGE_CODEX_BIN": "/custom/bin/codex"},
+                clear=False,
+            ),
+            mock.patch("subprocess.run", side_effect=_run),
+            mock.patch("time.strftime", return_value="120102"),
+        ):
+            pane, window_name, err = cp._tmux_start_codex_window(  # type: ignore[attr-defined]
+                session_name="agent",
+                cwd="/tmp/project",
+                label=None,
+            )
+
+        self.assertIsNone(err)
+        self.assertEqual(pane, "%4")
+        self.assertEqual(window_name, "agent-session-120102")
+        cmd = captured.get("cmd")
+        self.assertIsInstance(cmd, list)
+        cmd_list = cmd if isinstance(cmd, list) else []
+        self.assertGreaterEqual(len(cmd_list), 1)
+        launch_cmd = cmd_list[-1]
+        self.assertIsInstance(launch_cmd, str)
+        self.assertIn("/custom/bin/codex", str(launch_cmd))
+
+    def test_chat_db_path_falls_back_to_latest_backup_when_primary_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            backup_a = home / "Library" / "Messages" / "db-backups" / "20260215-010101"
+            backup_b = home / "Library" / "Messages" / "db-backups" / "20260216-020202"
+            backup_a.mkdir(parents=True, exist_ok=True)
+            backup_b.mkdir(parents=True, exist_ok=True)
+            chat_a = backup_a / "chat.db"
+            chat_b = backup_b / "chat.db"
+            chat_a.write_text("", encoding="utf-8")
+            chat_b.write_text("", encoding="utf-8")
+            chat_a.touch()
+            chat_b.touch()
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.dict(cp.os.environ, {}, clear=True),
+            ):
+                resolved = cp._chat_db_path(codex_home=Path("/tmp/codex-home"))  # type: ignore[attr-defined]
+
+        self.assertEqual(resolved, chat_b)
+
+    def test_doctor_report_uses_backup_chat_db_when_primary_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            backup = home / "Library" / "Messages" / "db-backups" / "20260216-020202"
+            backup.mkdir(parents=True, exist_ok=True)
+            chat_db = backup / "chat.db"
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.dict(cp.os.environ, {}, clear=True),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=Path("/tmp/codex-home"),
+                    recipient="+15551234567",
+                )
+
+        chat_info = report.get("chat_db")
+        self.assertIsInstance(chat_info, dict)
+        self.assertEqual((chat_info or {}).get("path"), str(chat_db))
+        self.assertEqual((chat_info or {}).get("readable"), True)
+
+    def test_doctor_report_includes_launchd_runtime_targets_from_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            launchagents = home / "Library" / "LaunchAgents"
+            launchagents.mkdir(parents=True, exist_ok=True)
+            runtime_python = (
+                home
+                / "Applications"
+                / "Codex iMessage Python.app"
+                / "Contents"
+                / "MacOS"
+                / "Python"
+            )
+            plist_path = launchagents / "com.codex.imessage-control-plane.plist"
+            plist_path.write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": "com.codex.imessage-control-plane",
+                        "ProgramArguments": [str(runtime_python), "/tmp/codex_imessage_control_plane.py", "run"],
+                        "EnvironmentVariables": {"CODEX_IMESSAGE_TO": "+15551234567"},
+                    },
+                    sort_keys=False,
+                )
+            )
+            chat_db = codex_home / "tmp" / "chat.db"
+            chat_db.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient=None,
+                )
+
+        launchd = report.get("launchd", {})
+        self.assertEqual((launchd or {}).get("runtime_python"), str(runtime_python))
+        self.assertEqual(
+            (launchd or {}).get("permission_app"),
+            str(home / "Applications" / "Codex iMessage Python.app"),
+        )
+
+    def test_drain_fallback_queue_requeues_unsent_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            queue_path = codex_home / "tmp" / "imessage_queue.jsonl"
+            queue_path.parent.mkdir(parents=True, exist_ok=True)
+            queue_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"ts": 1, "to": "+15551234567", "text": "first"}),
+                        json.dumps({"ts": 2, "to": "+15551234567", "text": "second"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(cp.outbound, "_send_imessage", side_effect=[True, False]) as send_mock:
+                stats = cp._drain_fallback_queue(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    dry_run=False,
+                    max_items=10,
+                )
+            remaining = queue_path.read_text(encoding="utf-8").strip().splitlines()
+
+        self.assertEqual(stats.get("attempted"), 2)
+        self.assertEqual(stats.get("sent"), 1)
+        self.assertEqual(stats.get("retained"), 1)
+        self.assertEqual(send_mock.call_count, 2)
+
+        self.assertEqual(len(remaining), 1)
+        event = json.loads(remaining[0])
+        self.assertEqual(event.get("text"), "second")
+
+    def test_doctor_report_ignores_disabled_warning_if_restored_after(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            tmp_dir = codex_home / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            err_log = tmp_dir / "launchd.err.log"
+            err_log.write_text(
+                "\n".join(
+                    [
+                        "[imessage-control-plane] inbound disabled: cannot open chat.db",
+                        "[imessage-control-plane] inbound chat.db access restored.",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            chat_db = tmp_dir / "chat.db"
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,
+                    {
+                        "CODEX_IMESSAGE_LAUNCHD_ERR_LOG": str(err_log),
+                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        self.assertEqual(report["launchd"]["inbound_warning"], False)  # type: ignore[index]
+        self.assertNotIn(  # type: ignore[arg-type]
+            "launchd reports inbound disabled (check chat.db permissions)",
+            report.get("issues", []),
+        )
+
+    def test_doctor_report_flags_warning_when_disabled_is_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            tmp_dir = codex_home / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            err_log = tmp_dir / "launchd.err.log"
+            err_log.write_text(
+                "\n".join(
+                    [
+                        "[imessage-control-plane] inbound chat.db access restored.",
+                        "[imessage-control-plane] inbound disabled: cannot open chat.db",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            chat_db = tmp_dir / "chat.db"
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,
+                    {
+                        "CODEX_IMESSAGE_LAUNCHD_ERR_LOG": str(err_log),
+                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        self.assertEqual(report["launchd"]["inbound_warning"], True)  # type: ignore[index]
+        self.assertIn(  # type: ignore[arg-type]
+            "launchd reports inbound disabled (check chat.db permissions)",
+            report.get("issues", []),
+        )
+
+    def test_doctor_report_prefers_launchd_restored_status_when_shell_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            with (
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_launchd_inbound_warning_active", return_value=False),
+                mock.patch.object(cp, "_launchd_inbound_restored_active", return_value=True),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+                mock.patch.object(
+                    cp,
+                    "_chat_db_access_status",
+                    return_value=(Path("/tmp/chat.db"), False, "OperationalError: unable to open database file"),
+                ),
+                mock.patch.object(
+                    cp,
+                    "_chat_db_access_status_for_runtime",
+                    return_value=(Path("/tmp/chat.db"), False, "OperationalError: unable to open database file"),
+                ),
+                mock.patch.object(
+                    cp,
+                    "_queue_stats",
+                    return_value={
+                        "path": "/tmp/imessage_queue.jsonl",
+                        "exists": False,
+                        "size_bytes": 0,
+                        "lines": 0,
+                        "latest_ts": None,
+                    },
+                ),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        chat_info = report.get("chat_db")
+        self.assertIsInstance(chat_info, dict)
+        self.assertEqual((chat_info or {}).get("readable"), True)
+        self.assertEqual((chat_info or {}).get("source"), "launchd_log")
+        self.assertNotIn(  # type: ignore[arg-type]
+            "chat.db unreadable for inbound replies",
+            report.get("issues", []),
+        )
+
+    def test_doctor_report_keeps_chat_db_unreadable_when_restored_not_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            with (
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_launchd_inbound_warning_active", return_value=False),
+                mock.patch.object(cp, "_launchd_inbound_restored_active", return_value=False),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+                mock.patch.object(
+                    cp,
+                    "_chat_db_access_status",
+                    return_value=(Path("/tmp/chat.db"), False, "OperationalError: unable to open database file"),
+                ),
+                mock.patch.object(
+                    cp,
+                    "_chat_db_access_status_for_runtime",
+                    return_value=(Path("/tmp/chat.db"), False, "OperationalError: unable to open database file"),
+                ),
+                mock.patch.object(
+                    cp,
+                    "_queue_stats",
+                    return_value={
+                        "path": "/tmp/imessage_queue.jsonl",
+                        "exists": False,
+                        "size_bytes": 0,
+                        "lines": 0,
+                        "latest_ts": None,
+                    },
+                ),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        chat_info = report.get("chat_db")
+        self.assertIsInstance(chat_info, dict)
+        self.assertEqual((chat_info or {}).get("readable"), False)
+        self.assertEqual((chat_info or {}).get("source"), "runtime_probe")
+        self.assertIn(  # type: ignore[arg-type]
+            "chat.db unreadable for inbound replies",
+            report.get("issues", []),
+        )
+
+    def test_doctor_report_flags_notify_hook_when_misscoped(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[notice.model_migrations]",
+                        '"gpt-5.2" = "gpt-5.3-codex"',
+                        'notify = ["bash", "-lc", "echo notify", "--"]',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            chat_db = codex_home / "tmp" / "chat.db"
+            chat_db.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        notify_hook = report.get("notify_hook")
+        self.assertIsInstance(notify_hook, dict)
+        self.assertEqual((notify_hook or {}).get("top_level_present"), False)
+        self.assertEqual((notify_hook or {}).get("mis_scoped_present"), True)
+        self.assertIn(  # type: ignore[arg-type]
+            "notify hook is not configured at top-level in ~/.codex/config.toml",
+            report.get("issues", []),
+        )
+
+    def test_doctor_report_accepts_top_level_notify_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'notify = ["bash", "-lc", "echo notify", "--"]',
+                        "",
+                        "[notice.model_migrations]",
+                        '"gpt-5.2" = "gpt-5.3-codex"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chat_db = codex_home / "tmp" / "chat.db"
+            chat_db.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        notify_hook = report.get("notify_hook")
+        self.assertIsInstance(notify_hook, dict)
+        self.assertEqual((notify_hook or {}).get("top_level_present"), True)
+        self.assertEqual((notify_hook or {}).get("mis_scoped_present"), False)
+        self.assertNotIn(  # type: ignore[arg-type]
+            "notify hook is not configured at top-level in ~/.codex/config.toml",
+            report.get("issues", []),
+        )
+
+    def test_run_setup_notify_hook_rewrites_misscoped_notify_into_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'model = "gpt-5.3-codex"',
+                        "",
+                        "[notice.model_migrations]",
+                        '"gpt-5.2" = "gpt-5.3-codex"',
+                        'notify = ["bash", "-lc", "echo old-1", "--"]',
+                        'notify = ["bash", "-lc", "echo old-2", "--"]',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15555550123",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                )
+
+            self.assertEqual(rc, 0)
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertLess(
+                updated.find("notify = "),
+                updated.find("[notice.model_migrations]"),
+            )
+
+            parsed = cp.tomllib.loads(updated)  # type: ignore[attr-defined]
+            self.assertIsInstance(parsed, dict)
+            notify_val = parsed.get("notify")
+            self.assertIsInstance(notify_val, list)
+            joined = " ".join(notify_val) if isinstance(notify_val, list) else ""
+            self.assertIn("CODEX_IMESSAGE_TO=+15555550123", joined)
+            self.assertIn(str(script_path.resolve()), joined)
+
+            notice = parsed.get("notice")
+            self.assertIsInstance(notice, dict)
+            model_migrations = (notice or {}).get("model_migrations")
+            self.assertIsInstance(model_migrations, dict)
+            self.assertNotIn("notify", model_migrations or {})
+
+    def test_doctor_report_includes_routing_snapshot_and_last_dispatch_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            tmp_dir = codex_home / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            registry_path = tmp_dir / "imessage_session_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "sessions": {},
+                        "aliases": {},
+                        "last_dispatch_error": {
+                            "ts": 1771209000,
+                            "session_id": "sid-123",
+                            "mode": "tmux_failed",
+                            "reason": "ack_timeout",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            chat_db = tmp_dir / "chat.db"
+            with sqlite3.connect(chat_db):
+                pass
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,
+                    {
+                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
+                        "CODEX_IMESSAGE_TMUX_SOCKET": "/tmp/tmux-501/default",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
+                mock.patch.object(cp, "_read_lock_pid", return_value=12345),
+                mock.patch.object(cp, "_is_pid_alive", return_value=True),
+                mock.patch.object(
+                    cp,
+                    "_tmux_active_codex_panes",
+                    return_value={
+                        "socket": "/tmp/tmux-501/default",
+                        "count": 2,
+                        "sample": [{"pane_id": "%1"}, {"pane_id": "%2"}],
+                    },
+                ),
+            ):
+                report = cp._doctor_report(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                )
+
+        routing = report.get("routing", {})
+        self.assertIsInstance(routing, dict)
+        self.assertEqual(routing.get("strict_tmux"), True)
+        self.assertEqual(routing.get("tmux_socket"), "/tmp/tmux-501/default")
+        self.assertEqual((routing.get("active_codex_panes") or {}).get("count"), 2)  # type: ignore[union-attr]
+        self.assertEqual((report.get("state") or {}).get("last_dispatch_error", {}).get("reason"), "ack_timeout")  # type: ignore[union-attr]
+
+    def test_main_doctor_runs_without_recipient(self) -> None:
+        report = {
+            "ok": False,
+            "codex_home": "/tmp/codex-home",
+            "recipient": None,
+            "launchd": {"loaded": False, "label": "com.codex.imessage-control-plane", "detail": "missing"},
+            "lock": {"pid": None, "pid_alive": False, "path": "/tmp/codex-home/tmp/imessage_control_plane.lock"},
+            "chat_db": {"readable": False, "path": "/tmp/chat.db", "error": "permission denied"},
+            "queue": {"lines": 3, "size_bytes": 120, "path": "/tmp/queue.jsonl"},
+            "issues": ["missing recipient (CODEX_IMESSAGE_TO)"],
+        }
+
+        with (
+            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.object(cp, "_doctor_report", return_value=report),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp.main(["doctor"])
+
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("Codex iMessage doctor: DEGRADED", text)
+        self.assertIn("Recipient: (missing)", text)
+
+    def test_main_doctor_prints_launchd_runtime_targets(self) -> None:
+        report = {
+            "ok": True,
+            "codex_home": "/tmp/codex-home",
+            "recipient": "+15551234567",
+            "launchd": {
+                "loaded": True,
+                "label": "com.codex.imessage-control-plane",
+                "detail": "loaded",
+                "runtime_python": "/Users/test/Applications/Codex iMessage Python.app/Contents/MacOS/Python",
+                "permission_app": "/Users/test/Applications/Codex iMessage Python.app",
+            },
+            "lock": {"pid": 123, "pid_alive": True, "path": "/tmp/lock"},
+            "chat_db": {"readable": True, "path": "/tmp/chat.db", "error": None},
+            "queue": {"lines": 0, "size_bytes": 0, "path": "/tmp/queue.jsonl"},
+            "routing": {
+                "strict_tmux": True,
+                "require_session_ref": True,
+                "tmux_socket": "/tmp/tmux",
+                "active_codex_panes": {"count": 1},
+            },
+            "issues": [],
+        }
+        with (
+            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.object(cp, "_doctor_report", return_value=report),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp.main(["doctor"])
+
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("runtime_python:", text)
+        self.assertIn("permission_app:", text)
+
+    def test_main_doctor_json_output(self) -> None:
+        report = {"ok": True, "codex_home": "/tmp/codex-home"}
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                clear=False,
+            ),
+            mock.patch.object(cp, "_doctor_report", return_value=report),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp.main(["doctor", "--json"])
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload.get("ok"), True)
+        self.assertEqual(payload.get("codex_home"), "/tmp/codex-home")
+
+    def test_run_setup_permissions_returns_zero_when_chat_db_already_readable(self) -> None:
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status",
+                return_value=(Path("/tmp/chat.db"), True, None),
+            ),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=10.0,
+                poll_s=0.1,
+                open_settings=False,
+            )
+
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("already granted", text)
+        self.assertIn("Python binary:", text)
+
+    def test_resolve_launchd_runtime_python_prefers_friendly_app_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            home.mkdir(parents=True, exist_ok=True)
+
+            python_bin = root / "opt" / "python" / "bin" / "python3"
+            python_bin.parent.mkdir(parents=True, exist_ok=True)
+            python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python_bin.chmod(0o755)
+
+            source_app = root / "opt" / "python" / "Resources" / "Python.app"
+            source_exec = source_app / "Contents" / "MacOS" / "Python"
+            source_exec.parent.mkdir(parents=True, exist_ok=True)
+            source_exec.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            source_exec.chmod(0o755)
+
+            with mock.patch.object(cp.Path, "home", return_value=home):
+                runtime_python, permission_app, detail = cp._resolve_launchd_runtime_python(  # type: ignore[attr-defined]
+                    python_bin=str(python_bin)
+                )
+
+            expected_app = home / "Applications" / "Codex iMessage Python.app"
+            self.assertEqual(
+                runtime_python,
+                str(expected_app / "Contents" / "MacOS" / "Python"),
+            )
+            self.assertEqual(permission_app, expected_app)
+            self.assertIsNone(detail)
+            self.assertTrue((expected_app / "Contents" / "MacOS" / "Python").exists())
+            self.assertTrue(expected_app.is_symlink())
+            self.assertEqual(expected_app.resolve(), source_app.resolve())
+
+    def test_prepare_friendly_python_app_replaces_existing_copy_with_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            home.mkdir(parents=True, exist_ok=True)
+
+            source_app = root / "opt" / "python" / "Resources" / "Python.app"
+            source_exec = source_app / "Contents" / "MacOS" / "Python"
+            source_exec.parent.mkdir(parents=True, exist_ok=True)
+            source_exec.write_text("source", encoding="utf-8")
+
+            target_app = home / "Applications" / "Codex iMessage Python.app"
+            target_exec = target_app / "Contents" / "MacOS" / "Python"
+            target_exec.parent.mkdir(parents=True, exist_ok=True)
+            target_exec.write_text("stale-copy", encoding="utf-8")
+
+            with mock.patch.object(cp.Path, "home", return_value=home):
+                target_app, detail = cp._prepare_friendly_python_app(  # type: ignore[attr-defined]
+                    source_app=source_app
+                )
+
+            self.assertEqual(
+                target_app,
+                home / "Applications" / "Codex iMessage Python.app",
+            )
+            self.assertIsNone(detail)
+            self.assertTrue(target_app.is_symlink())
+            self.assertEqual(target_app.resolve(), source_app.resolve())
+
+    def test_run_setup_permissions_opens_settings_and_waits_until_readable(self) -> None:
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status",
+                side_effect=[
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), True, None),
+                ],
+            ),
+            mock.patch.object(cp, "_open_full_disk_access_settings", return_value=True) as open_mock,
+            mock.patch.object(cp.time, "sleep") as sleep_mock,
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 0.5]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=True,
+            )
+
+        self.assertEqual(rc, 0)
+        open_mock.assert_called_once()
+        self.assertGreaterEqual(sleep_mock.call_count, 1)
+        self.assertIn("Opened System Settings", out.getvalue())
+        self.assertIn("Full Disk Access confirmed", out.getvalue())
+
+    def test_run_setup_permissions_prefers_app_target_message_when_provided(self) -> None:
+        app_path = Path("/Users/test/Applications/Codex iMessage Python.app")
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status_for_runtime",
+                side_effect=[
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                ],
+            ),
+            mock.patch.object(cp, "_open_full_disk_access_settings", return_value=False),
+            mock.patch.object(cp.time, "sleep"),
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 1.6]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=False,
+                probe_python_bin="/tmp/friendly-python",
+                permission_app_path=app_path,
+            )
+
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("Grant Full Disk Access to this app", text)
+        self.assertIn(str(app_path), text)
+        self.assertIn("System Settings > Privacy & Security > Full Disk Access", text)
+        self.assertIn("Add one of these targets", text)
+
+    def test_run_setup_permissions_opens_settings_after_first_poll_cycle(self) -> None:
+        events: list[str] = []
+        results = iter(
+            [
+                (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                (Path("/tmp/chat.db"), True, None),
+            ]
+        )
+
+        def fake_probe(*, codex_home: Path, runtime_python_bin: str) -> tuple[Path, bool, str | None]:
+            del codex_home, runtime_python_bin
+            events.append("poll")
+            return next(results)
+
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status_for_runtime",
+                side_effect=fake_probe,
+            ) as probe_mock,
+            mock.patch.object(cp, "_open_full_disk_access_settings", side_effect=lambda: events.append("open") or True),
+            mock.patch.object(cp.time, "sleep"),
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 0.3, 0.6]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=True,
+                probe_python_bin="/tmp/friendly-python",
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(probe_mock.call_count, 3)
+        self.assertEqual(events[:3], ["poll", "poll", "open"])
+
+    def test_run_setup_permissions_times_out_when_chat_db_unreadable(self) -> None:
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status",
+                side_effect=[
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                ],
+            ),
+            mock.patch.object(cp, "_open_full_disk_access_settings", return_value=False) as open_mock,
+            mock.patch.object(cp.time, "sleep"),
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 0.6, 1.2]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=True,
+            )
+
+        self.assertEqual(rc, 1)
+        open_mock.assert_called_once()
+        self.assertIn("Timed out waiting for chat.db access", out.getvalue())
+
+    def test_main_setup_permissions_runs_without_recipient(self) -> None:
+        with (
+            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.object(
+                cp,
+                "_launchd_runtime_targets_from_plist",
+                return_value=(None, None),
+            ),
+            mock.patch.object(cp, "_run_setup_permissions", return_value=0) as setup_mock,
+        ):
+            rc = cp.main(
+                [
+                    "setup-permissions",
+                    "--timeout",
+                    "5",
+                    "--poll",
+                    "0.2",
+                    "--no-open",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        setup_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            timeout_s=5.0,
+            poll_s=0.2,
+            open_settings=False,
+        )
+
+    def test_main_setup_notify_hook_uses_new_command(self) -> None:
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                clear=False,
+            ),
+            mock.patch.object(cp, "_run_setup_notify_hook", return_value=0) as setup_mock,
+        ):
+            rc = cp.main(
+                [
+                    "setup-notify-hook",
+                    "--python-bin",
+                    "/usr/bin/python3",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        setup_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            recipient="+15551234567",
+            python_bin="/usr/bin/python3",
+            script_path=Path(cp.__file__).resolve(),  # type: ignore[attr-defined]
+        )
+
+    def test_main_setup_permissions_prefers_launchd_runtime_targets(self) -> None:
+        with (
+            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.object(
+                cp,
+                "_launchd_runtime_targets_from_plist",
+                return_value=(
+                    "/tmp/runtime-python",
+                    "/Users/test/Applications/Codex iMessage Python.app",
+                ),
+            ),
+            mock.patch.object(cp, "_run_setup_permissions", return_value=0) as setup_mock,
+        ):
+            rc = cp.main(
+                [
+                    "setup-permissions",
+                    "--timeout",
+                    "5",
+                    "--poll",
+                    "0.2",
+                    "--no-open",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        setup_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            timeout_s=5.0,
+            poll_s=0.2,
+            open_settings=False,
+            probe_python_bin="/tmp/runtime-python",
+            permission_app_path=Path("/Users/test/Applications/Codex iMessage Python.app"),
+        )
+
+    def test_run_setup_launchd_writes_plist_and_bootstraps(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", return_value=0) as setup_mock,
+                mock.patch.object(
+                    cp,
+                    "_resolve_launchd_runtime_python",
+                    return_value=("/opt/homebrew/bin/python3", None, None),
+                ),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")) as run_mock,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+            self.assertEqual(rc, 0)
+            setup_mock.assert_called_once_with(
+                codex_home=codex_home,
+                timeout_s=15.0,
+                poll_s=0.5,
+                open_settings=False,
+                probe_python_bin="/opt/homebrew/bin/python3",
+                permission_app_path=None,
+            )
+
+            plist_path = home / "Library" / "LaunchAgents" / "com.codex.imessage-control-plane.plist"
+            self.assertTrue(plist_path.exists())
+            with plist_path.open("rb") as f:
+                payload = plistlib.load(f)
+            self.assertEqual(payload.get("Label"), "com.codex.imessage-control-plane")
+            self.assertEqual(payload.get("ProgramArguments", [None])[0], "/opt/homebrew/bin/python3")
+            program_args = payload.get("ProgramArguments", [None, None])
+            self.assertEqual(Path(program_args[1]).resolve(), script_path.resolve())  # type: ignore[index]
+
+            commands = [call.args[0] for call in run_mock.call_args_list]
+            self.assertIn(
+                ["launchctl", "bootstrap", f"gui/{cp.os.getuid()}", str(plist_path)],  # type: ignore[attr-defined]
+                commands,
+            )
+            self.assertIn(
+                ["launchctl", "kickstart", "-k", f"gui/{cp.os.getuid()}/com.codex.imessage-control-plane"],  # type: ignore[attr-defined]
+                commands,
+            )
+
+    def test_run_setup_launchd_requires_recipient(self) -> None:
+        with (
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            mock.patch.object(cp.Path, "home", return_value=Path("/tmp/fake-home")),
+        ):
+            rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                recipient="",
+                label="com.codex.imessage-control-plane",
+                python_bin="/usr/bin/python3",
+                script_path=Path("/tmp/codex_imessage_control_plane.py"),
+                setup_permissions=False,
+                timeout_s=10.0,
+                poll_s=1.0,
+                open_settings=False,
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("CODEX_IMESSAGE_TO is required", out.getvalue())
+
+    def test_run_setup_launchd_enables_service_before_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", return_value=0),
+                mock.patch.object(
+                    cp,
+                    "_resolve_launchd_runtime_python",
+                    return_value=("/opt/homebrew/bin/python3", None, None),
+                ),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")) as run_mock,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+        self.assertEqual(rc, 0)
+        commands = [call.args[0] for call in run_mock.call_args_list]
+        enable_cmd = ["launchctl", "enable", f"gui/{cp.os.getuid()}/com.codex.imessage-control-plane"]  # type: ignore[attr-defined]
+        bootstrap_cmd_prefix = ["launchctl", "bootstrap", f"gui/{cp.os.getuid()}"]  # type: ignore[attr-defined]
+
+        enable_index = next(i for i, cmd in enumerate(commands) if cmd == enable_cmd)
+        bootstrap_index = next(
+            i
+            for i, cmd in enumerate(commands)
+            if len(cmd) >= 3 and cmd[:3] == bootstrap_cmd_prefix
+        )
+        self.assertLess(enable_index, bootstrap_index)
+
+    def test_run_setup_launchd_fails_when_launchd_still_cannot_read_chat_db(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", return_value=0),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")),
+                mock.patch.object(cp, "_launchd_inbound_warning_active", return_value=True),
+                mock.patch.object(cp, "_chat_db_access_status", return_value=(Path("/tmp/chat.db"), True, None)),
+                mock.patch.object(cp.time, "sleep"),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("launchd runtime still cannot read chat.db", text)
+        self.assertIn("Full Disk Access app above (preferred)", text)
+        self.assertIn("System Settings > Privacy & Security > Full Disk Access", text)
+
+    def test_run_setup_launchd_reports_tcc_mismatch_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            permission_app = home / "Applications" / "Codex iMessage Python.app"
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", return_value=0),
+                mock.patch.object(
+                    cp,
+                    "_resolve_launchd_runtime_python",
+                    return_value=("/opt/homebrew/bin/python3", permission_app, None),
+                ),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")),
+                mock.patch.object(cp, "_launchd_inbound_warning_active", return_value=True),
+                mock.patch.object(cp, "_chat_db_access_status", return_value=(Path("/tmp/chat.db"), True, None)),
+                mock.patch.object(cp, "_app_bundle_identifier", return_value="org.python.python"),
+                mock.patch.object(cp, "_tcc_log_has_code_requirement_mismatch", return_value=True),
+                mock.patch.object(cp.time, "sleep"),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("stale TCC code-requirement mismatch", text)
+        self.assertIn("tccutil reset SystemPolicyAllFiles org.python.python", text)
+
+    def test_run_setup_launchd_repair_tcc_recovers_and_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            permission_app = home / "Applications" / "Codex iMessage Python.app"
+
+            with (
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", side_effect=[0, 0]) as setup_mock,
+                mock.patch.object(
+                    cp,
+                    "_resolve_launchd_runtime_python",
+                    return_value=("/opt/homebrew/bin/python3", permission_app, None),
+                ),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")),
+                mock.patch.object(cp, "_launchd_inbound_warning_active", side_effect=[True, False]),
+                mock.patch.object(cp, "_chat_db_access_status", return_value=(Path("/tmp/chat.db"), True, None)),
+                mock.patch.object(cp, "_app_bundle_identifier", return_value="org.python.python"),
+                mock.patch.object(cp, "_reset_tcc_full_disk_access", return_value=(True, None)) as reset_mock,
+                mock.patch.object(cp.time, "sleep"),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                    repair_tcc=True,
+                )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(setup_mock.call_count, 2)
+        reset_mock.assert_called_once_with(bundle_id="org.python.python")
+        self.assertIn("Launchd inbound access verified after TCC repair", out.getvalue())
+
+    def test_main_setup_launchd_uses_new_command(self) -> None:
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                clear=False,
+            ),
+            mock.patch.object(cp, "_run_setup_launchd", return_value=0) as setup_mock,
+        ):
+            rc = cp.main(
+                [
+                    "setup-launchd",
+                    "--label",
+                    "com.codex.imessage-control-plane",
+                    "--python-bin",
+                    "/usr/bin/python3",
+                    "--timeout",
+                    "12",
+                    "--poll",
+                    "0.3",
+                    "--no-open",
+                    "--skip-permissions",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        setup_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            recipient="+15551234567",
+            label="com.codex.imessage-control-plane",
+            python_bin="/usr/bin/python3",
+            script_path=Path(cp.__file__).resolve(),  # type: ignore[attr-defined]
+            setup_permissions=False,
+            timeout_s=12.0,
+            poll_s=0.3,
+            open_settings=False,
+            repair_tcc=False,
+        )
+
+
+
+if __name__ == "__main__":
+    unittest.main()
