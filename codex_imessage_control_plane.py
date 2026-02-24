@@ -3690,6 +3690,58 @@ def _terminal_send_prompt(
     return False, detail
 
 
+def _terminal_send_submit_key(
+    *,
+    terminal_app: str | None,
+    terminal_tty: str | None,
+    terminal_session_id: str | None,
+    session_id: str,
+    submit_key: str,
+) -> tuple[bool, str | None]:
+    app = terminal_app.strip() if isinstance(terminal_app, str) else ""
+    if not app:
+        return False, "terminal_app_missing"
+
+    submit = submit_key.strip().lower() if isinstance(submit_key, str) else ""
+    if submit not in {"enter", "ctrl_j", "cmd_enter"}:
+        submit = "enter"
+
+    script_path = Path(__file__).resolve().parent / "scripts" / "send-terminal-command.applescript"
+    if not script_path.exists():
+        return False, "terminal_script_missing"
+
+    tty_value = terminal_tty.strip() if isinstance(terminal_tty, str) else ""
+    session_token = terminal_session_id.strip() if isinstance(terminal_session_id, str) else ""
+    sid_value = session_id.strip()
+
+    try:
+        proc = subprocess.run(
+            [
+                "osascript",
+                str(script_path),
+                app,
+                tty_value,
+                session_token,
+                sid_value,
+                "",
+                submit,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return False, "terminal_submit_exception"
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    detail = out or err or f"exit={proc.returncode}"
+    if proc.returncode == 0 and out.startswith("OK:"):
+        return True, detail
+    return False, detail
+
+
 def _dispatch_prompt_to_session(
     *,
     target_sid: str,
@@ -3863,7 +3915,39 @@ def _dispatch_prompt_to_session(
                 if observed is not None:
                     session_rec["last_dispatch_reason"] = None
                     return "terminal", None
-                session_rec["last_dispatch_reason"] = "terminal_ack_timeout"
+
+                submit_detail: str | None = None
+                app_name = terminal_app.strip().lower() if isinstance(terminal_app, str) else ""
+                supports_submit_retry = app_name not in {"terminal", "iterm", "iterm2"}
+                for submit_key in ("ctrl_j", "enter"):
+                    if not supports_submit_retry:
+                        break
+                    submit_ok, submit_status = _terminal_send_submit_key(
+                        terminal_app=terminal_app.strip() if isinstance(terminal_app, str) else "",
+                        terminal_tty=terminal_tty.strip() if isinstance(terminal_tty, str) else None,
+                        terminal_session_id=terminal_session_id.strip()
+                        if isinstance(terminal_session_id, str)
+                        else None,
+                        session_id=target_sid,
+                        submit_key=submit_key,
+                    )
+                    if isinstance(submit_status, str) and submit_status.strip():
+                        submit_detail = f"{submit_key}:{submit_status.strip()}"
+                    if not submit_ok:
+                        continue
+
+                    observed = reply._wait_for_new_user_text(
+                        session_path=session_path_obj,
+                        before=before_user_text,
+                        timeout_s=0.75,
+                    )
+                    if observed is not None:
+                        session_rec["last_dispatch_reason"] = None
+                        return "terminal", None
+
+                session_rec["last_dispatch_reason"] = (
+                    f"terminal_ack_timeout ({submit_detail})" if submit_detail else "terminal_ack_timeout"
+                )
                 return "terminal_unconfirmed", None
             session_rec["last_dispatch_reason"] = None
             return "terminal", None

@@ -37,7 +37,27 @@ on _window_matches(titleText, sidToken)
     return false
 end _window_matches
 
-on _try_terminal(ttyTarget, sidToken, inputText)
+on _send_submit_key(submitKey)
+    tell application "System Events"
+        set keyName to my _trim(submitKey)
+        if keyName is "" then set keyName to "enter"
+        if keyName is "enter" then
+            key code 36
+            return
+        end if
+        if keyName is "ctrl_j" then
+            keystroke "j" using {control down}
+            return
+        end if
+        if keyName is "cmd_enter" then
+            key code 36 using {command down}
+            return
+        end if
+        key code 36
+    end tell
+end _send_submit_key
+
+on _try_terminal(ttyTarget, sidToken, inputText, submitKey)
     tell application "Terminal"
         if not running then return "MISS:app-not-running"
         repeat with w in windows
@@ -59,6 +79,7 @@ on _try_terminal(ttyTarget, sidToken, inputText)
                 end if
 
                 if matched then
+                    if inputText is "" then return "MISS:prompt-missing"
                     do script inputText in t
                     return "OK:terminal"
                 end if
@@ -68,7 +89,7 @@ on _try_terminal(ttyTarget, sidToken, inputText)
     return "MISS:no-terminal-match"
 end _try_terminal
 
-on _try_iterm(appName, ttyTarget, sidToken, inputText)
+on _try_iterm(appName, ttyTarget, sidToken, inputText, submitKey)
     tell application appName
         if not running then return "MISS:app-not-running"
         repeat with w in windows
@@ -88,12 +109,13 @@ on _try_iterm(appName, ttyTarget, sidToken, inputText)
                             set c to contents of s as text
                             if sidToken is not "" and my _contains_ci(c, sidToken) then set matched to true
                         end try
-                    end if
+                end if
 
-                    if matched then
-                        tell s to write text inputText
-                        return "OK:iterm"
-                    end if
+                if matched then
+                    if inputText is "" then return "MISS:prompt-missing"
+                    tell s to write text inputText
+                    return "OK:iterm"
+                end if
                 end repeat
             end repeat
         end repeat
@@ -101,7 +123,7 @@ on _try_iterm(appName, ttyTarget, sidToken, inputText)
     return "MISS:no-iterm-match"
 end _try_iterm
 
-on _try_generic(appName, sidToken, inputText)
+on _try_generic(appName, sidToken, inputText, submitKey)
     try
         tell application appName to activate
     on error
@@ -146,39 +168,43 @@ on _try_generic(appName, sidToken, inputText)
             end try
         end if
 
-        keystroke inputText
-        key code 36
+        if inputText is not "" then
+            keystroke inputText
+        end if
+        my _send_submit_key(submitKey)
     end tell
 
     return "OK:generic"
 end _try_generic
 
 on run argv
-    if (count of argv) < 5 then error "Usage: send-terminal-command.applescript <terminal_app> <terminal_tty> <terminal_session_id> <session_id> <prompt_text>" number 64
+    if (count of argv) < 5 then error "Usage: send-terminal-command.applescript <terminal_app> <terminal_tty> <terminal_session_id> <session_id> <prompt_text> [submit_key]" number 64
 
     set terminalApp to my _trim(item 1 of argv)
     set terminalTTY to my _trim(item 2 of argv)
     set _terminalSessionID to my _trim(item 3 of argv)
     set sessionID to my _trim(item 4 of argv)
     set inputText to item 5 of argv
+    set submitKey to ""
+    if (count of argv) > 5 then set submitKey to my _trim(item 6 of argv)
 
     if terminalApp is "" then return "MISS:terminal-app-missing"
-    if inputText is "" then return "MISS:prompt-missing"
+    if inputText is "" and submitKey is "" then return "MISS:prompt-missing"
 
     set sidToken to sessionID
     if (length of sidToken) > 8 then set sidToken to text 1 thru 8 of sidToken
 
     if terminalApp is "Terminal" then
-        return my _try_terminal(terminalTTY, sidToken, inputText)
+        return my _try_terminal(terminalTTY, sidToken, inputText, submitKey)
     end if
 
     if terminalApp is "iTerm2" or terminalApp is "iTerm" then
         try
-            return my _try_iterm("iTerm2", terminalTTY, sidToken, inputText)
+            return my _try_iterm("iTerm2", terminalTTY, sidToken, inputText, submitKey)
         on error
-            return my _try_iterm("iTerm", terminalTTY, sidToken, inputText)
+            return my _try_iterm("iTerm", terminalTTY, sidToken, inputText, submitKey)
         end try
     end if
 
-    return my _try_generic(terminalApp, sidToken, inputText)
+    return my _try_generic(terminalApp, sidToken, inputText, submitKey)
 end run

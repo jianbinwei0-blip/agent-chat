@@ -781,6 +781,38 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         terminal_mock.assert_called_once()
         resume_mock.assert_not_called()
 
+    def test_dispatch_prompt_terminal_ack_timeout_retries_submit_and_recovers(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "terminal_app": "Ghostty",
+            "terminal_tty": "/dev/ttys014",
+            "terminal_session_id": "ghostty:tab-1",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", side_effect=[None, "after"]),
+            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
+            mock.patch.object(cp, "_terminal_send_submit_key", return_value=(True, "OK:ctrl_j"), create=True) as submit_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "terminal")
+        self.assertIsNone(response)
+        terminal_mock.assert_called_once()
+        submit_mock.assert_called_once()
+        resume_mock.assert_not_called()
+
     def test_dispatch_prompt_terminal_failure_falls_back_to_resume(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         rec = {
