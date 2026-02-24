@@ -310,6 +310,61 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertIsInstance(err, str)
         self.assertIn("Ambiguous", err)
 
+    def test_resolve_session_from_reply_context_conflicting_guids_prefers_first_resolved_guid(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid_a = "019c891f-bb63-71d2-ab92-40a574111e9f"
+        sid_b = "019c891f-cfa2-7e43-a60e-df1d683e6fe5"
+        guid_a = "GUID-A"
+        guid_b = "GUID-B"
+
+        with mock.patch.object(
+            cp.reply,
+            "_get_message_text_by_guid",
+            side_effect=[
+                f"[Codex] {sid_a} — responded — t",
+                f"[Codex] {sid_b} — responded — t",
+            ],
+        ):
+            sid, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="Only one session?",
+                reply_to_guid=guid_a,
+                reply_reference_guids=[guid_a, guid_b],
+                registry={"sessions": {sid_a: {}, sid_b: {}}},
+                message_index={"messages": []},
+                require_explicit_ref=True,
+            )
+
+        self.assertEqual(sid, sid_a)
+        self.assertIsNone(err)
+
+    def test_reply_reference_guids_for_row_collects_and_orders_candidates(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE message (
+              ROWID INTEGER PRIMARY KEY,
+              reply_to_guid TEXT,
+              thread_originator_guid TEXT,
+              associated_message_guid TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO message (ROWID, reply_to_guid, thread_originator_guid, associated_message_guid)
+            VALUES (10, 'REPLY', 'THREAD', 'ASSOC')
+            """
+        )
+
+        guids = cp._reply_reference_guids_for_row(  # type: ignore[attr-defined]
+            conn=conn,
+            rowid=10,
+            fallback_guid="THREAD",
+        )
+
+        self.assertEqual(guids, ["THREAD", "REPLY", "ASSOC"])
+
     def test_dispatch_prompt_prefers_tmux(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         rec = {
@@ -387,6 +442,106 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
         self.assertEqual(pane, "%0")
         self.assertEqual(socket, "/tmp/tmux-501/default")
+
+    def test_tmux_pane_matches_session_requires_session_id_hint_when_cwd_ambiguous(self) -> None:
+        sid = "019c652e-11a2-7a90-9d30-da780acb95c8"
+        rec = {"cwd": "/Users/testuser"}
+        with (
+            mock.patch.object(
+                cp,
+                "_tmux_read_pane_context",
+                return_value=("codex-aarch64-a", "/Users/testuser"),
+            ),
+            mock.patch.object(
+                cp,
+                "_tmux_codex_panes_for_cwd",
+                return_value=["%0", "%1"],
+                create=True,
+            ),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=False),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%0",
+                session_rec=rec,
+                session_id=sid,
+            )
+
+        self.assertFalse(matches)
+
+    def test_tmux_pane_matches_session_accepts_session_id_hint_when_cwd_ambiguous(self) -> None:
+        sid = "019c652e-11a2-7a90-9d30-da780acb95c8"
+        rec = {"cwd": "/Users/testuser"}
+        with (
+            mock.patch.object(
+                cp,
+                "_tmux_read_pane_context",
+                return_value=("codex-aarch64-a", "/Users/testuser"),
+            ),
+            mock.patch.object(
+                cp,
+                "_tmux_codex_panes_for_cwd",
+                return_value=["%0", "%1"],
+                create=True,
+            ),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=True),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%0",
+                session_rec=rec,
+                session_id=sid,
+            )
+
+        self.assertTrue(matches)
+
+    def test_tmux_pane_matches_session_keeps_cwd_match_when_unambiguous(self) -> None:
+        sid = "019c652e-11a2-7a90-9d30-da780acb95c8"
+        rec = {"cwd": "/Users/testuser"}
+        with (
+            mock.patch.object(
+                cp,
+                "_tmux_read_pane_context",
+                return_value=("codex-aarch64-a", "/Users/testuser"),
+            ),
+            mock.patch.object(
+                cp,
+                "_tmux_codex_panes_for_cwd",
+                return_value=["%0"],
+                create=True,
+            ),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=False),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%0",
+                session_rec=rec,
+                session_id=sid,
+            )
+
+        self.assertTrue(matches)
+
+    def test_tmux_pane_mentions_session_id_uses_latest_session_id_in_capture(self) -> None:
+        old_sid = "019c891f-cfa2-7e43-a60e-df1d683e6fe5"
+        new_sid = "019c891f-bb63-71d2-ab92-40a574111e9f"
+        pane_capture = (
+            f"[Codex] {old_sid} — responded — 2026-02-23T13:45:12-08:00\\n"
+            "Some output\\n"
+            f"~ · {new_sid} · 6.74M used · gpt-5.3-codex xhigh\\n"
+        )
+
+        with mock.patch(
+            "subprocess.run",
+            return_value=mock.Mock(returncode=0, stdout=pane_capture),
+        ):
+            old_matches = cp._tmux_pane_mentions_session_id(  # type: ignore[attr-defined]
+                pane="%0",
+                session_id=old_sid,
+            )
+            new_matches = cp._tmux_pane_mentions_session_id(  # type: ignore[attr-defined]
+                pane="%0",
+                session_id=new_sid,
+            )
+
+        self.assertFalse(old_matches)
+        self.assertTrue(new_matches)
 
     def test_dispatch_prompt_discovers_tmux_pane_when_missing(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"

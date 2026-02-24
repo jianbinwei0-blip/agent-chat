@@ -890,103 +890,82 @@ def _fetch_new_replies(
     placeholders = ",".join("?" for _ in handle_ids)
     # Prefer only inbound messages (avoid looping on our own outbound "attention" or "CODEX_REPLY" messages).
     # Messages DB schema is not perfectly stable across macOS releases, so we treat this as best-effort.
-    inbound_filter = "AND COALESCE(m.is_from_me, 0) = 0"
-    sql_with_associated = f"""
-      SELECT m.ROWID, m.text, m.attributedBody, m.reply_to_guid, m.associated_message_guid
-      FROM message AS m
-      JOIN handle AS h ON m.handle_id = h.ROWID
-      WHERE m.ROWID > ?
-        AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
-        {inbound_filter}
-        AND h.id IN ({placeholders})
-      ORDER BY m.ROWID ASC
-    """
-    sql_with_associated_no_from_me = f"""
-      SELECT m.ROWID, m.text, m.attributedBody, m.reply_to_guid, m.associated_message_guid
-      FROM message AS m
-      JOIN handle AS h ON m.handle_id = h.ROWID
-      WHERE m.ROWID > ?
-        AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
-        AND h.id IN ({placeholders})
-      ORDER BY m.ROWID ASC
-    """
+    try:
+        cols_raw = conn.execute("PRAGMA table_info(message)").fetchall()
+        cols = {str(row[1]) for row in cols_raw if isinstance(row, (tuple, list)) and len(row) > 1}
+    except Exception:
+        cols = set()
 
-    sql_without_associated = f"""
-      SELECT m.ROWID, m.text, m.attributedBody, m.reply_to_guid
+    has_is_from_me = "is_from_me" in cols
+    has_thread_originator = "thread_originator_guid" in cols
+    has_associated_guid = "associated_message_guid" in cols
+
+    select_cols = ["m.ROWID", "m.text", "m.attributedBody", "m.reply_to_guid"]
+    if has_thread_originator:
+        select_cols.append("m.thread_originator_guid")
+    if has_associated_guid:
+        select_cols.append("m.associated_message_guid")
+
+    inbound_filter = "AND COALESCE(m.is_from_me, 0) = 0" if has_is_from_me else ""
+    sql = f"""
+      SELECT {", ".join(select_cols)}
       FROM message AS m
       JOIN handle AS h ON m.handle_id = h.ROWID
       WHERE m.ROWID > ?
         AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
         {inbound_filter}
-        AND h.id IN ({placeholders})
-      ORDER BY m.ROWID ASC
-    """
-    sql_without_associated_no_from_me = f"""
-      SELECT m.ROWID, m.text, m.attributedBody, m.reply_to_guid
-      FROM message AS m
-      JOIN handle AS h ON m.handle_id = h.ROWID
-      WHERE m.ROWID > ?
-        AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
         AND h.id IN ({placeholders})
       ORDER BY m.ROWID ASC
     """
 
     try:
-        rows: list[tuple[object, ...]] = []
-        has_associated_guid = False
-        try:
-            # First attempt: modern schema (associated guid + is_from_me).
-            cur = conn.execute(sql_with_associated, [after_rowid, *handle_ids])
-            rows = cur.fetchall()
-            has_associated_guid = True
-        except Exception:
-            # Fallback 1: schema might not have associated_message_guid.
-            try:
-                cur = conn.execute(sql_without_associated, [after_rowid, *handle_ids])
-                rows = cur.fetchall()
-                has_associated_guid = False
-            except Exception:
-                # Fallback 2: schema might not have is_from_me. Retry without inbound filtering.
-                try:
-                    cur = conn.execute(sql_with_associated_no_from_me, [after_rowid, *handle_ids])
-                    rows = cur.fetchall()
-                    has_associated_guid = True
-                except Exception:
-                    cur = conn.execute(sql_without_associated_no_from_me, [after_rowid, *handle_ids])
-                    rows = cur.fetchall()
-                    has_associated_guid = False
-
-        out: list[tuple[int, str, str | None]] = []
-        for row in rows:
-            if has_associated_guid:
-                rowid, text, attributed_body, reply_to_guid, associated_guid = row
-                ref_guid = reply_to_guid if reply_to_guid else associated_guid
-            else:
-                rowid, text, attributed_body, ref_guid = row
-
-            if not isinstance(rowid, int):
-                continue
-
-            extracted: str | None = None
-            if isinstance(text, str) and text.strip():
-                extracted = text.strip()
-            else:
-                blob: bytes | None = None
-                if isinstance(attributed_body, memoryview):
-                    blob = attributed_body.tobytes()
-                elif isinstance(attributed_body, (bytes, bytearray)):
-                    blob = bytes(attributed_body)
-                if blob:
-                    extracted = _extract_text_from_attributed_body(blob)
-
-            if extracted:
-                normalized_guid: str | None = None
-                if isinstance(ref_guid, str) and ref_guid.strip():
-                    normalized_guid = ref_guid.strip()
-                out.append((rowid, extracted, normalized_guid))
-        return out
+        rows = conn.execute(sql, [after_rowid, *handle_ids]).fetchall()
     except Exception:
         return []
+
+    out: list[tuple[int, str, str | None]] = []
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) < 4:
+            continue
+
+        rowid = row[0]
+        text = row[1]
+        attributed_body = row[2]
+        reply_to_guid = row[3]
+        idx = 4
+        thread_originator_guid = None
+        if has_thread_originator and len(row) > idx:
+            thread_originator_guid = row[idx]
+            idx += 1
+        associated_guid = None
+        if has_associated_guid and len(row) > idx:
+            associated_guid = row[idx]
+
+        if not isinstance(rowid, int):
+            continue
+
+        extracted: str | None = None
+        if isinstance(text, str) and text.strip():
+            extracted = text.strip()
+        else:
+            blob: bytes | None = None
+            if isinstance(attributed_body, memoryview):
+                blob = attributed_body.tobytes()
+            elif isinstance(attributed_body, (bytes, bytearray)):
+                blob = bytes(attributed_body)
+            if blob:
+                extracted = _extract_text_from_attributed_body(blob)
+
+        if extracted:
+            # Prefer thread origin for threaded replies: this tracks the intended
+            # thread root and is more stable than immediate reply linkage.
+            ref_guid: str | None = None
+            for candidate in (thread_originator_guid, reply_to_guid, associated_guid):
+                if isinstance(candidate, str) and candidate.strip():
+                    ref_guid = candidate.strip()
+                    break
+            out.append((rowid, extracted, ref_guid))
+    return out
 
 
 def _extract_session_id(text: str) -> str | None:

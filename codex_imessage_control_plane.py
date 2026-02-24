@@ -37,6 +37,10 @@ import codex_imessage_outbound_lib as outbound
 import codex_imessage_reply_lib as reply
 
 _MIN_PYTHON_VERSION = (3, 11)
+_SESSION_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_SESSION_STATUS_LINE_UUID_RE = re.compile(
+    r"·\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*·"
+)
 
 
 def _is_supported_python_version(version: tuple[int, int, int]) -> bool:
@@ -3089,10 +3093,54 @@ def _tmux_read_pane_context(
     return (command or None), (pane_path or None)
 
 
+def _tmux_codex_panes_for_cwd(*, cwd: str, tmux_socket: str | None = None) -> list[str]:
+    target_cwd = _normalize_path_for_match(cwd)
+    if not target_cwd:
+        return []
+
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}",
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return []
+
+    if proc.returncode != 0:
+        return []
+
+    matches: list[str] = []
+    for raw in proc.stdout.splitlines():
+        parts = raw.split("\t")
+        if len(parts) < 3:
+            continue
+        pane_id = parts[0].strip()
+        current_cmd = parts[1].strip().lower()
+        current_path = _normalize_path_for_match(parts[2].strip())
+        if not pane_id:
+            continue
+        if "codex" not in current_cmd:
+            continue
+        if current_path != target_cwd:
+            continue
+        matches.append(pane_id)
+    return matches
+
+
 def _tmux_pane_matches_session(
     *,
     pane: str,
     session_rec: dict[str, object],
+    session_id: str | None = None,
     tmux_socket: str | None = None,
 ) -> bool:
     command, pane_path = _tmux_read_pane_context(pane=pane, tmux_socket=tmux_socket)
@@ -3102,12 +3150,37 @@ def _tmux_pane_matches_session(
     rec_cwd = session_rec.get("cwd") if isinstance(session_rec.get("cwd"), str) else None
     target_cwd = _normalize_path_for_match(rec_cwd)
     if not target_cwd:
+        sid = session_id.strip() if isinstance(session_id, str) else ""
+        if sid:
+            return _tmux_pane_mentions_session_id(
+                pane=pane,
+                session_id=sid,
+                tmux_socket=tmux_socket,
+            )
         return True
 
     pane_path_norm = _normalize_path_for_match(pane_path)
     if not pane_path_norm:
         return False
-    return pane_path_norm == target_cwd
+    if pane_path_norm != target_cwd:
+        return False
+
+    peers = _tmux_codex_panes_for_cwd(cwd=target_cwd, tmux_socket=tmux_socket)
+    if len(peers) <= 1:
+        return True
+
+    pane_id = pane.strip()
+    if pane_id not in peers:
+        return False
+
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return False
+    return _tmux_pane_mentions_session_id(
+        pane=pane_id,
+        session_id=sid,
+        tmux_socket=tmux_socket,
+    )
 
 
 def _tmux_pane_mentions_session_id(
@@ -3146,6 +3219,20 @@ def _tmux_pane_mentions_session_id(
     haystack = proc.stdout or ""
     if not haystack:
         return False
+
+    latest_status_sid: str | None = None
+    latest_generic_sid: str | None = None
+    for line in haystack.splitlines():
+        status_match = _SESSION_STATUS_LINE_UUID_RE.search(line)
+        if status_match:
+            latest_status_sid = status_match.group(1)
+        for generic_match in _SESSION_UUID_RE.finditer(line):
+            latest_generic_sid = generic_match.group(0)
+
+    if latest_status_sid:
+        return latest_status_sid.lower() == sid.lower()
+    if latest_generic_sid:
+        return latest_generic_sid.lower() == sid.lower()
     return sid in haystack
 
 
@@ -3298,6 +3385,7 @@ def _dispatch_prompt_to_session(
                     pane_is_valid = _tmux_pane_matches_session(
                         pane=pane_norm,
                         session_rec=session_rec,
+                        session_id=target_sid,
                         tmux_socket=tmux_socket_norm,
                     )
                 if not pane_is_valid:
@@ -3317,6 +3405,7 @@ def _dispatch_prompt_to_session(
                             refreshed_valid = _tmux_pane_matches_session(
                                 pane=pane_norm,
                                 session_rec=session_rec,
+                                session_id=target_sid,
                                 tmux_socket=tmux_socket_norm,
                             )
                         if not refreshed_valid:
@@ -3397,6 +3486,7 @@ def _resolve_session_from_reply_context(
     conn: sqlite3.Connection,
     reply_text: str,
     reply_to_guid: str | None,
+    reply_reference_guids: list[str] | None = None,
     registry: dict[str, object],
     message_index: dict[str, object],
     require_explicit_ref: bool = False,
@@ -3405,15 +3495,34 @@ def _resolve_session_from_reply_context(
     if direct:
         return direct, None
 
+    guid_candidates: list[str] = []
+    if isinstance(reply_reference_guids, list):
+        for value in reply_reference_guids:
+            if isinstance(value, str) and value.strip():
+                normalized = value.strip()
+                if normalized not in guid_candidates:
+                    guid_candidates.append(normalized)
     if isinstance(reply_to_guid, str) and reply_to_guid.strip():
-        replied_text = reply._get_message_text_by_guid(conn=conn, guid=reply_to_guid.strip())
-        if replied_text:
-            sid = reply._extract_session_id(replied_text)
-            if sid:
-                return sid, None
-            by_hash = _lookup_session_by_message_hash(index=message_index, replied_text=replied_text)
-            if by_hash:
-                return by_hash, None
+        normalized_reply_to = reply_to_guid.strip()
+        if normalized_reply_to not in guid_candidates:
+            guid_candidates.append(normalized_reply_to)
+
+    resolved_sids: list[str] = []
+    for guid in guid_candidates:
+        replied_text = reply._get_message_text_by_guid(conn=conn, guid=guid)
+        if not replied_text:
+            continue
+        sid = reply._extract_session_id(replied_text)
+        if sid:
+            if sid not in resolved_sids:
+                resolved_sids.append(sid)
+            continue
+        by_hash = _lookup_session_by_message_hash(index=message_index, replied_text=replied_text)
+        if by_hash and by_hash not in resolved_sids:
+            resolved_sids.append(by_hash)
+
+    if resolved_sids:
+        return resolved_sids[0], None
 
     sid, err = _choose_implicit_session(registry=registry)
     if sid:
@@ -3423,6 +3532,36 @@ def _resolve_session_from_reply_context(
             return None, f"{err} Strict tmux routing requires explicit @<ref> when context is ambiguous."
         return None, "Strict tmux routing requires explicit @<ref> when context is ambiguous."
     return None, err
+
+
+def _reply_reference_guids_for_row(
+    *,
+    conn: sqlite3.Connection,
+    rowid: int,
+    fallback_guid: str | None,
+) -> list[str]:
+    candidates: list[str] = []
+
+    def _add(value: object) -> None:
+        if isinstance(value, str):
+            v = value.strip()
+            if v and v not in candidates:
+                candidates.append(v)
+
+    _add(fallback_guid)
+    try:
+        row = conn.execute(
+            "SELECT thread_originator_guid, reply_to_guid, associated_message_guid FROM message WHERE ROWID = ?",
+            [rowid],
+        ).fetchone()
+    except Exception:
+        row = None
+
+    if isinstance(row, (tuple, list)):
+        for value in row:
+            _add(value)
+
+    return candidates
 
 
 def _recover_session_record_from_disk(
@@ -3804,6 +3943,11 @@ def _process_inbound_replies(
     for rowid, text, reply_to_guid in replies:
         last_rowid = rowid
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
+        reference_guids = _reply_reference_guids_for_row(
+            conn=conn,
+            rowid=rowid,
+            fallback_guid=reply_to_guid,
+        )
 
         if reply._is_attention_message(text):
             continue
@@ -3957,6 +4101,7 @@ def _process_inbound_replies(
                 conn=conn,
                 reply_text=text,
                 reply_to_guid=reply_to_guid,
+                reply_reference_guids=reference_guids,
                 registry=registry,
                 message_index=message_index,
                 require_explicit_ref=(action == "implicit" and require_session_ref),

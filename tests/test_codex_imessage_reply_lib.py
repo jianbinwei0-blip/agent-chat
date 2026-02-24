@@ -358,6 +358,41 @@ class TestCodexIMessageReplyBridge(unittest.TestCase):
 
         self.assertEqual(replies, [(1, "hello", "AAAA-BBBB")])
 
+    def test_fetch_new_replies_prefers_thread_originator_guid(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)")
+        conn.execute(
+            """
+            CREATE TABLE message (
+              ROWID INTEGER PRIMARY KEY,
+              text TEXT,
+              attributedBody BLOB,
+              reply_to_guid TEXT,
+              thread_originator_guid TEXT,
+              associated_message_guid TEXT,
+              handle_id INTEGER,
+              is_from_me INTEGER
+            )
+            """
+        )
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551234567')")
+        conn.execute(
+            """
+            INSERT INTO message (
+              ROWID, text, attributedBody, reply_to_guid, thread_originator_guid, associated_message_guid, handle_id, is_from_me
+            )
+            VALUES (1, 'hello', NULL, 'REPLY-GUID', 'THREAD-GUID', 'ASSOC-GUID', 1, 0)
+            """
+        )
+
+        replies = bridge._fetch_new_replies(  # type: ignore[attr-defined]
+            conn=conn,
+            after_rowid=0,
+            handle_ids=["+15551234567"],
+        )
+
+        self.assertEqual(replies, [(1, "hello", "THREAD-GUID")])
+
     def test_fetch_new_replies_ignores_outbound_is_from_me(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)")
