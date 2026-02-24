@@ -2108,7 +2108,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),
-                mock.patch("sys.stdout", new_callable=io.StringIO),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
             ):
                 rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
                     codex_home=codex_home,
@@ -2137,6 +2137,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             model_migrations = (notice or {}).get("model_migrations")
             self.assertIsInstance(model_migrations, dict)
             self.assertNotIn("notify", model_migrations or {})
+            self.assertIn("Restart Codex to apply notify hook changes.", out.getvalue())
 
     def test_doctor_report_includes_routing_snapshot_and_last_dispatch_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:

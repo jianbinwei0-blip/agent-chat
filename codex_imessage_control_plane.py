@@ -403,6 +403,7 @@ def _run_setup_notify_hook(
     sys.stdout.write(f"Recipient: {recipient_text}\n")
     sys.stdout.write(f"Python binary: {python_text}\n")
     sys.stdout.write(f"Script: {script_abs}\n")
+    sys.stdout.write("Restart Codex to apply notify hook changes.\n")
     return 0
 
 
