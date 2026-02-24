@@ -28,9 +28,11 @@ Non-goals:
 - Codex CLI installed and authenticated
 - Optional but recommended: tmux
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
+- Bundled terminal dispatcher script at `scripts/send-terminal-command.applescript` for non-tmux routing
 
 Privacy/Security permissions required on macOS:
 - `Automation`: allow your terminal/runner (`Terminal`, `iTerm`, etc.) and `osascript` to control `Messages`
+- `Accessibility` (non-tmux routing): allow `osascript` / `System Events` to focus terminal windows when needed
 - `Full Disk Access`: grant the launchd runtime app or Python binary (shown by setup commands) so it can read `~/Library/Messages/chat.db`
 
 ## Quickstart
@@ -192,6 +194,8 @@ When inbound routing is enabled, reply messages support:
 - `CODEX_IMESSAGE_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
 - `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
 - `CODEX_IMESSAGE_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
+- `CODEX_IMESSAGE_ROUTE_VIA_TERMINAL`: route responses to saved terminal targets when available (`1` default)
+- `CODEX_IMESSAGE_TERMINAL_ACK_TIMEOUT_S`: non-tmux dispatch acknowledgement timeout
 - `CODEX_IMESSAGE_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
 - `CODEX_IMESSAGE_AUTO_CREATE_ON_MISSING`: auto-create when no session matches (`1` default)
 - `CODEX_IMESSAGE_LAUNCHD_LABEL`: launchd service label used by `doctor`

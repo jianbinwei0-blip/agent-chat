@@ -180,6 +180,27 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(fields.get("tmux_socket"), "/tmp/tmux-501/default")
         self.assertEqual(fields.get("cwd"), "/tmp/project")
 
+    def test_extract_notify_context_fields_captures_terminal_context(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "TERM_PROGRAM": "iTerm.app",
+                "ITERM_SESSION_ID": "w0t1p2:ABCDEF",
+                "TTY": "/dev/ttys014",
+                "PWD": "/tmp/project",
+            },
+            clear=True,
+        ):
+            fields = cp._extract_notify_context_fields(  # type: ignore[attr-defined]
+                payload={},
+                params=None,
+            )
+
+        self.assertEqual(fields.get("terminal_app"), "iTerm2")
+        self.assertEqual(fields.get("terminal_session_id"), "w0t1p2:ABCDEF")
+        self.assertEqual(fields.get("terminal_tty"), "/dev/ttys014")
+        self.assertEqual(fields.get("cwd"), "/tmp/project")
+
     def test_handle_notify_payload_routes_input_event(self) -> None:
         payload = {
             "type": "needs-input",
@@ -702,6 +723,91 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(response, "ok")
         resume_mock.assert_called_once()
 
+    def test_dispatch_prompt_uses_terminal_when_tmux_is_unavailable(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "terminal_app": "Terminal",
+            "terminal_tty": "/dev/ttys014",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "terminal")
+        self.assertIsNone(response)
+        terminal_mock.assert_called_once()
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_terminal_unconfirmed_does_not_fallback(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "terminal_app": "Terminal",
+            "terminal_tty": "/dev/ttys014",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value=None),
+            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "terminal_unconfirmed")
+        self.assertIsNone(response)
+        terminal_mock.assert_called_once()
+        resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_terminal_failure_falls_back_to_resume(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "terminal_app": "Terminal",
+            "terminal_tty": "/dev/ttys014",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_terminal_send_prompt", return_value=(False, "no-match"), create=True) as terminal_mock,
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "resume")
+        self.assertEqual(response, "ok")
+        terminal_mock.assert_called_once()
+        resume_mock.assert_called_once()
+
     def test_dispatch_prompt_tmux_send_failure_does_not_fallback(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         rec = {
@@ -795,6 +901,83 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         tmux_send_mock.assert_not_called()
         resume_mock.assert_not_called()
 
+    def test_dispatch_prompt_strict_tmux_without_tmux_identity_falls_back_to_resume(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=(None, None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {"CODEX_IMESSAGE_STRICT_TMUX": "1"},
+                clear=False,
+            ),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "resume")
+        self.assertEqual(response, "ok")
+        resume_mock.assert_called_once()
+
+    def test_apply_attention_context_to_session_merges_terminal_fields(self) -> None:
+        sid = "11111111-1111-1111-1111-111111111111"
+        rec: dict[str, object] = {"cwd": "/tmp/project"}
+        attention_index = {
+            sid: {
+                "cwd": "/tmp/project",
+                "terminal_app": "Ghostty",
+                "terminal_tty": "/dev/ttys014",
+            }
+        }
+
+        cp._apply_attention_context_to_session(  # type: ignore[attr-defined]
+            session_id=sid,
+            session_rec=rec,
+            attention_index=attention_index,
+            last_attention_state=None,
+        )
+
+        self.assertEqual(rec.get("terminal_app"), "Ghostty")
+        self.assertEqual(rec.get("terminal_tty"), "/dev/ttys014")
+
+    def test_infer_terminal_context_from_processes_prefers_non_tmux_candidate(self) -> None:
+        rec: dict[str, object] = {"cwd": "/Users/example"}
+        ps_listing = "\n".join(
+            [
+                "23476 ttys001 codex codex",
+                "34554 ttys007 codex codex",
+            ]
+        )
+
+        def _mock_run(cmd: list[str], **kwargs: object):
+            if cmd[:3] == ["ps", "-Ao", "pid=,tty=,comm=,args="]:
+                return mock.Mock(returncode=0, stdout=ps_listing)
+            if cmd[:5] == ["lsof", "-a", "-p", "23476", "-d"]:
+                return mock.Mock(returncode=0, stdout="p23476\nn/Users/example\n")
+            if cmd[:5] == ["lsof", "-a", "-p", "34554", "-d"]:
+                return mock.Mock(returncode=0, stdout="p34554\nn/Users/example\n")
+            if cmd[:3] == ["ps", "eww", "-p"] and cmd[3] == "23476":
+                return mock.Mock(returncode=0, stdout="23476 ... TERM_PROGRAM=tmux TMUX=/private/tmp/tmux-501/default,1,0 ...")
+            if cmd[:3] == ["ps", "eww", "-p"] and cmd[3] == "34554":
+                return mock.Mock(returncode=0, stdout="34554 ... TERM_PROGRAM=ghostty ...")
+            return mock.Mock(returncode=1, stdout="")
+
+        with mock.patch("subprocess.run", side_effect=_mock_run):
+            inferred = cp._infer_terminal_context_from_processes(session_rec=rec)  # type: ignore[attr-defined]
+
+        self.assertEqual(inferred.get("terminal_tty"), "/dev/ttys007")
+        self.assertEqual(inferred.get("terminal_app"), "Ghostty")
+
     def test_process_inbound_replies_tmux_stale_falls_back_and_clears_mapping_when_strict_disabled(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         registry = {
@@ -849,6 +1032,55 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             codex_home=Path("/tmp/codex-home"),
             timeout_s=None,
         )
+
+    def test_process_inbound_replies_terminal_dispatch_reports_accepted_without_resume(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "terminal_app": "Terminal",
+                    "terminal_tty": "/dev/ttys014",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("terminal", None)),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertTrue(any(m.get("kind") == "accepted" and "terminal" in str(m.get("text", "")).lower() for m in sent))
+        self.assertFalse(any(m.get("kind") == "responded" for m in sent))
+        resume_mock.assert_not_called()
 
     def test_process_inbound_replies_recovers_missing_session_record_before_dispatch(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"

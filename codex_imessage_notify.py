@@ -85,6 +85,58 @@ def _normalize_recipient(raw: str) -> str:
     return recipient
 
 
+def _normalize_terminal_app(raw: str | None) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if lowered in {"apple_terminal", "terminal", "terminal.app", "apple terminal"}:
+        return "Terminal"
+    if "iterm" in lowered:
+        return "iTerm2"
+    if "ghostty" in lowered:
+        return "Ghostty"
+    if "warp" in lowered:
+        return "Warp"
+    if value.endswith(".app") and len(value) > 4:
+        return value[:-4]
+    return value
+
+
+def _terminal_session_id_from_env() -> str | None:
+    for key in ("ITERM_SESSION_ID", "TERM_SESSION_ID", "WARP_SESSION_ID", "WEZTERM_PANE", "KITTY_WINDOW_ID"):
+        value = os.environ.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _terminal_tty_from_env() -> str | None:
+    raw = os.environ.get("TTY")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    for fd in (0, 1, 2):
+        try:
+            tty = os.ttyname(fd)
+        except Exception:
+            continue
+        if isinstance(tty, str) and tty.strip():
+            return tty.strip()
+    return None
+
+
+def _tmux_socket_from_env() -> str | None:
+    raw = os.environ.get("TMUX")
+    if not (isinstance(raw, str) and raw.strip()):
+        return None
+    token = raw.split(",", 1)[0].strip()
+    if token:
+        return token
+    return None
+
+
 def _read_last_user_text(history_path: Path) -> str | None:
     try:
         if not history_path.exists():
@@ -574,6 +626,10 @@ def _write_last_attention_state(
     cwd: str | None,
     session_path: str | None,
     tmux_pane: str | None,
+    tmux_socket: str | None,
+    terminal_app: str | None,
+    terminal_session_id: str | None,
+    terminal_tty: str | None,
 ) -> None:
     try:
         state_path = Path(
@@ -591,6 +647,10 @@ def _write_last_attention_state(
             "cwd": cwd,
             "session_path": session_path,
             "tmux_pane": tmux_pane,
+            "tmux_socket": tmux_socket,
+            "terminal_app": terminal_app,
+            "terminal_session_id": terminal_session_id,
+            "terminal_tty": terminal_tty,
         }
 
         tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
@@ -942,6 +1002,10 @@ def main(argv: list[str]) -> int:
             session_path = str(newest)
 
     tmux_pane = os.environ.get("TMUX_PANE")
+    tmux_socket = _tmux_socket_from_env()
+    terminal_app = _normalize_terminal_app(os.environ.get("TERM_PROGRAM"))
+    terminal_session_id = _terminal_session_id_from_env()
+    terminal_tty = _terminal_tty_from_env()
 
     _write_last_attention_state(
         codex_home=codex_home,
@@ -950,6 +1014,10 @@ def main(argv: list[str]) -> int:
         cwd=cwd_full,
         session_path=session_path,
         tmux_pane=tmux_pane,
+        tmux_socket=tmux_socket,
+        terminal_app=terminal_app,
+        terminal_session_id=terminal_session_id,
+        terminal_tty=terminal_tty,
     )
 
     if _is_state_only_notify_mode():
