@@ -28,11 +28,9 @@ Non-goals:
 - Codex CLI installed and authenticated
 - Optional but recommended: tmux
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
-- Bundled terminal dispatcher script at `scripts/send-terminal-command.applescript` for non-tmux routing
 
 Privacy/Security permissions required on macOS:
-- `Automation`: allow your terminal/runner (`Terminal`, `iTerm`, etc.) and `osascript` to control `Messages`
-- `Accessibility` (non-tmux routing): allow `osascript` / `System Events` to focus terminal windows when needed
+- `Automation`: allow the launchd runtime app/Python and `osascript` to control `Messages`
 - `Full Disk Access`: grant the launchd runtime app or Python binary (shown by setup commands) so it can read `~/Library/Messages/chat.db`
 
 ## Quickstart
@@ -144,8 +142,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - look for: `Failed to match existing code requirement for subject org.python.python`
 - Reset stale approvals, then grant again in System Settings:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
-  - `tccutil reset SystemPolicyAllFiles com.mitchellh.ghostty`
-  - re-enable FDA for `~/Applications/Codex iMessage Python.app` (and terminal app if needed)
+  - re-enable FDA for `~/Applications/Codex iMessage Python.app`
   - re-run `setup-launchd` and `doctor`
 - Shortcut:
   - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
@@ -194,8 +191,6 @@ When inbound routing is enabled, reply messages support:
 - `CODEX_IMESSAGE_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
 - `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
 - `CODEX_IMESSAGE_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
-- `CODEX_IMESSAGE_ROUTE_VIA_TERMINAL`: route responses to saved terminal targets when available (`1` default)
-- `CODEX_IMESSAGE_TERMINAL_ACK_TIMEOUT_S`: non-tmux dispatch acknowledgement timeout
 - `CODEX_IMESSAGE_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
 - `CODEX_IMESSAGE_AUTO_CREATE_ON_MISSING`: auto-create when no session matches (`1` default)
 - `CODEX_IMESSAGE_LAUNCHD_LABEL`: launchd service label used by `doctor`
@@ -222,7 +217,7 @@ If `setup-launchd` reports that the shell can read `chat.db` but launchd cannot,
 
 Tip: `python3 codex_imessage_control_plane.py doctor` now shows both `runtime_python` and `permission_app` under Launchd so you can grant FDA to the exact runtime target.
 
-When `permission_app` is present (usually `~/Applications/Codex iMessage Python.app`), grant FDA there first; do not grant FDA to Ghostty/Terminal unless that terminal binary is the runtime target shown by `doctor`.
+When `permission_app` is present (usually `~/Applications/Codex iMessage Python.app`), grant FDA there first; do not grant FDA to terminal apps unless that terminal binary is the runtime target shown by `doctor`.
 
 If you are unsure which app to grant, use `doctor` as source of truth:
 - `Launchd.permission_app` (preferred target)

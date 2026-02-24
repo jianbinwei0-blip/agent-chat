@@ -15,7 +15,7 @@ checkout.
 - Codex notify hook wiring to `codex_imessage_control_plane.py notify`
 - integration runtime state under `~/.codex/tmp/imessage_*`
 - integration tmux log (`~/.codex/log/imessage-control-plane-tmux.log`)
-- Full Disk Access TCC grants commonly used by this integration (`org.python.python`, `com.mitchellh.ghostty`)
+- Full Disk Access TCC grants commonly used by this integration (`org.python.python`)
 
 ## One-shot Cleanup
 
@@ -44,7 +44,7 @@ rm -rf "$APP"
 rm -f "$OUT_LOG" "$ERR_LOG"
 rm -f "$TMUX_LOG"
 
-for BUNDLE_ID in org.python.python com.mitchellh.ghostty; do
+for BUNDLE_ID in org.python.python; do
   tccutil reset SystemPolicyAllFiles "$BUNDLE_ID" >/dev/null 2>&1 || true
 done
 
@@ -76,7 +76,7 @@ find "$TMP_DIR" -maxdepth 1 -type f -name 'imessage_queue.jsonl.drain.*' -delete
 
 Note:
 - `tccutil reset` is bundle-id scoped and can affect unrelated workflows that use the same app/runtime.
-- If you still use Python or Ghostty with Full Disk Access elsewhere, re-enable those entries after uninstall.
+- If you still use Python with Full Disk Access elsewhere, re-enable that entry after uninstall.
 
 ## Verify Cleanup
 

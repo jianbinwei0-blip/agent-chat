@@ -88,7 +88,6 @@ _DEFAULT_RESUME_TIMEOUT_S = 120.0
 _DEFAULT_QUEUE_DRAIN_LIMIT = 25
 _DEFAULT_INPUT_NEEDED_TEXT = "Waiting on approval / question / input."
 _DEFAULT_TMUX_ACK_TIMEOUT_S = 2.0
-_DEFAULT_TERMINAL_ACK_TIMEOUT_S = 2.0
 _CHAT_DB_WARN_INTERVAL_S = 300.0
 _DEFAULT_TMUX_NEW_SESSION_NAME = "agent"
 _DEFAULT_TMUX_WINDOW_PREFIX = "agent"
@@ -560,9 +559,6 @@ def _select_attention_context(
         "tmux_pane",
         "tmux_socket",
         "session_path",
-        "terminal_app",
-        "terminal_session_id",
-        "terminal_tty",
     )
     out: dict[str, str] = {}
 
@@ -2197,6 +2193,15 @@ def _choose_implicit_session(*, registry: dict[str, object]) -> tuple[str | None
     return None, "No session is currently awaiting input. Use @<ref> ... or new <label>: ..."
 
 
+def _session_is_waiting_for_input(*, session_rec: dict[str, object] | None) -> bool:
+    if not isinstance(session_rec, dict):
+        return False
+    if session_rec.get("awaiting_input") is True:
+        return True
+    pending = session_rec.get("pending_request_user_input")
+    return isinstance(pending, dict) and bool(pending)
+
+
 def _normalize_message_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
@@ -2265,6 +2270,34 @@ def _lookup_session_by_message_hash(
         if rec.get("hash") != h:
             continue
         sid = rec.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+    return None
+
+
+def _session_refs_from_text(text: str) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return []
+    out: list[str] = []
+    for match in re.finditer(r"@([0-9a-fA-F]{6,32})\b", text):
+        ref = match.group(1).strip().lower()
+        if ref and ref not in out:
+            out.append(ref)
+    return out
+
+
+def _lookup_session_by_text_ref(
+    *,
+    registry: dict[str, object],
+    replied_text: str,
+) -> str | None:
+    refs = _session_refs_from_text(replied_text)
+    for ref in refs:
+        sid, _ = _resolve_session_ref(
+            registry=registry,
+            session_ref=ref,
+            min_prefix=_DEFAULT_MIN_PREFIX,
+        )
         if isinstance(sid, str) and sid.strip():
             return sid.strip()
     return None
@@ -2630,9 +2663,6 @@ def _render_session_status(*, session_id: str, registry: dict[str, object]) -> s
     path = rec.get("session_path") if isinstance(rec.get("session_path"), str) else ""
     pane = rec.get("tmux_pane") if isinstance(rec.get("tmux_pane"), str) else ""
     socket_value = rec.get("tmux_socket") if isinstance(rec.get("tmux_socket"), str) else ""
-    terminal_app = rec.get("terminal_app") if isinstance(rec.get("terminal_app"), str) else ""
-    terminal_session = rec.get("terminal_session_id") if isinstance(rec.get("terminal_session_id"), str) else ""
-    terminal_tty = rec.get("terminal_tty") if isinstance(rec.get("terminal_tty"), str) else ""
 
     lines = [
         f"Session: {session_id}",
@@ -2643,9 +2673,6 @@ def _render_session_status(*, session_id: str, registry: dict[str, object]) -> s
         f"Session path: {path or '-'}",
         f"Tmux pane: {pane or '-'}",
         f"Tmux socket: {socket_value or '-'}",
-        f"Terminal app: {terminal_app or '-'}",
-        f"Terminal session: {terminal_session or '-'}",
-        f"Terminal tty: {terminal_tty or '-'}",
     ]
     return "\n".join(lines)
 
@@ -2699,49 +2726,6 @@ def _extract_session_id_from_notify_payload(payload: dict[str, object]) -> tuple
     return session_id, params
 
 
-def _normalize_terminal_app(*, raw: str | None) -> str | None:
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    if not value:
-        return None
-    lowered = value.lower()
-    if lowered in {"apple_terminal", "terminal", "terminal.app", "apple terminal"}:
-        return "Terminal"
-    if "iterm" in lowered:
-        return "iTerm2"
-    if "ghostty" in lowered:
-        return "Ghostty"
-    if "warp" in lowered:
-        return "Warp"
-    if value.endswith(".app") and len(value) > 4:
-        return value[:-4]
-    return value
-
-
-def _terminal_tty_from_env() -> str | None:
-    raw = os.environ.get("TTY")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-
-    for fd in (0, 1, 2):
-        try:
-            tty = os.ttyname(fd)
-        except Exception:
-            continue
-        if isinstance(tty, str) and tty.strip():
-            return tty.strip()
-    return None
-
-
-def _terminal_session_id_from_env() -> str | None:
-    for key in ("ITERM_SESSION_ID", "TERM_SESSION_ID", "WARP_SESSION_ID", "WEZTERM_PANE", "KITTY_WINDOW_ID"):
-        value = os.environ.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
 def _extract_notify_context_fields(
     *,
     payload: dict[str, object],
@@ -2777,18 +2761,6 @@ def _extract_notify_context_fields(
             session_path = env_session_path.strip()
     if isinstance(session_path, str) and session_path.strip():
         fields["session_path"] = session_path.strip()
-
-    terminal_app = _normalize_terminal_app(raw=os.environ.get("TERM_PROGRAM"))
-    if isinstance(terminal_app, str) and terminal_app.strip():
-        fields["terminal_app"] = terminal_app.strip()
-
-    terminal_session_id = _terminal_session_id_from_env()
-    if isinstance(terminal_session_id, str) and terminal_session_id.strip():
-        fields["terminal_session_id"] = terminal_session_id.strip()
-
-    terminal_tty = _terminal_tty_from_env()
-    if isinstance(terminal_tty, str) and terminal_tty.strip():
-        fields["terminal_tty"] = terminal_tty.strip()
 
     return fields
 
@@ -3497,251 +3469,6 @@ def _tmux_routing_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def _infer_terminal_context_from_processes(*, session_rec: dict[str, object] | None) -> dict[str, str]:
-    if not isinstance(session_rec, dict):
-        return {}
-    cwd_raw = session_rec.get("cwd")
-    target_cwd = _normalize_path_for_match(cwd_raw if isinstance(cwd_raw, str) else None)
-    if not target_cwd:
-        return {}
-
-    try:
-        ps_proc = subprocess.run(
-            ["ps", "-Ao", "pid=,tty=,comm=,args="],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-    except Exception:
-        return {}
-    if ps_proc.returncode != 0:
-        return {}
-
-    candidates: list[tuple[int, str, str | None, bool]] = []
-    for raw_line in ps_proc.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        pid_text, tty_name, comm = parts[:3]
-        args_text = parts[3] if len(parts) > 3 else ""
-        if not pid_text.isdigit():
-            continue
-        if not tty_name or tty_name in {"??", "-"}:
-            continue
-        comm_l = comm.lower()
-        args_l = args_text.lower()
-        if "codex" not in comm_l and "codex" not in args_l:
-            continue
-
-        pid = int(pid_text)
-
-        try:
-            cwd_proc = subprocess.run(
-                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                text=True,
-            )
-        except Exception:
-            continue
-        if cwd_proc.returncode != 0:
-            continue
-        proc_cwd: str | None = None
-        for l in cwd_proc.stdout.splitlines():
-            if l.startswith("n"):
-                proc_cwd = l[1:].strip()
-                break
-        if _normalize_path_for_match(proc_cwd) != target_cwd:
-            continue
-
-        term_program: str | None = None
-        in_tmux = False
-        try:
-            env_proc = subprocess.run(
-                ["ps", "eww", "-p", str(pid)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                text=True,
-            )
-            if env_proc.returncode == 0:
-                env_blob = env_proc.stdout or ""
-                m_term = re.search(r"\bTERM_PROGRAM=([^\s]+)", env_blob)
-                if m_term:
-                    term_program = m_term.group(1).strip()
-                m_tmux = re.search(r"\bTMUX=([^\s]+)", env_blob)
-                in_tmux = bool(m_tmux and m_tmux.group(1).strip())
-        except Exception:
-            pass
-
-        candidates.append((pid, tty_name.strip(), term_program, in_tmux))
-
-    if not candidates:
-        return {}
-
-    non_tmux = [c for c in candidates if not c[3]]
-    chosen: tuple[int, str, str | None, bool] | None = None
-    if len(non_tmux) == 1:
-        chosen = non_tmux[0]
-    elif len(non_tmux) > 1:
-        return {}
-    elif len(candidates) == 1:
-        chosen = candidates[0]
-    else:
-        return {}
-
-    _, tty_name, term_program, _ = chosen
-    out: dict[str, str] = {"terminal_tty": f"/dev/{tty_name}"}
-    normalized = _normalize_terminal_app(raw=term_program)
-    if isinstance(normalized, str) and normalized.strip():
-        out["terminal_app"] = normalized.strip()
-    return out
-
-
-def _terminal_routing_enabled() -> bool:
-    raw = os.environ.get("CODEX_IMESSAGE_ROUTE_VIA_TERMINAL", "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
-def _terminal_ack_timeout_s() -> float:
-    raw = os.environ.get("CODEX_IMESSAGE_TERMINAL_ACK_TIMEOUT_S", "").strip()
-    if not raw:
-        return float(_DEFAULT_TERMINAL_ACK_TIMEOUT_S)
-    try:
-        return max(0.1, float(raw))
-    except Exception:
-        return float(_DEFAULT_TERMINAL_ACK_TIMEOUT_S)
-
-
-def _terminal_target_available(*, session_rec: dict[str, object] | None) -> bool:
-    if not isinstance(session_rec, dict):
-        return False
-    terminal_tty = session_rec.get("terminal_tty")
-    if isinstance(terminal_tty, str) and terminal_tty.strip():
-        return True
-    terminal_app = session_rec.get("terminal_app")
-    if not (isinstance(terminal_app, str) and terminal_app.strip()):
-        return False
-    cwd = session_rec.get("cwd")
-    if isinstance(cwd, str) and cwd.strip():
-        return True
-    terminal_session_id = session_rec.get("terminal_session_id")
-    return isinstance(terminal_session_id, str) and bool(terminal_session_id.strip())
-
-
-def _normalize_terminal_prompt(*, prompt: str) -> str:
-    return " ".join(prompt.splitlines()).strip()
-
-
-def _terminal_send_prompt(
-    *,
-    terminal_app: str | None,
-    terminal_tty: str | None,
-    terminal_session_id: str | None,
-    session_id: str,
-    prompt: str,
-) -> tuple[bool, str | None]:
-    prompt_text = _normalize_terminal_prompt(prompt=prompt)
-    if not prompt_text:
-        return False, "terminal_prompt_empty"
-
-    tty_value = terminal_tty.strip() if isinstance(terminal_tty, str) else ""
-
-    app = terminal_app.strip() if isinstance(terminal_app, str) else ""
-    if not app:
-        return False, "terminal_app_missing"
-
-    script_path = Path(__file__).resolve().parent / "scripts" / "send-terminal-command.applescript"
-    if not script_path.exists():
-        return False, "terminal_script_missing"
-
-    session_token = terminal_session_id.strip() if isinstance(terminal_session_id, str) else ""
-    sid_value = session_id.strip()
-
-    try:
-        proc = subprocess.run(
-            [
-                "osascript",
-                str(script_path),
-                app,
-                tty_value,
-                session_token,
-                sid_value,
-                prompt_text,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return False, "terminal_send_exception"
-
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    detail = out or err or f"exit={proc.returncode}"
-    if proc.returncode == 0 and out.startswith("OK:"):
-        return True, detail
-    return False, detail
-
-
-def _terminal_send_submit_key(
-    *,
-    terminal_app: str | None,
-    terminal_tty: str | None,
-    terminal_session_id: str | None,
-    session_id: str,
-    submit_key: str,
-) -> tuple[bool, str | None]:
-    app = terminal_app.strip() if isinstance(terminal_app, str) else ""
-    if not app:
-        return False, "terminal_app_missing"
-
-    submit = submit_key.strip().lower() if isinstance(submit_key, str) else ""
-    if submit not in {"enter", "ctrl_j", "cmd_enter"}:
-        submit = "enter"
-
-    script_path = Path(__file__).resolve().parent / "scripts" / "send-terminal-command.applescript"
-    if not script_path.exists():
-        return False, "terminal_script_missing"
-
-    tty_value = terminal_tty.strip() if isinstance(terminal_tty, str) else ""
-    session_token = terminal_session_id.strip() if isinstance(terminal_session_id, str) else ""
-    sid_value = session_id.strip()
-
-    try:
-        proc = subprocess.run(
-            [
-                "osascript",
-                str(script_path),
-                app,
-                tty_value,
-                session_token,
-                sid_value,
-                "",
-                submit,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return False, "terminal_submit_exception"
-
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    detail = out or err or f"exit={proc.returncode}"
-    if proc.returncode == 0 and out.startswith("OK:"):
-        return True, detail
-    return False, detail
-
-
 def _dispatch_prompt_to_session(
     *,
     target_sid: str,
@@ -3761,14 +3488,6 @@ def _dispatch_prompt_to_session(
             (isinstance(pane_hint, str) and bool(pane_hint.strip()))
             or (isinstance(socket_hint, str) and bool(socket_hint.strip()))
         )
-        if not _terminal_target_available(session_rec=session_rec):
-            inferred_terminal = _infer_terminal_context_from_processes(session_rec=session_rec)
-            for key, value in inferred_terminal.items():
-                if isinstance(value, str) and value.strip():
-                    session_rec[key] = value.strip()
-
-    terminal_enabled = _terminal_routing_enabled()
-    terminal_available = terminal_enabled and _terminal_target_available(session_rec=session_rec)
 
     if isinstance(session_rec, dict):
         session_rec["last_dispatch_reason"] = None
@@ -3791,7 +3510,7 @@ def _dispatch_prompt_to_session(
                 if isinstance(discovered_socket, str) and discovered_socket.strip():
                     tmux_socket_norm = discovered_socket.strip()
                     session_rec["tmux_socket"] = tmux_socket_norm
-            elif strict_tmux and not terminal_available and tmux_identity_present:
+            elif strict_tmux and tmux_identity_present:
                 session_rec["last_dispatch_reason"] = "pane_missing"
                 return "tmux_stale", None
 
@@ -3876,85 +3595,17 @@ def _dispatch_prompt_to_session(
                         return "tmux", None
                 session_rec["last_dispatch_reason"] = "ack_timeout"
                 return "tmux_unconfirmed", None
-            if strict_tmux and not terminal_available and tmux_identity_present:
+            if strict_tmux and tmux_identity_present:
                 session_rec["last_dispatch_reason"] = "session_path_mismatch"
                 return "tmux_stale", None
 
-        if strict_tmux and not terminal_available and tmux_identity_present:
+        if strict_tmux and tmux_identity_present:
             session_rec["last_dispatch_reason"] = "session_path_missing" if not (
                 isinstance(session_path, str) and session_path.strip()
             ) else "pane_missing"
             return "tmux_stale", None
 
-    if terminal_available and isinstance(session_rec, dict):
-        terminal_app = session_rec.get("terminal_app")
-        terminal_tty = session_rec.get("terminal_tty")
-        terminal_session_id = session_rec.get("terminal_session_id")
-        before_user_text: str | None = None
-        session_path_obj: Path | None = None
-        session_path = session_rec.get("session_path")
-        if isinstance(session_path, str) and session_path.strip():
-            session_path_norm = session_path.strip()
-            if reply._session_path_matches_session_id(session_path=session_path_norm, session_id=target_sid):
-                session_path_obj = Path(session_path_norm)
-                before_user_text = reply._read_last_user_text_from_session(session_path_obj)
-        terminal_ok, terminal_detail = _terminal_send_prompt(
-            terminal_app=terminal_app.strip() if isinstance(terminal_app, str) else "",
-            terminal_tty=terminal_tty.strip() if isinstance(terminal_tty, str) else None,
-            terminal_session_id=terminal_session_id.strip() if isinstance(terminal_session_id, str) else None,
-            session_id=target_sid,
-            prompt=prompt,
-        )
-        if terminal_ok:
-            if session_path_obj is not None:
-                observed = reply._wait_for_new_user_text(
-                    session_path=session_path_obj,
-                    before=before_user_text,
-                    timeout_s=_terminal_ack_timeout_s(),
-                )
-                if observed is not None:
-                    session_rec["last_dispatch_reason"] = None
-                    return "terminal", None
-
-                submit_detail: str | None = None
-                app_name = terminal_app.strip().lower() if isinstance(terminal_app, str) else ""
-                supports_submit_retry = app_name not in {"terminal", "iterm", "iterm2"}
-                for submit_key in ("ctrl_j", "enter"):
-                    if not supports_submit_retry:
-                        break
-                    submit_ok, submit_status = _terminal_send_submit_key(
-                        terminal_app=terminal_app.strip() if isinstance(terminal_app, str) else "",
-                        terminal_tty=terminal_tty.strip() if isinstance(terminal_tty, str) else None,
-                        terminal_session_id=terminal_session_id.strip()
-                        if isinstance(terminal_session_id, str)
-                        else None,
-                        session_id=target_sid,
-                        submit_key=submit_key,
-                    )
-                    if isinstance(submit_status, str) and submit_status.strip():
-                        submit_detail = f"{submit_key}:{submit_status.strip()}"
-                    if not submit_ok:
-                        continue
-
-                    observed = reply._wait_for_new_user_text(
-                        session_path=session_path_obj,
-                        before=before_user_text,
-                        timeout_s=0.75,
-                    )
-                    if observed is not None:
-                        session_rec["last_dispatch_reason"] = None
-                        return "terminal", None
-
-                session_rec["last_dispatch_reason"] = (
-                    f"terminal_ack_timeout ({submit_detail})" if submit_detail else "terminal_ack_timeout"
-                )
-                return "terminal_unconfirmed", None
-            session_rec["last_dispatch_reason"] = None
-            return "terminal", None
-        if isinstance(terminal_detail, str) and terminal_detail.strip():
-            session_rec["last_dispatch_reason"] = terminal_detail.strip()
-
-    if strict_tmux and tmux_enabled and not terminal_available and tmux_identity_present:
+    if strict_tmux and tmux_enabled and tmux_identity_present:
         return "tmux_stale", None
 
     response = reply._run_codex_resume(
@@ -4003,9 +3654,28 @@ def _resolve_session_from_reply_context(
             if sid not in resolved_sids:
                 resolved_sids.append(sid)
             continue
+
+        refs = _session_refs_from_text(replied_text)
+        by_ref: str | None = None
+        if refs:
+            by_ref = _lookup_session_by_text_ref(registry=registry, replied_text=replied_text)
+            # If explicit refs are present but unresolved, do not fall back to hash;
+            # hash matches can collide across repeated message text.
+            if by_ref and by_ref not in resolved_sids:
+                resolved_sids.append(by_ref)
+            continue
+
+        by_ref = _lookup_session_by_text_ref(registry=registry, replied_text=replied_text)
+        if by_ref and by_ref not in resolved_sids:
+            resolved_sids.append(by_ref)
+            continue
+
         by_hash = _lookup_session_by_message_hash(index=message_index, replied_text=replied_text)
         if by_hash and by_hash not in resolved_sids:
-            resolved_sids.append(by_hash)
+            sessions = registry.get("sessions")
+            rec = sessions.get(by_hash) if isinstance(sessions, dict) else None
+            if _session_is_waiting_for_input(session_rec=rec if isinstance(rec, dict) else None):
+                resolved_sids.append(by_hash)
 
     if resolved_sids:
         return resolved_sids[0], None
@@ -4044,8 +3714,12 @@ def _reply_reference_guids_for_row(
         row = None
 
     if isinstance(row, (tuple, list)):
-        for value in row:
-            _add(value)
+        # Prefer direct reply linkage. thread_originator_guid can point to
+        # older messages in the conversation and cause wrong session routing.
+        reply_to = row[1] if len(row) > 1 else None
+        associated = row[2] if len(row) > 2 else None
+        _add(reply_to)
+        _add(associated)
 
     return candidates
 
@@ -4792,59 +4466,6 @@ def _process_inbound_replies(
                 text=(
                     f"Sent to tmux pane for @{_session_ref(target_sid)}. "
                     "Execution may be delayed; check the pane on your Mac."
-                ),
-                max_message_chars=max_message_chars,
-                dry_run=dry_run,
-                message_index=message_index,
-            )
-            _upsert_session(
-                registry=registry,
-                session_id=target_sid,
-                fields={
-                    "awaiting_input": False,
-                    "pending_completion": True,
-                    "last_resume_ts": int(time.time()),
-                    "pending_request_user_input": None,
-                    "last_dispatch_reason": dispatch_reason,
-                },
-            )
-            continue
-
-        if dispatch_mode == "terminal":
-            _clear_last_dispatch_error(registry=registry)
-            _send_structured(
-                codex_home=codex_home,
-                recipient=recipient,
-                session_id=target_sid,
-                kind="accepted",
-                text=f"Sent to terminal target for @{_session_ref(target_sid)}. Follow execution on your Mac.",
-                max_message_chars=max_message_chars,
-                dry_run=dry_run,
-                message_index=message_index,
-            )
-            _upsert_session(
-                registry=registry,
-                session_id=target_sid,
-                fields={
-                    "awaiting_input": False,
-                    "pending_completion": True,
-                    "last_resume_ts": int(time.time()),
-                    "pending_request_user_input": None,
-                    "last_dispatch_reason": dispatch_reason,
-                },
-            )
-            continue
-
-        if dispatch_mode == "terminal_unconfirmed":
-            _clear_last_dispatch_error(registry=registry)
-            _send_structured(
-                codex_home=codex_home,
-                recipient=recipient,
-                session_id=target_sid,
-                kind="accepted",
-                text=(
-                    f"Sent to terminal target for @{_session_ref(target_sid)}. "
-                    "Execution may be delayed; check the terminal window on your Mac."
                 ),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,

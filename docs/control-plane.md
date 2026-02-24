@@ -7,7 +7,7 @@
 - Single process handles:
   - outbound needs-input notifications
   - inbound iMessage replies from `chat.db`
-  - session/tmux routing
+  - session routing (tmux + resume fallback)
   - fallback queue draining
 
 ## Data Flow
@@ -70,7 +70,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
     - `Grant access to this Python binary: ...`
   - setup starts polling `chat.db` before opening System Settings and keeps polling until readable or timeout.
 - Apple Events automation denied (`-1743`):
-  - Grant Automation permission for terminal/osascript to control Messages.
+  - Grant Automation permission for the launchd runtime app/Python and `osascript` to control Messages.
 - Queue backlog grows:
   - Check Messages automation permissions and run `doctor`.
   - Confirm queue is being drained and launchd service is running.

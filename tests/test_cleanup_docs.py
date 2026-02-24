@@ -18,7 +18,7 @@ class TestCleanupDocs(unittest.TestCase):
         self.assertIn("codex-imessage-control-plane doctor", text)
         self.assertIn("tccutil reset SystemPolicyAllFiles", text)
         self.assertIn("org.python.python", text)
-        self.assertIn("com.mitchellh.ghostty", text)
+        self.assertNotIn("com.mitchellh.", text)
 
 
 if __name__ == "__main__":

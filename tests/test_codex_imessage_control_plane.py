@@ -180,11 +180,11 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(fields.get("tmux_socket"), "/tmp/tmux-501/default")
         self.assertEqual(fields.get("cwd"), "/tmp/project")
 
-    def test_extract_notify_context_fields_captures_terminal_context(self) -> None:
+    def test_extract_notify_context_fields_ignores_terminal_context(self) -> None:
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "TERM_PROGRAM": "iTerm.app",
+                "TERM_PROGRAM": "ExampleTerminal.app",
                 "ITERM_SESSION_ID": "w0t1p2:ABCDEF",
                 "TTY": "/dev/ttys014",
                 "PWD": "/tmp/project",
@@ -196,9 +196,9 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 params=None,
             )
 
-        self.assertEqual(fields.get("terminal_app"), "iTerm2")
-        self.assertEqual(fields.get("terminal_session_id"), "w0t1p2:ABCDEF")
-        self.assertEqual(fields.get("terminal_tty"), "/dev/ttys014")
+        self.assertNotIn("terminal_app", fields)
+        self.assertNotIn("terminal_session_id", fields)
+        self.assertNotIn("terminal_tty", fields)
         self.assertEqual(fields.get("cwd"), "/tmp/project")
 
     def test_handle_notify_payload_routes_input_event(self) -> None:
@@ -359,6 +359,146 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(sid, sid_a)
         self.assertIsNone(err)
 
+    def test_resolve_session_from_reply_context_uses_ref_from_replied_text_when_uuid_missing(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid = "019c902c-40c0-7253-9580-e7f7ae35eb3d"
+        sid_ref = sid[:8]
+
+        with mock.patch.object(
+            cp.reply,
+            "_get_message_text_by_guid",
+            return_value=f"[Codex] @{sid_ref} — accepted — 2026-02-24T07:54:32-08:00",
+        ):
+            resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="continue",
+                reply_to_guid="GUID-REF-ONLY",
+                reply_reference_guids=["GUID-REF-ONLY"],
+                registry={"sessions": {sid: {}}},
+                message_index={"messages": []},
+                require_explicit_ref=True,
+            )
+
+        self.assertEqual(resolved, sid)
+        self.assertIsNone(err)
+
+    def test_resolve_session_from_reply_context_prefers_ref_over_hash(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid_ref_target = "019c902c-40c0-7253-9580-e7f7ae35eb3d"
+        sid_hash_other = "019c8e4f-392c-7650-84e4-1cbb73ae8037"
+        replied_text = f"[Codex] @{sid_ref_target[:8]} — accepted — follow execution on your Mac."
+
+        with mock.patch.object(cp.reply, "_get_message_text_by_guid", return_value=replied_text):
+            resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="continue",
+                reply_to_guid="GUID-REF-HASH",
+                reply_reference_guids=["GUID-REF-HASH"],
+                registry={"sessions": {sid_ref_target: {}, sid_hash_other: {}}},
+                message_index={
+                    "messages": [
+                        {
+                            "ts": 1,
+                            "session_id": sid_hash_other,
+                            "kind": "accepted",
+                            "hash": cp._message_hash(replied_text),  # type: ignore[attr-defined]
+                        }
+                    ]
+                },
+                require_explicit_ref=True,
+            )
+
+        self.assertEqual(resolved, sid_ref_target)
+        self.assertIsNone(err)
+
+    def test_resolve_session_from_reply_context_does_not_use_hash_when_ref_is_ambiguous(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid_a = "019c1234-1111-7111-8111-111111111111"
+        sid_b = "019c1234-2222-7222-8222-222222222222"
+        sid_hash_other = "019c8e4f-392c-7650-84e4-1cbb73ae8037"
+        replied_text = "[Codex] @019c1234 — accepted — follow execution on your Mac."
+
+        with mock.patch.object(cp.reply, "_get_message_text_by_guid", return_value=replied_text):
+            resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="continue",
+                reply_to_guid="GUID-AMBIG",
+                reply_reference_guids=["GUID-AMBIG"],
+                registry={"sessions": {sid_a: {}, sid_b: {}, sid_hash_other: {}}},
+                message_index={
+                    "messages": [
+                        {
+                            "ts": 1,
+                            "session_id": sid_hash_other,
+                            "kind": "accepted",
+                            "hash": cp._message_hash(replied_text),  # type: ignore[attr-defined]
+                        }
+                    ]
+                },
+                require_explicit_ref=True,
+            )
+
+        self.assertIsNone(resolved)
+        self.assertIsInstance(err, str)
+        self.assertIn("Strict tmux routing", err)
+
+    def test_resolve_session_from_reply_context_uses_hash_only_when_session_waiting(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid = "019c8e4f-392c-7650-84e4-1cbb73ae8037"
+        replied_text = "[Codex] acknowledged."
+
+        with mock.patch.object(cp.reply, "_get_message_text_by_guid", return_value=replied_text):
+            resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="continue",
+                reply_to_guid="GUID-HASH-WAITING",
+                reply_reference_guids=["GUID-HASH-WAITING"],
+                registry={"sessions": {sid: {"awaiting_input": True}}},
+                message_index={
+                    "messages": [
+                        {
+                            "ts": 1,
+                            "session_id": sid,
+                            "kind": "responded",
+                            "hash": cp._message_hash(replied_text),  # type: ignore[attr-defined]
+                        }
+                    ]
+                },
+                require_explicit_ref=True,
+            )
+
+        self.assertEqual(resolved, sid)
+        self.assertIsNone(err)
+
+    def test_resolve_session_from_reply_context_does_not_use_hash_when_session_not_waiting(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid = "019c8e4f-392c-7650-84e4-1cbb73ae8037"
+        replied_text = "[Codex] acknowledged."
+
+        with mock.patch.object(cp.reply, "_get_message_text_by_guid", return_value=replied_text):
+            resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+                conn=conn,
+                reply_text="continue",
+                reply_to_guid="GUID-HASH-NOT-WAITING",
+                reply_reference_guids=["GUID-HASH-NOT-WAITING"],
+                registry={"sessions": {sid: {"awaiting_input": False}}},
+                message_index={
+                    "messages": [
+                        {
+                            "ts": 1,
+                            "session_id": sid,
+                            "kind": "responded",
+                            "hash": cp._message_hash(replied_text),  # type: ignore[attr-defined]
+                        }
+                    ]
+                },
+                require_explicit_ref=True,
+            )
+
+        self.assertIsNone(resolved)
+        self.assertIsInstance(err, str)
+        self.assertIn("Strict tmux routing", err)
+
     def test_reply_reference_guids_for_row_collects_and_orders_candidates(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.execute(
@@ -385,6 +525,33 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         )
 
         self.assertEqual(guids, ["THREAD", "REPLY", "ASSOC"])
+
+    def test_reply_reference_guids_for_row_excludes_thread_originator_when_fallback_missing(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE message (
+              ROWID INTEGER PRIMARY KEY,
+              reply_to_guid TEXT,
+              thread_originator_guid TEXT,
+              associated_message_guid TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO message (ROWID, reply_to_guid, thread_originator_guid, associated_message_guid)
+            VALUES (10, 'REPLY', 'THREAD', 'ASSOC')
+            """
+        )
+
+        guids = cp._reply_reference_guids_for_row(  # type: ignore[attr-defined]
+            conn=conn,
+            rowid=10,
+            fallback_guid=None,
+        )
+
+        self.assertEqual(guids, ["REPLY", "ASSOC"])
 
     def test_dispatch_prompt_prefers_tmux(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
@@ -723,108 +890,23 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(response, "ok")
         resume_mock.assert_called_once()
 
-    def test_dispatch_prompt_uses_terminal_when_tmux_is_unavailable(self) -> None:
+    def test_dispatch_prompt_with_terminal_context_falls_back_to_resume(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         rec = {
             "cwd": "/tmp/project",
             "session_path": f"/tmp/sessions/{sid}.jsonl",
-            "terminal_app": "Terminal",
+            "terminal_app": "ExampleTerminal",
             "terminal_tty": "/dev/ttys014",
         }
 
         with (
             mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
-            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
-            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
-            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
-            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
-        ):
-            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
-                target_sid=sid,
-                prompt="continue",
-                session_rec=rec,
-                codex_home=Path("/tmp/codex-home"),
-            )
-
-        self.assertEqual(mode, "terminal")
-        self.assertIsNone(response)
-        terminal_mock.assert_called_once()
-        resume_mock.assert_not_called()
-
-    def test_dispatch_prompt_terminal_unconfirmed_does_not_fallback(self) -> None:
-        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
-        rec = {
-            "cwd": "/tmp/project",
-            "session_path": f"/tmp/sessions/{sid}.jsonl",
-            "terminal_app": "Terminal",
-            "terminal_tty": "/dev/ttys014",
-        }
-
-        with (
-            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
-            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
-            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value=None),
-            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
-            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
-        ):
-            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
-                target_sid=sid,
-                prompt="continue",
-                session_rec=rec,
-                codex_home=Path("/tmp/codex-home"),
-            )
-
-        self.assertEqual(mode, "terminal_unconfirmed")
-        self.assertIsNone(response)
-        terminal_mock.assert_called_once()
-        resume_mock.assert_not_called()
-
-    def test_dispatch_prompt_terminal_ack_timeout_retries_submit_and_recovers(self) -> None:
-        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
-        rec = {
-            "cwd": "/tmp/project",
-            "session_path": f"/tmp/sessions/{sid}.jsonl",
-            "terminal_app": "Ghostty",
-            "terminal_tty": "/dev/ttys014",
-            "terminal_session_id": "ghostty:tab-1",
-        }
-
-        with (
-            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
-            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
-            mock.patch.object(cp.reply, "_wait_for_new_user_text", side_effect=[None, "after"]),
-            mock.patch.object(cp, "_terminal_send_prompt", return_value=(True, "ok"), create=True) as terminal_mock,
-            mock.patch.object(cp, "_terminal_send_submit_key", return_value=(True, "OK:ctrl_j"), create=True) as submit_mock,
-            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
-        ):
-            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
-                target_sid=sid,
-                prompt="continue",
-                session_rec=rec,
-                codex_home=Path("/tmp/codex-home"),
-            )
-
-        self.assertEqual(mode, "terminal")
-        self.assertIsNone(response)
-        terminal_mock.assert_called_once()
-        submit_mock.assert_called_once()
-        resume_mock.assert_not_called()
-
-    def test_dispatch_prompt_terminal_failure_falls_back_to_resume(self) -> None:
-        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
-        rec = {
-            "cwd": "/tmp/project",
-            "session_path": f"/tmp/sessions/{sid}.jsonl",
-            "terminal_app": "Terminal",
-            "terminal_tty": "/dev/ttys014",
-        }
-
-        with (
-            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
-            mock.patch.object(cp, "_terminal_send_prompt", return_value=(False, "no-match"), create=True) as terminal_mock,
+            mock.patch.object(
+                cp,
+                "_terminal_send_prompt",
+                side_effect=AssertionError("terminal routing should be disabled"),
+                create=True,
+            ),
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
             mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
         ):
@@ -837,7 +919,6 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
         self.assertEqual(mode, "resume")
         self.assertEqual(response, "ok")
-        terminal_mock.assert_called_once()
         resume_mock.assert_called_once()
 
     def test_dispatch_prompt_tmux_send_failure_does_not_fallback(self) -> None:
@@ -961,13 +1042,14 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(response, "ok")
         resume_mock.assert_called_once()
 
-    def test_apply_attention_context_to_session_merges_terminal_fields(self) -> None:
+    def test_apply_attention_context_to_session_ignores_terminal_fields(self) -> None:
         sid = "11111111-1111-1111-1111-111111111111"
         rec: dict[str, object] = {"cwd": "/tmp/project"}
         attention_index = {
             sid: {
                 "cwd": "/tmp/project",
-                "terminal_app": "Ghostty",
+                "terminal_app": "ExampleTerminal",
+                "terminal_session_id": "w0t1:abc",
                 "terminal_tty": "/dev/ttys014",
             }
         }
@@ -979,56 +1061,9 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             last_attention_state=None,
         )
 
-        self.assertEqual(rec.get("terminal_app"), "Ghostty")
-        self.assertEqual(rec.get("terminal_tty"), "/dev/ttys014")
-
-    def test_infer_terminal_context_from_processes_prefers_non_tmux_candidate(self) -> None:
-        rec: dict[str, object] = {"cwd": "/Users/example"}
-        ps_listing = "\n".join(
-            [
-                "23476 ttys001 codex codex",
-                "34554 ttys007 codex codex",
-            ]
-        )
-
-        def _mock_run(cmd: list[str], **kwargs: object):
-            if cmd[:3] == ["ps", "-Ao", "pid=,tty=,comm=,args="]:
-                return mock.Mock(returncode=0, stdout=ps_listing)
-            if cmd[:5] == ["lsof", "-a", "-p", "23476", "-d"]:
-                return mock.Mock(returncode=0, stdout="p23476\nn/Users/example\n")
-            if cmd[:5] == ["lsof", "-a", "-p", "34554", "-d"]:
-                return mock.Mock(returncode=0, stdout="p34554\nn/Users/example\n")
-            if cmd[:3] == ["ps", "eww", "-p"] and cmd[3] == "23476":
-                return mock.Mock(returncode=0, stdout="23476 ... TERM_PROGRAM=tmux TMUX=/private/tmp/tmux-501/default,1,0 ...")
-            if cmd[:3] == ["ps", "eww", "-p"] and cmd[3] == "34554":
-                return mock.Mock(returncode=0, stdout="34554 ... TERM_PROGRAM=ghostty ...")
-            return mock.Mock(returncode=1, stdout="")
-
-        with mock.patch("subprocess.run", side_effect=_mock_run):
-            inferred = cp._infer_terminal_context_from_processes(session_rec=rec)  # type: ignore[attr-defined]
-
-        self.assertEqual(inferred.get("terminal_tty"), "/dev/ttys007")
-        self.assertEqual(inferred.get("terminal_app"), "Ghostty")
-
-    def test_terminal_send_prompt_prefers_osascript_when_terminal_app_present(self) -> None:
-        proc = mock.Mock(returncode=0, stdout="OK:generic\n", stderr="")
-        with (
-            mock.patch("builtins.open", mock.mock_open()) as open_mock,
-            mock.patch("subprocess.run", return_value=proc) as run_mock,
-            mock.patch.object(cp.Path, "exists", return_value=True),
-        ):
-            ok, detail = cp._terminal_send_prompt(  # type: ignore[attr-defined]
-                terminal_app="Ghostty",
-                terminal_tty="/dev/ttys014",
-                terminal_session_id="ghostty:1",
-                session_id="019c8dd9-6331-7173-aead-802b9557df96",
-                prompt="continue",
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "OK:generic")
-        run_mock.assert_called_once()
-        open_mock.assert_not_called()
+        self.assertNotIn("terminal_app", rec)
+        self.assertNotIn("terminal_session_id", rec)
+        self.assertNotIn("terminal_tty", rec)
 
     def test_process_inbound_replies_tmux_stale_falls_back_and_clears_mapping_when_strict_disabled(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
@@ -1084,55 +1119,6 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             codex_home=Path("/tmp/codex-home"),
             timeout_s=None,
         )
-
-    def test_process_inbound_replies_terminal_dispatch_reports_accepted_without_resume(self) -> None:
-        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
-        registry = {
-            "sessions": {
-                sid: {
-                    "cwd": "/tmp/project",
-                    "terminal_app": "Terminal",
-                    "terminal_tty": "/dev/ttys014",
-                    "session_path": f"/tmp/sessions/{sid}.jsonl",
-                }
-            }
-        }
-        message_index: dict[str, object] = {}
-        sent: list[dict[str, object]] = []
-
-        def _capture_send(**kwargs: object) -> None:
-            sent.append(dict(kwargs))
-
-        with (
-            sqlite3.connect(":memory:") as conn,
-            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
-            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
-            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
-            mock.patch.object(cp, "_load_registry", return_value=registry),
-            mock.patch.object(cp, "_load_message_index", return_value=message_index),
-            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
-            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
-            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("terminal", None)),
-            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
-            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
-            mock.patch.object(cp, "_save_registry"),
-            mock.patch.object(cp, "_save_message_index"),
-        ):
-            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
-                conn=conn,
-                after_rowid=0,
-                handle_ids=["+15551234567"],
-                codex_home=Path("/tmp/codex-home"),
-                recipient="+15551234567",
-                max_message_chars=1800,
-                min_prefix=6,
-                dry_run=False,
-            )
-
-        self.assertEqual(rowid, 101)
-        self.assertTrue(any(m.get("kind") == "accepted" and "terminal" in str(m.get("text", "")).lower() for m in sent))
-        self.assertFalse(any(m.get("kind") == "responded" for m in sent))
-        resume_mock.assert_not_called()
 
     def test_process_inbound_replies_recovers_missing_session_record_before_dispatch(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"

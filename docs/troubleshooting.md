@@ -59,7 +59,7 @@ Checks:
 - wait for `Full Disk Access confirmed: chat.db is now readable.` before leaving setup
 - run `python3 codex_imessage_control_plane.py doctor` and use `Launchd.runtime_python` / `Launchd.permission_app` as the authoritative FDA targets
 - prefer granting Full Disk Access to the shown app (usually `~/Applications/Codex iMessage Python.app`), or to the shown runtime Python binary if no app is shown
-- do not grant Full Disk Access to Ghostty/Terminal unless `doctor` explicitly shows that terminal binary as `runtime_python`
+- do not grant Full Disk Access to terminal apps unless `doctor` explicitly shows that terminal binary as `runtime_python`
 - `setup-permissions` now prefers launchd runtime targets from the installed plist, so its guidance should match `doctor`
 - if output says "shell can read chat.db, but launchd cannot", grant Full Disk Access to the shown app/binary itself (not only Terminal), then rerun `setup-launchd`
 - verify `CODEX_IMESSAGE_CHAT_DB` (if overridden) points to a readable DB
@@ -74,8 +74,7 @@ If launchd still cannot read `chat.db` after FDA was granted:
   - look for: `Failed to match existing code requirement for subject org.python.python`
 - reset stale TCC approvals and re-grant:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
-  - `tccutil reset SystemPolicyAllFiles com.mitchellh.ghostty`
-  - re-enable Full Disk Access for `~/Applications/Codex iMessage Python.app` (and terminal app if needed)
+  - re-enable Full Disk Access for `~/Applications/Codex iMessage Python.app`
 - rerun:
   - `python3 codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"`
   - `python3 codex_imessage_control_plane.py doctor`
