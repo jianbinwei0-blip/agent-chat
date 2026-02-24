@@ -978,6 +978,26 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(inferred.get("terminal_tty"), "/dev/ttys007")
         self.assertEqual(inferred.get("terminal_app"), "Ghostty")
 
+    def test_terminal_send_prompt_prefers_osascript_when_terminal_app_present(self) -> None:
+        proc = mock.Mock(returncode=0, stdout="OK:generic\n", stderr="")
+        with (
+            mock.patch("builtins.open", mock.mock_open()) as open_mock,
+            mock.patch("subprocess.run", return_value=proc) as run_mock,
+            mock.patch.object(cp.Path, "exists", return_value=True),
+        ):
+            ok, detail = cp._terminal_send_prompt(  # type: ignore[attr-defined]
+                terminal_app="Ghostty",
+                terminal_tty="/dev/ttys014",
+                terminal_session_id="ghostty:1",
+                session_id="019c8dd9-6331-7173-aead-802b9557df96",
+                prompt="continue",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "OK:generic")
+        run_mock.assert_called_once()
+        open_mock.assert_not_called()
+
     def test_process_inbound_replies_tmux_stale_falls_back_and_clears_mapping_when_strict_disabled(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         registry = {

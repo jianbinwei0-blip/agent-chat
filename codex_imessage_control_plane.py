@@ -3651,26 +3651,14 @@ def _terminal_send_prompt(
         return False, "terminal_prompt_empty"
 
     tty_value = terminal_tty.strip() if isinstance(terminal_tty, str) else ""
-    if tty_value:
-        try:
-            with open(tty_value, "wb", buffering=0) as tty_fp:
-                tty_fp.write(prompt_text.encode("utf-8", errors="replace"))
-                tty_fp.write(b"\r")
-            return True, "OK:tty"
-        except Exception as exc:
-            tty_error = f"tty_send_failed:{type(exc).__name__}"
-        else:
-            tty_error = None
-    else:
-        tty_error = None
 
     app = terminal_app.strip() if isinstance(terminal_app, str) else ""
     if not app:
-        return False, tty_error or "terminal_app_missing"
+        return False, "terminal_app_missing"
 
     script_path = Path(__file__).resolve().parent / "scripts" / "send-terminal-command.applescript"
     if not script_path.exists():
-        return False, tty_error or "terminal_script_missing"
+        return False, "terminal_script_missing"
 
     session_token = terminal_session_id.strip() if isinstance(terminal_session_id, str) else ""
     sid_value = session_id.strip()
@@ -3699,8 +3687,6 @@ def _terminal_send_prompt(
     detail = out or err or f"exit={proc.returncode}"
     if proc.returncode == 0 and out.startswith("OK:"):
         return True, detail
-    if tty_error:
-        return False, f"{tty_error};{detail}"
     return False, detail
 
 
