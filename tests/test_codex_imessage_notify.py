@@ -455,6 +455,25 @@ class TestCodexIMessageNotify(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(send_imessage.call_count, 1)
 
+    def test_main_route_stop_hook_event_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp)
+            payload = {"hook_event_name": "Stop", "session_id": "sid-123"}
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "CODEX_HOME": str(codex_home),
+                    "CODEX_IMESSAGE_TO": "+15551234567",
+                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(notify, "_send_imessage", return_value=True) as send_imessage:
+                    rc = notify.main(["route", "--cwd", "proj", json.dumps(payload)])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(send_imessage.call_count, 1)
+
     def test_main_route_exec_approval_request_uses_input_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             codex_home = Path(tmp)

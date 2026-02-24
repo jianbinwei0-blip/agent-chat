@@ -272,6 +272,33 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertTrue(any(msg.get("kind") == "responded" for msg in sent))
         self.assertTrue(any(msg.get("session_id") == "sid-123" for msg in sent))
 
+    def test_handle_notify_payload_completion_from_hook_event_name(self) -> None:
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "sid-123",
+            "last_assistant_message": "done",
+        }
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            with (
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+            ):
+                cp._handle_notify_payload(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="+15551234567",
+                    payload_text=json.dumps(payload),
+                    dry_run=False,
+                )
+
+        self.assertTrue(any(msg.get("kind") == "responded" for msg in sent))
+        self.assertTrue(any(msg.get("session_id") == "sid-123" for msg in sent))
+
     def test_resolve_session_ref_exact_match(self) -> None:
         registry = {
             "sessions": {

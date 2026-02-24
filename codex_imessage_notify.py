@@ -671,13 +671,35 @@ def _payload_blob(payload: dict[str, object] | None) -> str:
 def _payload_event_type(payload: dict[str, object] | None) -> str | None:
     if not isinstance(payload, dict):
         return None
-    for key in ("type", "event", "kind", "event_type", "event-type", "name", "method"):
+    for key in (
+        "type",
+        "event",
+        "kind",
+        "event_type",
+        "event-type",
+        "name",
+        "method",
+        "hook_event_name",
+        "hook-event-name",
+        "hookEventName",
+    ):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
     nested = payload.get("params")
     if isinstance(nested, dict):
-        for key in ("type", "event", "kind", "event_type", "event-type", "name", "method"):
+        for key in (
+            "type",
+            "event",
+            "kind",
+            "event_type",
+            "event-type",
+            "name",
+            "method",
+            "hook_event_name",
+            "hook-event-name",
+            "hookEventName",
+        ):
             value = nested.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip().lower()
@@ -695,6 +717,7 @@ def _is_completion_event(payload: dict[str, object] | None) -> bool:
         "turn_complete",
         "task-complete",
         "task_complete",
+        "stop",
     }:
         return True
     blob = _payload_blob(payload).lower()
