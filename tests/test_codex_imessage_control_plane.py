@@ -201,6 +201,13 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertNotIn("terminal_tty", fields)
         self.assertEqual(fields.get("cwd"), "/tmp/project")
 
+    def test_extract_notify_context_fields_maps_transcript_path(self) -> None:
+        fields = cp._extract_notify_context_fields(  # type: ignore[attr-defined]
+            payload={"transcript_path": "/tmp/claude-session.jsonl"},
+            params=None,
+        )
+        self.assertEqual(fields.get("session_path"), "/tmp/claude-session.jsonl")
+
     def test_handle_notify_payload_routes_input_event(self) -> None:
         payload = {
             "type": "needs-input",
@@ -2138,6 +2145,99 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             self.assertIsInstance(model_migrations, dict)
             self.assertNotIn("notify", model_migrations or {})
             self.assertIn("Restart Codex to apply notify hook changes.", out.getvalue())
+
+    def test_run_setup_notify_hook_writes_claude_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            claude_home = home / ".claude"
+            claude_home.mkdir(parents=True, exist_ok=True)
+            settings_path = claude_home / "settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
+                    codex_home=claude_home,
+                    recipient="+15555550123",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("Restart Claude to apply notify hook changes.", out.getvalue())
+
+            parsed = json.loads(settings_path.read_text(encoding="utf-8"))
+            hooks = parsed.get("hooks")
+            self.assertIsInstance(hooks, dict)
+            for event_name in ("Notification", "Stop"):
+                event_hooks = hooks.get(event_name) if isinstance(hooks, dict) else None
+                self.assertIsInstance(event_hooks, list)
+                self.assertGreaterEqual(len(event_hooks), 1)
+                first = event_hooks[0] if isinstance(event_hooks, list) and event_hooks else None
+                self.assertIsInstance(first, dict)
+                hook_entries = first.get("hooks") if isinstance(first, dict) else None
+                self.assertIsInstance(hook_entries, list)
+                command_values = [
+                    item.get("command")
+                    for item in hook_entries
+                    if isinstance(item, dict) and isinstance(item.get("command"), str)
+                ]
+                self.assertTrue(any("notify" in cmd for cmd in command_values))
+                self.assertTrue(any("CODEX_IMESSAGE_AGENT=claude" in cmd for cmd in command_values))
+
+    def test_find_all_session_files_supports_claude_projects_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            claude_home = Path(td)
+            session_a = claude_home / "projects" / "-Users-test-repo" / "sid-a.jsonl"
+            session_b = claude_home / "projects" / "-Users-test-other" / "nested" / "sid-b.jsonl"
+            session_a.parent.mkdir(parents=True, exist_ok=True)
+            session_b.parent.mkdir(parents=True, exist_ok=True)
+            session_a.write_text("{}", encoding="utf-8")
+            session_b.write_text("{}", encoding="utf-8")
+
+            with mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False):
+                found = cp._find_all_session_files(codex_home=claude_home)  # type: ignore[attr-defined]
+
+        found_set = {str(path) for path in found}
+        self.assertEqual(
+            found_set,
+            {
+                str(session_a),
+                str(session_b),
+            },
+        )
+
+    def test_send_structured_uses_claude_header_when_agent_is_claude(self) -> None:
+        sent: list[str] = []
+
+        def _capture_send(*, recipient: str, message: str) -> bool:
+            del recipient
+            sent.append(message)
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+            mock.patch.object(cp.outbound, "_send_imessage", side_effect=_capture_send),
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="+15551234567",
+                session_id="sid-123",
+                kind="responded",
+                text="done",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertIn("[Claude] sid-123 — responded — ", sent[0])
 
     def test_doctor_report_includes_routing_snapshot_and_last_dispatch_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:

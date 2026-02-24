@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Unified Codex <-> iMessage control plane (macOS).
+"""Unified Codex/Claude <-> iMessage control plane (macOS).
 
 This daemon combines:
-- outbound needs-input notifications across all active Codex sessions
+- outbound needs-input notifications across all active Codex/Claude sessions
 - inbound iMessage command/reply intake and session routing
 - optional notify-hook completion forwarding
 - fallback outbound queue draining
@@ -106,6 +106,11 @@ _CODEX_BIN_CANDIDATES = (
     "/usr/local/bin/codex",
     "/usr/bin/codex",
 )
+_CLAUDE_BIN_CANDIDATES = (
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "/usr/bin/claude",
+)
 _DEFAULT_LAUNCHD_LABEL = "com.codex.imessage-control-plane"
 _INBOUND_DISABLED_LOG_MARKER = "[imessage-control-plane] inbound disabled:"
 _INBOUND_RESTORED_LOG_MARKER = "[imessage-control-plane] inbound chat.db access restored."
@@ -120,6 +125,8 @@ _HELP_TEXT = (
     "- new <label>: <instruction>\n"
     "- help"
 )
+
+_SUPPORTED_AGENTS = frozenset({"codex", "claude"})
 
 _chat_db_last_warning_text: str | None = None
 _chat_db_last_warning_ts: float = 0.0
@@ -190,6 +197,49 @@ def _resolve_resume_timeout_s() -> float | None:
     return None if value <= 0 else value
 
 
+def _normalize_agent(*, agent: str | None) -> str:
+    candidate = agent.strip().lower() if isinstance(agent, str) else ""
+    return candidate if candidate in _SUPPORTED_AGENTS else "codex"
+
+
+def _current_agent() -> str:
+    return _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
+
+
+def _agent_display_name(*, agent: str | None = None) -> str:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    return "Claude" if normalized == "claude" else "Codex"
+
+
+def _agent_command_keyword(*, agent: str | None = None) -> str:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    return "claude" if normalized == "claude" else "codex"
+
+
+def _agent_home_path(*, agent: str | None = None) -> Path:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    if normalized == "claude":
+        return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+
+
+def _agent_session_root(*, codex_home: Path, agent: str | None = None) -> Path:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    if normalized == "claude":
+        projects_path = os.environ.get("CLAUDE_PROJECTS_PATH", "").strip()
+        if projects_path:
+            return Path(projects_path)
+        return codex_home / "projects"
+    return codex_home / "sessions"
+
+
+def _session_path_env_keys(*, agent: str | None = None) -> tuple[str, ...]:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    if normalized == "claude":
+        return ("CLAUDE_SESSION_PATH", "CLAUDE_TRANSCRIPT_PATH", "CODEX_SESSION_PATH", "CODEX_SESSION_FILE")
+    return ("CODEX_SESSION_PATH", "CODEX_SESSION_FILE")
+
+
 def _control_lock_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
@@ -234,6 +284,13 @@ def _codex_config_path(*, codex_home: Path) -> Path:
     return codex_home / "config.toml"
 
 
+def _claude_settings_path(*, codex_home: Path) -> Path:
+    env_path = os.environ.get("CLAUDE_SETTINGS_PATH", "").strip() or os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
+    if env_path:
+        return Path(env_path)
+    return codex_home / "settings.json"
+
+
 def _notify_hook_value_present(value: object) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
@@ -246,7 +303,69 @@ def _notify_hook_value_present(value: object) -> bool:
     return False
 
 
+def _claude_hook_event_has_notify(*, hooks: dict[str, object], event_name: str) -> bool:
+    event_rules = hooks.get(event_name)
+    if not isinstance(event_rules, list):
+        return False
+    for rule in event_rules:
+        if not isinstance(rule, dict):
+            continue
+        commands = rule.get("hooks")
+        if not isinstance(commands, list):
+            continue
+        for item in commands:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "command":
+                continue
+            command = item.get("command")
+            if isinstance(command, str) and command.strip():
+                if "notify" in command and "codex_imessage_control_plane.py" in command:
+                    return True
+    return False
+
+
+def _notify_hook_status_claude(*, codex_home: Path) -> dict[str, object]:
+    path = _claude_settings_path(codex_home=codex_home)
+    status: dict[str, object] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "top_level_present": False,
+        "mis_scoped_present": False,
+        "error": None,
+    }
+    if not path.exists():
+        return status
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        status["error"] = f"{type(exc).__name__}: {exc}"
+        return status
+
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except Exception as exc:
+        status["error"] = f"{type(exc).__name__}: {exc}"
+        return status
+
+    if not isinstance(parsed, dict):
+        return status
+
+    hooks = parsed.get("hooks")
+    if not isinstance(hooks, dict):
+        return status
+
+    status["top_level_present"] = _claude_hook_event_has_notify(hooks=hooks, event_name="Notification") and (
+        _claude_hook_event_has_notify(hooks=hooks, event_name="Stop")
+    )
+    return status
+
+
 def _notify_hook_status(*, codex_home: Path) -> dict[str, object]:
+    if _current_agent() == "claude":
+        return _notify_hook_status_claude(codex_home=codex_home)
+
     path = _codex_config_path(codex_home=codex_home)
     status: dict[str, object] = {
         "path": str(path),
@@ -300,18 +419,31 @@ def _resolve_python_bin_for_notify_hook(*, python_bin: str) -> str:
     return str((Path.cwd() / python_text).resolve())
 
 
-def _build_notify_hook_command(*, recipient: str, python_bin: str, script_path: Path) -> list[str]:
+def _build_notify_hook_command(*, recipient: str, python_bin: str, script_path: Path, agent: str) -> list[str]:
     recipient_text = recipient.strip()
     python_text = python_bin.strip()
     script_text = str(script_path)
+    agent_text = _normalize_agent(agent=agent)
     notify_cmd = (
         'payload="${1:-}"; if [ -z "$payload" ]; then payload="${CODEX_NOTIFY_PAYLOAD:-}"; fi; '
         'if [ -z "$payload" ]; then payload="$(cat)"; fi; '
         f'if [ -n "$payload" ]; then CODEX_IMESSAGE_TO={shlex.quote(recipient_text)} '
+        f'CODEX_IMESSAGE_AGENT={shlex.quote(agent_text)} '
         f'{shlex.quote(python_text)} {shlex.quote(script_text)} '
         'notify "$payload" >/dev/null 2>&1 || true; fi'
     )
     return ["bash", "-lc", notify_cmd, "--"]
+
+
+def _build_notify_hook_shell_command(*, recipient: str, python_bin: str, script_path: Path, agent: str) -> str:
+    return shlex.join(
+        _build_notify_hook_command(
+            recipient=recipient,
+            python_bin=python_bin,
+            script_path=script_path,
+            agent=agent,
+        )
+    )
 
 
 def _toml_table_name_from_header(line: str) -> str | None:
@@ -353,6 +485,64 @@ def _upsert_notify_hook_text(*, raw: str, notify_line: str) -> str:
     return "\n".join(kept).rstrip("\n") + "\n"
 
 
+def _upsert_claude_notify_hook_text(*, raw: str, hook_command: str) -> str:
+    parsed: dict[str, object]
+    if raw.strip():
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("Expected object at top-level in Claude settings.")
+        parsed = loaded
+    else:
+        parsed = {}
+
+    hooks = parsed.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+
+    for event_name in ("Notification", "Stop"):
+        event_rules = hooks.get(event_name)
+        if not isinstance(event_rules, list):
+            event_rules = []
+
+        target_rule: dict[str, object] | None = None
+        for rule in event_rules:
+            if not isinstance(rule, dict):
+                continue
+            matcher = rule.get("matcher")
+            if matcher is None or (isinstance(matcher, str) and not matcher.strip()):
+                target_rule = rule
+                break
+
+        if target_rule is None:
+            target_rule = {"matcher": "", "hooks": []}
+            event_rules.append(target_rule)
+        else:
+            target_rule["matcher"] = ""
+
+        command_hooks = target_rule.get("hooks")
+        if not isinstance(command_hooks, list):
+            command_hooks = []
+
+        exists = False
+        for item in command_hooks:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "command":
+                continue
+            command = item.get("command")
+            if isinstance(command, str) and command.strip() == hook_command:
+                exists = True
+                break
+        if not exists:
+            command_hooks.append({"type": "command", "command": hook_command})
+
+        target_rule["hooks"] = command_hooks
+        hooks[event_name] = event_rules
+
+    parsed["hooks"] = hooks
+    return json.dumps(parsed, ensure_ascii=False, indent=2).rstrip("\n") + "\n"
+
+
 def _run_setup_notify_hook(
     *,
     codex_home: Path,
@@ -360,6 +550,7 @@ def _run_setup_notify_hook(
     python_bin: str,
     script_path: Path,
 ) -> int:
+    agent = _current_agent()
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
     if not recipient_text:
         sys.stdout.write("CODEX_IMESSAGE_TO is required. Provide --recipient or set CODEX_IMESSAGE_TO.\n")
@@ -371,7 +562,9 @@ def _run_setup_notify_hook(
         sys.stdout.write(f"Control-plane script not found: {script_abs}\n")
         return 1
 
-    config_path = _codex_config_path(codex_home=codex_home)
+    config_path = _claude_settings_path(codex_home=codex_home) if agent == "claude" else _codex_config_path(
+        codex_home=codex_home
+    )
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -389,10 +582,24 @@ def _run_setup_notify_hook(
             recipient=recipient_text,
             python_bin=python_text,
             script_path=script_abs,
+            agent=agent,
         ),
         ensure_ascii=False,
     )
-    updated = _upsert_notify_hook_text(raw=raw, notify_line=notify_line)
+    if agent == "claude":
+        hook_command = _build_notify_hook_shell_command(
+            recipient=recipient_text,
+            python_bin=python_text,
+            script_path=script_abs,
+            agent=agent,
+        )
+        try:
+            updated = _upsert_claude_notify_hook_text(raw=raw, hook_command=hook_command)
+        except Exception as exc:
+            sys.stdout.write(f"Failed updating Claude settings: {type(exc).__name__}: {exc}\n")
+            return 1
+    else:
+        updated = _upsert_notify_hook_text(raw=raw, notify_line=notify_line)
     try:
         config_path.write_text(updated, encoding="utf-8")
     except Exception as exc:
@@ -403,7 +610,7 @@ def _run_setup_notify_hook(
     sys.stdout.write(f"Recipient: {recipient_text}\n")
     sys.stdout.write(f"Python binary: {python_text}\n")
     sys.stdout.write(f"Script: {script_abs}\n")
-    sys.stdout.write("Restart Codex to apply notify hook changes.\n")
+    sys.stdout.write(f"Restart {_agent_display_name(agent=agent)} to apply notify hook changes.\n")
     return 0
 
 
@@ -1109,16 +1316,25 @@ def _build_launchagent_plist(
 ) -> dict[str, object]:
     out_log, err_log = _launchd_log_paths()
     notify_mode = os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "route").strip() or "route"
+    agent = _current_agent()
 
     env_vars: dict[str, str] = {
         "CODEX_IMESSAGE_TO": recipient,
         "CODEX_HOME": str(codex_home),
+        "CODEX_IMESSAGE_AGENT": agent,
         "CODEX_IMESSAGE_NOTIFY_MODE": notify_mode,
         "CODEX_IMESSAGE_LAUNCHD_LABEL": label,
         "PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
     }
 
+    if agent == "claude":
+        env_vars["CLAUDE_HOME"] = str(codex_home)
+
     passthrough = (
+        "CLAUDE_HOME",
+        "CLAUDE_SETTINGS_PATH",
+        "CLAUDE_CONFIG_PATH",
+        "CLAUDE_PROJECTS_PATH",
         "CODEX_IMESSAGE_CHAT_DB",
         "CODEX_IMESSAGE_INBOUND_POLL_S",
         "CODEX_IMESSAGE_INBOUND_RETRY_S",
@@ -1130,6 +1346,7 @@ def _build_launchagent_plist(
         "CODEX_IMESSAGE_REQUIRE_SESSION_REF",
         "CODEX_IMESSAGE_TMUX_NEW_SESSION_NAME",
         "CODEX_IMESSAGE_TMUX_WINDOW_PREFIX",
+        "CODEX_IMESSAGE_CLAUDE_BIN",
         "CODEX_IMESSAGE_CODEX_BIN",
         "CODEX_IMESSAGE_SETUP_PERMISSIONS_TIMEOUT_S",
         "CODEX_IMESSAGE_SETUP_PERMISSIONS_POLL_S",
@@ -1619,6 +1836,7 @@ def _run_setup_permissions(
 
 def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, object]:
     now_ts = int(time.time())
+    agent = _current_agent()
     launchd_label = os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
     launchd_err_log = _launchd_err_log_path()
@@ -1708,15 +1926,22 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
     if not lock_alive:
         health.append("control-plane lock PID not alive")
     if not notify_top_level:
-        health.append("notify hook is not configured at top-level in ~/.codex/config.toml")
+        if agent == "claude":
+            health.append("notify hook is not configured in ~/.claude/settings.json")
+        else:
+            health.append("notify hook is not configured at top-level in ~/.codex/config.toml")
     if notify_misscoped:
         health.append("notify hook appears under [notice.model_migrations]; move it to top-level `notify`")
     if isinstance(notify_error, str) and notify_error.strip():
-        health.append("unable to parse ~/.codex/config.toml for notify hook")
+        if agent == "claude":
+            health.append("unable to parse ~/.claude/settings.json for notify hook")
+        else:
+            health.append("unable to parse ~/.codex/config.toml for notify hook")
 
     return {
         "ok": len(health) == 0,
         "ts": now_ts,
+        "agent": agent,
         "codex_home": str(codex_home),
         "recipient": recipient_text or None,
         "launchd": {
@@ -1774,6 +1999,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
 
     status = "OK" if bool(report.get("ok")) else "DEGRADED"
     sys.stdout.write(f"Codex iMessage doctor: {status}\n")
+    sys.stdout.write(f"Agent: {report.get('agent') or _current_agent()}\n")
     sys.stdout.write(f"Home: {report.get('codex_home')}\n")
     sys.stdout.write(f"Recipient: {report.get('recipient') or '(missing)'}\n")
 
@@ -2394,7 +2620,7 @@ def _send_structured(
     message_index: dict[str, object],
 ) -> None:
     sid = session_id or "unknown"
-    header = f"[Codex] {sid} — {kind} — {outbound._now_local_iso()}"
+    header = f"[{_agent_display_name()}] {sid} — {kind} — {outbound._now_local_iso()}"
     body = outbound._redact(text.rstrip()) + "\n"
 
     try:
@@ -2417,7 +2643,7 @@ def _send_structured(
 
 
 def _find_all_session_files(*, codex_home: Path) -> list[Path]:
-    sessions_dir = codex_home / "sessions"
+    sessions_dir = _agent_session_root(codex_home=codex_home)
     if not sessions_dir.exists():
         return []
 
@@ -2717,7 +2943,16 @@ def _extract_session_id_from_notify_payload(payload: dict[str, object]) -> tuple
 
     session_path = _first_nonempty_from_sources(
         sources=sources,
-        keys=("session_path", "session-path", "sessionPath", "session_file", "session-file"),
+        keys=(
+            "session_path",
+            "session-path",
+            "sessionPath",
+            "session_file",
+            "session-file",
+            "transcript_path",
+            "transcript-path",
+            "transcriptPath",
+        ),
     )
     if isinstance(session_path, str) and session_path:
         resolved = outbound._read_session_id(session_path=Path(session_path))
@@ -2754,12 +2989,23 @@ def _extract_notify_context_fields(
 
     session_path = _first_nonempty_from_sources(
         sources=sources,
-        keys=("session_path", "session-path", "sessionPath", "session_file", "session-file"),
+        keys=(
+            "session_path",
+            "session-path",
+            "sessionPath",
+            "session_file",
+            "session-file",
+            "transcript_path",
+            "transcript-path",
+            "transcriptPath",
+        ),
     )
     if not session_path:
-        env_session_path = os.environ.get("CODEX_SESSION_PATH")
-        if isinstance(env_session_path, str) and env_session_path.strip():
-            session_path = env_session_path.strip()
+        for env_key in _session_path_env_keys():
+            env_session_path = os.environ.get(env_key)
+            if isinstance(env_session_path, str) and env_session_path.strip():
+                session_path = env_session_path.strip()
+                break
     if isinstance(session_path, str) and session_path.strip():
         fields["session_path"] = session_path.strip()
 
@@ -2910,6 +3156,38 @@ def _resolve_codex_bin() -> str:
     return "codex"
 
 
+def _resolve_claude_bin() -> str:
+    override = os.environ.get("CODEX_IMESSAGE_CLAUDE_BIN")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+
+    discovered = shutil.which("claude")
+    if isinstance(discovered, str) and discovered.strip():
+        return discovered.strip()
+
+    for candidate in _CLAUDE_BIN_CANDIDATES:
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+
+    return "claude"
+
+
+def _resolve_agent_bin(*, agent: str | None = None) -> str:
+    normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    if normalized == "claude":
+        return _resolve_claude_bin()
+    return _resolve_codex_bin()
+
+
+def _is_agent_command(command: str, *, agent: str | None = None) -> bool:
+    if not isinstance(command, str):
+        return False
+    return _agent_command_keyword(agent=agent if agent is not None else _current_agent()) in command.lower()
+
+
 def _tmux_cmd(*parts: str, tmux_socket: str | None = None) -> list[str]:
     cmd = [_resolve_tmux_bin()]
     socket_value = _normalize_tmux_socket(tmux_socket=tmux_socket)
@@ -2994,7 +3272,7 @@ def _tmux_active_codex_panes(*, tmux_socket: str | None) -> dict[str, object]:
         pane_path = parts[2].strip()
         if not pane_id:
             continue
-        if "codex" not in command.lower():
+        if not _is_agent_command(command):
             continue
         panes.append({"pane_id": pane_id, "command": command, "path": pane_path})
 
@@ -3076,8 +3354,12 @@ def _tmux_start_codex_window(
     label_token = _sanitize_tmux_window_label(label=label)
     ts = time.strftime("%H%M%S")
     base_window_name = f"{prefix}-{label_token}-{ts}"
-    codex_bin = _resolve_codex_bin()
-    launch_cmd = f"CODEX_IMESSAGE_REPLY=1 {shlex.quote(codex_bin)} -a never -s danger-full-access"
+    agent = _current_agent()
+    agent_bin = _resolve_agent_bin(agent=agent)
+    if agent == "claude":
+        launch_cmd = f"CLAUDE_IMESSAGE_REPLY=1 {shlex.quote(agent_bin)}"
+    else:
+        launch_cmd = f"CODEX_IMESSAGE_REPLY=1 {shlex.quote(agent_bin)} -a never -s danger-full-access"
 
     for i in range(0, 64):
         window_name = base_window_name if i == 0 else f"{base_window_name}-{i}"
@@ -3115,7 +3397,7 @@ def _tmux_start_codex_window(
             return None, None, "tmux created a window but did not return pane ID."
         return pane, window_name, None
 
-    return None, None, "Failed to create tmux window for Codex."
+    return None, None, f"Failed to create tmux window for {_agent_display_name(agent=agent)}."
 
 
 def _tmux_wait_for_pane_command(*, pane: str, expected: str, timeout_s: float, tmux_socket: str | None = None) -> bool:
@@ -3258,7 +3540,7 @@ def _tmux_codex_panes_for_cwd(*, cwd: str, tmux_socket: str | None = None) -> li
         current_path = _normalize_path_for_match(parts[2].strip())
         if not pane_id:
             continue
-        if "codex" not in current_cmd:
+        if not _is_agent_command(current_cmd):
             continue
         if current_path != target_cwd:
             continue
@@ -3274,7 +3556,7 @@ def _tmux_pane_matches_session(
     tmux_socket: str | None = None,
 ) -> bool:
     command, pane_path = _tmux_read_pane_context(pane=pane, tmux_socket=tmux_socket)
-    if not (isinstance(command, str) and "codex" in command.lower()):
+    if not (isinstance(command, str) and _is_agent_command(command)):
         return False
 
     rec_cwd = session_rec.get("cwd") if isinstance(session_rec.get("cwd"), str) else None
@@ -3425,7 +3707,7 @@ def _tmux_discover_codex_pane_for_session(
         current_path = parts[2].strip()
         if not pane_id:
             continue
-        if "codex" not in current_cmd:
+        if not _is_agent_command(current_cmd):
             continue
         candidates.append((pane_id, current_path))
 
@@ -3609,7 +3891,8 @@ def _dispatch_prompt_to_session(
     if strict_tmux and tmux_enabled and tmux_identity_present:
         return "tmux_stale", None
 
-    response = reply._run_codex_resume(
+    response = reply._run_agent_resume(
+        agent=_current_agent(),
         session_id=target_sid,
         cwd=cwd,
         prompt=prompt,
@@ -3801,6 +4084,8 @@ def _create_new_session_in_tmux(
     label: str | None = None,
     tmux_socket: str | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
+    agent = _current_agent()
+    agent_name = _agent_display_name(agent=agent)
     text = " ".join(prompt.splitlines()).strip()
     if not text:
         return None, None, None, "No instruction text was provided."
@@ -3828,7 +4113,7 @@ def _create_new_session_in_tmux(
 
     # Best-effort warmup only. Do not fail solely on command-name mismatch because
     # packaged/wrapped Codex binaries may appear as different pane commands.
-    wait_kwargs: dict[str, object] = {"pane": pane, "expected": "codex", "timeout_s": 8.0}
+    wait_kwargs: dict[str, object] = {"pane": pane, "expected": _agent_command_keyword(agent=agent), "timeout_s": 8.0}
     if tmux_socket_norm:
         wait_kwargs["tmux_socket"] = tmux_socket_norm
     _tmux_wait_for_pane_command(**wait_kwargs)
@@ -3837,7 +4122,7 @@ def _create_new_session_in_tmux(
     if tmux_socket_norm:
         send_kwargs["tmux_socket"] = tmux_socket_norm
     if not reply._tmux_send_prompt(**send_kwargs):
-        return None, None, pane, "Started Codex in tmux but failed to submit initial prompt."
+        return None, None, pane, f"Started {agent_name} in tmux but failed to submit initial prompt."
 
     created = _wait_for_new_session_file(codex_home=codex_home, before=before, timeout_s=12.0)
     if not created:
@@ -3847,7 +4132,7 @@ def _create_new_session_in_tmux(
             created = newest[0]
 
     if not created:
-        return None, None, pane, "Started Codex in tmux but could not locate session file."
+        return None, None, pane, f"Started {agent_name} in tmux but could not locate session file."
 
     session_id = outbound._read_session_id(session_path=created)
     if not isinstance(session_id, str) or not session_id.strip():
@@ -3862,6 +4147,7 @@ def _create_new_session(
     label: str,
     prompt: str,
 ) -> tuple[str | None, str | None, str | None]:
+    agent = _current_agent()
     before = {str(path) for path in _find_all_session_files(codex_home=codex_home)}
 
     out_dir = codex_home / "tmp"
@@ -3871,26 +4157,30 @@ def _create_new_session(
         pass
     out_path = out_dir / f"imessage_new_session_{int(time.time())}_{os.getpid()}.txt"
 
-    cmd: list[str] = [
-        "codex",
-        "-a",
-        "never",
-        "-s",
-        "danger-full-access",
-        "exec",
-        "--skip-git-repo-check",
-        "--output-last-message",
-        str(out_path),
-        prompt,
-    ]
+    if agent == "claude":
+        cmd = [_resolve_agent_bin(agent=agent), "-p", prompt]
+    else:
+        cmd = [
+            _resolve_agent_bin(agent=agent),
+            "-a",
+            "never",
+            "-s",
+            "danger-full-access",
+            "exec",
+            "--skip-git-repo-check",
+            "--output-last-message",
+            str(out_path),
+            prompt,
+        ]
 
     try:
         proc = subprocess.run(
             cmd,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
-            env={**os.environ, "CODEX_IMESSAGE_REPLY": "1"},
+            text=True,
+            env={**os.environ, "CODEX_IMESSAGE_REPLY": "1", "CLAUDE_IMESSAGE_REPLY": "1"},
         )
     except Exception:
         return None, None, "Failed to start new session."
@@ -3914,10 +4204,13 @@ def _create_new_session(
         return None, None, "Session created but session ID was not found."
 
     response: str | None = None
-    try:
-        response = out_path.read_text(encoding="utf-8").strip() or None
-    except Exception:
-        response = None
+    if agent == "claude":
+        response = proc.stdout.strip() if isinstance(proc.stdout, str) and proc.stdout.strip() else None
+    else:
+        try:
+            response = out_path.read_text(encoding="utf-8").strip() or None
+        except Exception:
+            response = None
 
     return session_id, str(created), response
 
@@ -4533,7 +4826,8 @@ def _process_inbound_replies(
                 rec_pane = rec.get("tmux_pane")
                 if isinstance(rec_pane, str):
                     preserved_pane = rec_pane
-            response = reply._run_codex_resume(
+            response = reply._run_agent_resume(
+                agent=_current_agent(),
                 session_id=target_sid,
                 cwd=fallback_cwd,
                 prompt=prompt_for_dispatch,
@@ -4546,7 +4840,7 @@ def _process_inbound_replies(
                     recipient=recipient,
                     session_id=target_sid,
                     kind="error",
-                    text="No response from codex resume. Check session logs.",
+                    text=f"No response from {_agent_display_name().lower()} resume. Check session logs.",
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
@@ -4595,7 +4889,7 @@ def _process_inbound_replies(
                 recipient=recipient,
                 session_id=target_sid,
                 kind="error",
-                text="No response from codex resume. Check session logs.",
+                text=f"No response from {_agent_display_name().lower()} resume. Check session logs.",
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -4778,26 +5072,40 @@ def _ensure_inbound_cursor_seed(
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     sub = parser.add_subparsers(dest="cmd", required=True)
+    default_agent = _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
+
+    def _add_agent_arg(cmd_parser: argparse.ArgumentParser) -> None:
+        cmd_parser.add_argument(
+            "--agent",
+            default=default_agent,
+            choices=sorted(_SUPPORTED_AGENTS),
+            help="Agent runtime to integrate (codex or claude)",
+        )
 
     run = sub.add_parser("run", help="Run control plane forever")
+    _add_agent_arg(run)
     run.add_argument("--poll", type=float, default=float(os.environ.get("CODEX_IMESSAGE_INBOUND_POLL_S", "0.5")))
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--trace", action="store_true", help="Emit per-message routing trace logs")
 
     once = sub.add_parser("once", help="Run one control-plane cycle")
+    _add_agent_arg(once)
     once.add_argument("--dry-run", action="store_true")
     once.add_argument("--trace", action="store_true", help="Emit per-message routing trace logs")
 
     notify_cmd = sub.add_parser("notify", help="Process a single notify payload JSON")
+    _add_agent_arg(notify_cmd)
     notify_cmd.add_argument("payload", nargs="?", default="")
     notify_cmd.add_argument("--dry-run", action="store_true")
 
     doctor_cmd = sub.add_parser("doctor", help="Show control-plane health diagnostics")
+    _add_agent_arg(doctor_cmd)
     doctor_cmd.add_argument("--json", action="store_true", help="Emit JSON diagnostics")
     setup_notify = sub.add_parser(
         "setup-notify-hook",
-        help="Install/update top-level Codex notify hook in config.toml",
+        help="Install/update notify hook for Codex or Claude",
     )
+    _add_agent_arg(setup_notify)
     setup_notify.add_argument(
         "--recipient",
         default="",
@@ -4806,12 +5114,13 @@ def main(argv: list[str]) -> int:
     setup_notify.add_argument(
         "--python-bin",
         default=str(Path(sys.executable).resolve()),
-        help="Python binary to invoke from Codex notify hook (defaults to current interpreter)",
+        help="Python binary to invoke from notify hook (defaults to current interpreter)",
     )
     setup_cmd = sub.add_parser(
         "setup-permissions",
         help="Open Full Disk Access settings and wait for chat.db readability",
     )
+    _add_agent_arg(setup_cmd)
     setup_cmd.add_argument(
         "--timeout",
         type=float,
@@ -4833,6 +5142,7 @@ def main(argv: list[str]) -> int:
         "setup-launchd",
         help="Install and start a launchd LaunchAgent for automatic startup",
     )
+    _add_agent_arg(setup_launchd)
     setup_launchd.add_argument(
         "--label",
         default=os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL),
@@ -4881,8 +5191,11 @@ def main(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
 
+    agent = _normalize_agent(agent=getattr(args, "agent", None))
+    os.environ["CODEX_IMESSAGE_AGENT"] = agent
+
     recipient_raw = os.environ.get("CODEX_IMESSAGE_TO")
-    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    codex_home = _agent_home_path(agent=agent)
     recipient = _normalize_recipient(recipient_raw) if isinstance(recipient_raw, str) and recipient_raw.strip() else ""
     trace_enabled = bool(getattr(args, "trace", False)) or _env_enabled("CODEX_IMESSAGE_TRACE", default=False)
 
@@ -4962,6 +5275,7 @@ def main(argv: list[str]) -> int:
             "[imessage-control-plane] startup "
             f"script={Path(__file__).resolve()} "
             f"python={sys.executable} "
+            f"agent={agent} "
             f"strict_tmux={_strict_tmux_enabled()} "
             f"trace={trace_enabled} "
             f"chat_db={_chat_db_path(codex_home=codex_home)}"

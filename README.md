@@ -1,14 +1,14 @@
 # codex-imessage-control-plane
 
-`codex-imessage-control-plane` is a macOS-only runtime that connects Codex sessions to iMessage.
+`codex-imessage-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage.
 
 `README.md` is the canonical setup guide for both humans and coding agents.
 `AGENTS.md` is intentionally lightweight and points back here.
 
 It provides one control-plane process that can:
-- forward Codex `notify` payloads to iMessage
+- forward Codex/Claude `notify` payloads to iMessage
 - read inbound iMessage replies from Messages `chat.db`
-- route replies back to the right Codex session (including tmux-based routing)
+- route replies back to the right Codex/Claude session (including tmux-based routing)
 - drain a fallback outbound queue when AppleScript send attempts fail
 
 ## Scope and Non-Goals
@@ -25,7 +25,7 @@ Non-goals:
 
 - macOS (Messages app available and signed in)
 - Python 3.11+ (runtime enforces this)
-- Codex CLI installed and authenticated
+- Codex CLI or Claude CLI installed and authenticated
 - Optional but recommended: tmux
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
 
@@ -63,18 +63,24 @@ export CODEX_IMESSAGE_TO="+15555550123"
 export CODEX_HOME="$HOME/.codex"
 export CODEX_IMESSAGE_NOTIFY_MODE="route"
 export PYTHON_BIN
+
+# Optional: switch runtime from codex (default) to claude
+# export CODEX_IMESSAGE_AGENT="claude"
+# export CLAUDE_HOME="$HOME/.claude"
 ```
 
-4. Configure Codex `notify` hook in `~/.codex/config.toml`.
+4. Configure notify hook for your agent runtime.
 
 ```bash
 "$PYTHON_BIN" codex_imessage_control_plane.py setup-notify-hook \
+  --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 ```
 
-This updater is idempotent and writes `notify` at top-level.
-It is safe even if `config.toml` currently has misplaced/duplicate `notify` entries (including under `[notice.model_migrations]`).
+This updater is idempotent:
+- `--agent codex`: writes `notify` at top-level in `~/.codex/config.toml`
+- `--agent claude`: writes hook commands under `hooks.Notification` and `hooks.Stop` in `~/.claude/settings.json`
 
 Compatibility note:
 - Current Codex releases parse `notify` as a sequence (array), not a string command.
@@ -84,9 +90,10 @@ Compatibility note:
 
 ```bash
 "$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd \
+  --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
-"$PYTHON_BIN" codex_imessage_control_plane.py doctor
+"$PYTHON_BIN" codex_imessage_control_plane.py doctor --agent "${CODEX_IMESSAGE_AGENT:-codex}"
 ```
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
@@ -156,13 +163,13 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 
 ```bash
 # Unified control plane
-python3 codex_imessage_control_plane.py run [--poll 0.5] [--dry-run] [--trace]
-python3 codex_imessage_control_plane.py once [--dry-run] [--trace]
-python3 codex_imessage_control_plane.py notify [PAYLOAD_JSON] [--dry-run]
-python3 codex_imessage_control_plane.py doctor [--json]
-python3 codex_imessage_control_plane.py setup-notify-hook [--recipient TO] [--python-bin PATH]
-python3 codex_imessage_control_plane.py setup-permissions [--timeout 180] [--poll 1.0] [--no-open]
-python3 codex_imessage_control_plane.py setup-launchd [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
+python3 codex_imessage_control_plane.py run [--agent codex|claude] [--poll 0.5] [--dry-run] [--trace]
+python3 codex_imessage_control_plane.py once [--agent codex|claude] [--dry-run] [--trace]
+python3 codex_imessage_control_plane.py notify [--agent codex|claude] [PAYLOAD_JSON] [--dry-run]
+python3 codex_imessage_control_plane.py doctor [--agent codex|claude] [--json]
+python3 codex_imessage_control_plane.py setup-notify-hook [--agent codex|claude] [--recipient TO] [--python-bin PATH]
+python3 codex_imessage_control_plane.py setup-permissions [--agent codex|claude] [--timeout 180] [--poll 1.0] [--no-open]
+python3 codex_imessage_control_plane.py setup-launchd [--agent codex|claude] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
 
 # Notify helper (best-effort)
 python3 codex_imessage_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]

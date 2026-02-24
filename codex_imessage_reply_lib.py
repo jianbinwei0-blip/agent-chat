@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Codex ← iMessage reply bridge (macOS).
+"""Codex/Claude ← iMessage reply bridge (macOS).
 
 Reads new inbound iMessage replies from Messages' local SQLite DB and resumes the
-most recently-notified Codex session with the reply text.
+most recently-notified Codex/Claude session with the reply text.
 
 Usage:
   python3 codex_imessage_reply_lib.py run
@@ -57,6 +57,12 @@ _TMUX_BIN_CANDIDATES = (
     "/usr/local/bin/tmux",
     "/usr/bin/tmux",
 )
+_CLAUDE_BIN_CANDIDATES = (
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "/usr/bin/claude",
+)
+_SUPPORTED_AGENTS = frozenset({"codex", "claude"})
 
 
 def _normalize_tmux_socket(*, tmux_socket: str | None) -> str | None:
@@ -90,6 +96,29 @@ def _resolve_tmux_bin() -> str:
         except Exception:
             continue
     return "tmux"
+
+
+def _normalize_agent(*, agent: str | None) -> str:
+    candidate = agent.strip().lower() if isinstance(agent, str) else ""
+    return candidate if candidate in _SUPPORTED_AGENTS else "codex"
+
+
+def _resolve_claude_bin() -> str:
+    override = os.environ.get("CODEX_IMESSAGE_CLAUDE_BIN")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+
+    discovered = shutil.which("claude")
+    if isinstance(discovered, str) and discovered.strip():
+        return discovered.strip()
+
+    for candidate in _CLAUDE_BIN_CANDIDATES:
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+    return "claude"
 
 
 def _tmux_cmd(*parts: str, tmux_socket: str | None = None) -> list[str]:
@@ -422,6 +451,49 @@ def _run_codex_resume(
         return None
 
 
+def _run_agent_resume(
+    *,
+    agent: str,
+    session_id: str,
+    cwd: str | None,
+    prompt: str,
+    codex_home: Path,
+    timeout_s: float | None,
+) -> str | None:
+    normalized = _normalize_agent(agent=agent)
+    if normalized != "claude":
+        return _run_codex_resume(
+            session_id=session_id,
+            cwd=cwd,
+            prompt=prompt,
+            codex_home=codex_home,
+            timeout_s=timeout_s,
+        )
+
+    cmd: list[str] = [_resolve_claude_bin(), "-p", "--resume", session_id, prompt]
+    try:
+        timeout = None if timeout_s is None else (None if float(timeout_s) <= 0 else float(timeout_s))
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            cwd=cwd if isinstance(cwd, str) and cwd.strip() else None,
+            timeout=timeout,
+            env={**os.environ, "CLAUDE_IMESSAGE_REPLY": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return "(claude --resume timed out)"
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    return proc.stdout.strip() if isinstance(proc.stdout, str) and proc.stdout.strip() else None
+
+
 def _read_last_assistant_text_from_session(session_path: Path) -> str | None:
     """Return the last assistant message from a Codex session JSONL, if present."""
     try:
@@ -717,12 +789,16 @@ def _handle_prompt(
                 "no background fallback run)"
             )
     else:
+        active_agent = _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
         if use_tmux and tmux_pane and echo:
-            sys.stdout.write("tmux context mismatch; using codex resume fallback\n")
-        display_cmd: list[str] = ["codex", "-a", "never", "-s", "workspace-write"]
-        if cwd:
-            display_cmd.extend(["-C", cwd])
-        display_cmd.extend(["exec", "--skip-git-repo-check", "resume", session_id, "-"])
+            sys.stdout.write("tmux context mismatch; using CLI resume fallback\n")
+        if active_agent == "claude":
+            display_cmd = [_resolve_claude_bin(), "-p", "--resume", session_id, prompt]
+        else:
+            display_cmd = ["codex", "-a", "never", "-s", "workspace-write"]
+            if cwd:
+                display_cmd.extend(["-C", cwd])
+            display_cmd.extend(["exec", "--skip-git-repo-check", "resume", session_id, "-"])
 
         if dry_run:
             sys.stdout.write(" ".join(display_cmd) + "\n")
@@ -732,7 +808,8 @@ def _handle_prompt(
                 sys.stdout.write(f"rowid={rowid}\n")
             sys.stdout.write(" ".join(display_cmd) + "\n")
 
-        response = _run_codex_resume(
+        response = _run_agent_resume(
+            agent=active_agent,
             session_id=session_id,
             cwd=cwd,
             prompt=prompt,
@@ -740,7 +817,7 @@ def _handle_prompt(
             timeout_s=timeout_s,
         )
     if not response:
-        response = "(no response from codex exec resume; check codex logs / timeout)"
+        response = "(no response from CLI resume; check logs / timeout)"
 
     if echo:
         max_chars_raw = os.environ.get("CODEX_IMESSAGE_ECHO_MAX_CHARS", "4000")
@@ -752,7 +829,7 @@ def _handle_prompt(
         shown = response
         if max_chars and len(shown) > max_chars:
             shown = shown[: max_chars - 1] + "…"
-        sys.stdout.write("----- codex reply -----\n")
+        sys.stdout.write("----- assistant reply -----\n")
         sys.stdout.write(shown.rstrip() + "\n")
         sys.stdout.write("----- end reply -----\n")
 

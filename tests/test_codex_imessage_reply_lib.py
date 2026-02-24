@@ -263,6 +263,47 @@ class TestCodexIMessageReplyBridge(unittest.TestCase):
         self.assertIsNone(observed_timeout)
         self.assertEqual(result, "assistant reply")
 
+    def test_run_agent_resume_delegates_to_codex_resume(self) -> None:
+        with mock.patch.object(bridge, "_run_codex_resume", return_value="from-codex") as run_mock:  # type: ignore[attr-defined]
+            result = bridge._run_agent_resume(  # type: ignore[attr-defined]
+                agent="codex",
+                session_id="11111111-1111-1111-1111-111111111111",
+                cwd="/Users/testuser",
+                prompt="continue",
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=12.0,
+            )
+
+        self.assertEqual(result, "from-codex")
+        run_mock.assert_called_once()
+
+    def test_run_agent_resume_uses_claude_print_resume(self) -> None:
+        observed_cmd: list[str] = []
+        observed_cwd: str | None = None
+
+        def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal observed_cmd, observed_cwd
+            observed_cmd = list(args[0])
+            observed_cwd = kwargs.get("cwd")
+            return subprocess.CompletedProcess(args[0], 0, stdout="assistant reply\n", stderr="")
+
+        with mock.patch.object(bridge.subprocess, "run", side_effect=fake_run):
+            result = bridge._run_agent_resume(  # type: ignore[attr-defined]
+                agent="claude",
+                session_id="11111111-1111-1111-1111-111111111111",
+                cwd="/Users/testuser/project",
+                prompt="continue",
+                codex_home=Path("/tmp/claude-home"),
+                timeout_s=9.0,
+            )
+
+        self.assertEqual(result, "assistant reply")
+        self.assertEqual(Path(observed_cmd[0]).name, "claude")
+        self.assertEqual(observed_cmd[1:3], ["-p", "--resume"])
+        self.assertEqual(observed_cmd[3], "11111111-1111-1111-1111-111111111111")
+        self.assertEqual(observed_cmd[4], "continue")
+        self.assertEqual(observed_cwd, "/Users/testuser/project")
+
     def test_wait_for_new_assistant_text_allows_none_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             session_path = Path(tmp) / "session.jsonl"
