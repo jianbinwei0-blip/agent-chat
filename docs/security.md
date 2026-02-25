@@ -5,6 +5,7 @@
 This project runs locally on macOS and interacts with:
 - `Messages` via Apple Events (`osascript`)
 - local Messages database (`~/Library/Messages/chat.db`)
+- Telegram Bot API (when Telegram transport is enabled)
 - local Codex session/history files under `CODEX_HOME`
 
 It is not a network service and is designed for single-user local operation.
@@ -18,7 +19,7 @@ It is not a network service and is designed for single-user local operation.
 ## Sensitive Data
 
 Potentially sensitive local data:
-- iMessage body text from inbound/outbound workflows
+- iMessage/Telegram message text from inbound/outbound workflows
 - Codex prompts/responses from session/history files
 - session identifiers and routing metadata in state JSON files
 

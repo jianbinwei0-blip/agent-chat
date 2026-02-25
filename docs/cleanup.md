@@ -1,6 +1,6 @@
 # Cleanup / Uninstall
 
-Use this guide to remove Codex/Claude <-> iMessage integration from a macOS host.
+Use this guide to remove the Codex/Claude <-> agent-chat integration from a macOS host.
 
 Uninstall is host-scoped: it only modifies machine/user state under `$HOME`
 (`~/Library`, `~/.codex`) and must not edit files inside an `agent-chat`
@@ -8,11 +8,11 @@ checkout.
 
 ## What This Removes
 
-- launchd service (`com.codex.imessage-control-plane`)
-- LaunchAgent plist (`~/Library/LaunchAgents/com.codex.imessage-control-plane.plist`)
+- launchd service (default `com.agent-chat-control-plane`, or custom `CODEX_IMESSAGE_LAUNCHD_LABEL`)
+- LaunchAgent plist (`~/Library/LaunchAgents/<label>.plist`)
 - runtime app bundle (`~/Applications/Codex iMessage Python.app`)
-- tmux-managed background control-plane sessions (`agent_imessage_control_plane` and legacy `codex_imessage_control_plane`)
-- Codex/Claude notify hook wiring to `agent_imessage_control_plane.py notify`
+- tmux-managed background control-plane session (`agent_chat_control_plane`)
+- Codex/Claude notify hook wiring to `agent_chat_control_plane.py notify`
 - integration runtime state under `~/.codex/tmp/imessage_*`
 - integration tmux log (`~/.codex/log/imessage-control-plane-tmux.log`)
 - Full Disk Access TCC grants commonly used by this integration (`org.python.python`)
@@ -23,22 +23,21 @@ Run from any shell:
 
 ```bash
 set -euo pipefail
-LABEL='com.codex.imessage-control-plane'
+LABEL="${CODEX_IMESSAGE_LAUNCHD_LABEL:-com.agent-chat-control-plane}"
 UID_NUM="$(id -u)"
 SERVICE="gui/${UID_NUM}/${LABEL}"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 APP="$HOME/Applications/Codex iMessage Python.app"
-OUT_LOG="$HOME/Library/Logs/codex-imessage-control-plane.launchd.out.log"
-ERR_LOG="$HOME/Library/Logs/codex-imessage-control-plane.launchd.err.log"
+OUT_LOG="$HOME/Library/Logs/agent-chat-control-plane.launchd.out.log"
+ERR_LOG="$HOME/Library/Logs/agent-chat-control-plane.launchd.err.log"
 CONFIG="$HOME/.codex/config.toml"
 TMP_DIR="$HOME/.codex/tmp"
 TMUX_LOG="$HOME/.codex/log/imessage-control-plane-tmux.log"
 
 launchctl bootout "$SERVICE" >/dev/null 2>&1 || true
 launchctl disable "$SERVICE" >/dev/null 2>&1 || true
-tmux kill-session -t agent_imessage_control_plane >/dev/null 2>&1 || true
-tmux kill-session -t codex_imessage_control_plane >/dev/null 2>&1 || true
-pkill -f 'agent_imessage_control_plane.py run' >/dev/null 2>&1 || true
+tmux kill-session -t agent_chat_control_plane >/dev/null 2>&1 || true
+pkill -f 'agent_chat_control_plane.py run' >/dev/null 2>&1 || true
 
 rm -f "$PLIST"
 rm -rf "$APP"
@@ -59,7 +58,7 @@ if not config.exists():
 text = config.read_text(encoding="utf-8")
 backup = config.with_suffix(config.suffix + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
 backup.write_text(text, encoding="utf-8")
-lines = [line for line in text.splitlines() if "agent_imessage_control_plane.py notify" not in line]
+lines = [line for line in text.splitlines() if "agent_chat_control_plane.py notify" not in line]
 new_text = "\n".join(lines)
 if text.endswith("\n") and not new_text.endswith("\n"):
     new_text += "\n"
@@ -85,24 +84,24 @@ Run all checks below. A reset is complete only when every check passes.
 
 ```bash
 # 1) launchd service absent
-launchctl print gui/$(id -u)/com.codex.imessage-control-plane
+launchctl print gui/$(id -u)/com.agent-chat-control-plane
 
-# 2) no imessage control-plane tmux session/window
-tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | rg -i 'imessage|agent_imessage|codex_imessage|control_plane'
+# 2) no control-plane tmux session/window
+tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | rg -i 'agent_chat|control_plane|imessage'
 
 # 3) no active control-plane process
-pgrep -af 'agent_imessage|codex_imessage|imessage_control_plane|send-imessage|osascript'
+pgrep -af 'agent_chat|control_plane|send-imessage|osascript'
 
 # 4) no active notify hook wiring in live config
-rg -n 'imessage|agent_imessage|codex_imessage|send-imessage|notify\\s*=\\s*\\[' ~/.codex/config.toml
+rg -n 'agent_chat|send-imessage|notify\\s*=\\s*\\[' ~/.codex/config.toml
 
 # 5) launch agent/app removed
-[ -e ~/Library/LaunchAgents/com.codex.imessage-control-plane.plist ] && echo "present" || echo "absent"
+[ -e ~/Library/LaunchAgents/com.agent-chat-control-plane.plist ] && echo "present" || echo "absent"
 [ -e ~/Applications/Codex\\ iMessage\\ Python.app ] && echo "present" || echo "absent"
 
-# 6) no imessage runtime state/log leftovers
+# 6) no runtime state/log leftovers
 ls -la ~/.codex/tmp | rg -n '^.*imessage'
-ls -la ~/.codex/log | rg -n 'imessage|agent-imessage|codex-imessage' -i
+ls -la ~/.codex/log | rg -n 'imessage|agent-chat' -i
 ```
 
 Expected:
@@ -112,8 +111,8 @@ Expected:
 Optional post-cleanup doctor check (installed entrypoint only, no repo path):
 
 ```bash
-if command -v agent-imessage-control-plane >/dev/null 2>&1; then
-  PYTHONDONTWRITEBYTECODE=1 agent-imessage-control-plane doctor
+if command -v agent-chat-control-plane >/dev/null 2>&1; then
+  PYTHONDONTWRITEBYTECODE=1 agent-chat-control-plane doctor
 fi
 ```
 

@@ -9,8 +9,8 @@ Tails the active Codex session JSONL and sends iMessages for:
 This is best-effort and must never fail the calling process.
 
 Usage:
-  python3 agent_imessage_outbound_lib.py run [--poll 0.5] [--dry-run] [--session-path PATH]
-  python3 agent_imessage_outbound_lib.py once [--dry-run] [--session-path PATH]
+  python3 agent_chat_outbound_lib.py run [--poll 0.5] [--dry-run] [--session-path PATH]
+  python3 agent_chat_outbound_lib.py once [--dry-run] [--session-path PATH]
 
 Config:
   - CODEX_IMESSAGE_TO: recipient phone/email
@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import agent_imessage_dedupe
+import agent_chat_dedupe
 
 
 _MAX_MESSAGE_CHARS_DEFAULT = 1800
@@ -916,19 +916,19 @@ def _process_session_path(
                             dedupe_key = f"{cache_key}:{call_id}"
                             if dedupe_key in seen_needs_input_call_ids:
                                 continue
-                            call_key = agent_imessage_dedupe.build_dedupe_key(
+                            call_key = agent_chat_dedupe.build_dedupe_key(
                                 category="needs_input_call_id",
                                 scope=session_scope,
                                 text=call_id,
                             )
-                            if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=call_key):
+                            if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
                                 continue
-                        semantic_key = agent_imessage_dedupe.build_dedupe_key(
+                        semantic_key = agent_chat_dedupe.build_dedupe_key(
                             category="needs_input",
                             scope=session_scope,
                             text=text,
                         )
-                        if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
+                        if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
                             continue
 
                     _send_structured(

@@ -2,30 +2,30 @@
 
 ## Overview
 
-`agent-imessage-control-plane` is a local macOS runtime that synchronizes:
-- outbound Codex/Claude notifications -> iMessage
-- inbound iMessage replies -> Codex/Claude sessions
+`agent-chat-control-plane` is a local macOS runtime that synchronizes:
+- outbound Codex/Claude notifications -> iMessage and/or Telegram
+- inbound iMessage and Telegram replies -> Codex/Claude sessions
 
-The primary daemon is `agent_imessage_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
+The primary daemon is `agent_chat_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
 
 ## Components
 
-- `agent_imessage_control_plane.py`
+- `agent_chat_control_plane.py`
   - Long-lived run loop (`run`) and one-shot cycle (`once`)
   - Notify payload ingestion (`notify`)
   - Health diagnostics (`doctor`)
   - Session registry, routing, queue draining, inbound polling
-- `agent_imessage_notify.py`
+- `agent_chat_notify.py`
   - Best-effort notify formatter/sender
   - Supports `attention` and `route` modes
   - Can update attention state/index without sending (`state_only` mode)
-- `agent_imessage_outbound_lib.py`
+- `agent_chat_outbound_lib.py`
   - Session JSONL tailing and outbound message extraction
   - Request-user-input detection and mirroring controls
-- `agent_imessage_reply_lib.py`
-  - `chat.db` inbound polling
+- `agent_chat_reply_lib.py`
+  - iMessage `chat.db` inbound polling
   - Reply/session correlation and resume/tmux dispatch helpers
-- `agent_imessage_dedupe.py`
+- `agent_chat_dedupe.py`
   - Shared dedupe key store + TTL
 
 ## Data and State
@@ -38,6 +38,7 @@ Key files include:
 - `imessage_message_session_index.json`
 - `imessage_control_outbound_cursor.json`
 - `imessage_inbound_cursor.json`
+- `telegram_inbound_cursor.json`
 - `imessage_queue.jsonl`
 - `imessage_dedupe_index.json`
 
@@ -48,8 +49,8 @@ Inbound reads default to:
 
 1. Codex or Claude emits a notify payload.
 2. Runtime ingests payload via `notify` path and updates attention/session metadata.
-3. Outbound messages are sent through AppleScript (Messages app); failures are queued.
-4. Inbound iMessage replies are polled from `chat.db` and parsed.
+3. Outbound messages are sent through iMessage and/or Telegram depending on transport mode.
+4. Inbound replies are polled from iMessage `chat.db` and Telegram updates.
 5. Routing selects a target session using explicit `@ref`, reply linkage, and registry context.
 6. Dispatch proceeds via tmux + agent resume paths according to routing flags.
 

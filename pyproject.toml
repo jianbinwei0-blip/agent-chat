@@ -3,16 +3,16 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-imessage-control-plane"
+name = "agent-chat-control-plane"
 version = "0.1.0"
-description = "macOS control-plane runtime bridging Codex/Claude sessions and iMessage"
+description = "macOS control-plane runtime bridging Codex/Claude sessions with iMessage and Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-  { name = "agent-imessage-control-plane contributors" }
+  { name = "agent-chat-control-plane contributors" }
 ]
-keywords = ["agent-chat", "codex", "claude", "imessage", "macos", "automation", "control-plane"]
+keywords = ["agent-chat", "codex", "claude", "imessage", "telegram", "macos", "automation", "control-plane"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -33,24 +33,15 @@ Issues = "https://github.com/example-org/agent-chat/issues"
 
 [tool.setuptools]
 py-modules = [
-  "agent_imessage_control_plane",
-  "agent_imessage_dedupe",
-  "agent_imessage_notify",
-  "agent_imessage_outbound_lib",
-  "agent_imessage_reply_lib",
-  "codex_imessage_control_plane",
-  "codex_imessage_dedupe",
-  "codex_imessage_notify",
-  "codex_imessage_outbound_lib",
-  "codex_imessage_reply_lib"
+  "agent_chat_control_plane",
+  "agent_chat_dedupe",
+  "agent_chat_notify",
+  "agent_chat_outbound_lib",
+  "agent_chat_reply_lib"
 ]
 
 [project.scripts]
-agent-imessage-control-plane = "agent_imessage_control_plane:main"
-agent-imessage-notify = "agent_imessage_notify:main"
-agent-imessage-outbound = "agent_imessage_outbound_lib:main"
-agent-imessage-reply = "agent_imessage_reply_lib:main"
-codex-imessage-control-plane = "codex_imessage_control_plane:main"
-codex-imessage-notify = "codex_imessage_notify:main"
-codex-imessage-outbound = "codex_imessage_outbound_lib:main"
-codex-imessage-reply = "codex_imessage_reply_lib:main"
+agent-chat-control-plane = "agent_chat_control_plane:main"
+agent-chat-notify = "agent_chat_notify:main"
+agent-chat-outbound = "agent_chat_outbound_lib:main"
+agent-chat-reply = "agent_chat_reply_lib:main"

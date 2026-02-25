@@ -5,9 +5,9 @@ Reads new inbound iMessage replies from Messages' local SQLite DB and resumes th
 most recently-notified Codex/Claude session with the reply text.
 
 Usage:
-  python3 agent_imessage_reply_lib.py run
-  python3 agent_imessage_reply_lib.py run --poll 2
-  python3 agent_imessage_reply_lib.py once
+  python3 agent_chat_reply_lib.py run
+  python3 agent_chat_reply_lib.py run --poll 2
+  python3 agent_chat_reply_lib.py once
 
 Config:
   - CODEX_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
@@ -1146,7 +1146,7 @@ def _select_attention_context(
     state_matches_session = False
     if isinstance(last_attention_state, dict):
         state_session_id = _coerce_nonempty_str(last_attention_state.get("session_id"))
-        # Legacy attention-state records may not include session_id; in that case,
+        # Older attention-state records may not include session_id; in that case,
         # keep old fallback behavior. Otherwise, only merge when the session matches.
         state_matches_session = state_session_id is None or state_session_id == session_id
 

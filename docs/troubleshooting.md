@@ -5,12 +5,12 @@
 Run:
 
 ```bash
-python3 agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
-python3 agent_imessage_control_plane.py setup-launchd
-python3 agent_imessage_control_plane.py setup-permissions
-python3 agent_imessage_control_plane.py doctor
-python3 agent_imessage_control_plane.py doctor --json
-python3 agent_imessage_control_plane.py once --trace
+python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-launchd
+python3 agent_chat_control_plane.py setup-permissions
+python3 agent_chat_control_plane.py doctor
+python3 agent_chat_control_plane.py doctor --json
+python3 agent_chat_control_plane.py once --trace
 ```
 
 ## Common Issues
@@ -27,8 +27,8 @@ Fix:
 - resolve and pin a 3.11+ interpreter explicitly:
   - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
   - `"$PYTHON_BIN" --version`
-  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 ### No iMessage sent
 
@@ -41,6 +41,19 @@ Checks:
 - ensure Messages is signed in
 - confirm Automation permission for terminal/runner + `osascript`
 
+### Telegram transport does not send or receive
+
+Symptoms:
+- no Telegram messages arrive
+- inbound Telegram replies are not routed back
+
+Checks:
+- verify `CODEX_IMESSAGE_TRANSPORT` is `telegram` or `both`
+- verify `CODEX_TELEGRAM_BOT_TOKEN` is set and valid
+- verify `CODEX_TELEGRAM_CHAT_ID` is set to the expected chat
+- verify network access to `https://api.telegram.org` (or your `CODEX_TELEGRAM_API_BASE`)
+- create/refresh token with `@BotFather` and re-run `setup-notify-hook` / `setup-launchd`
+
 ### Inbound replies are ignored
 
 Symptoms:
@@ -48,7 +61,7 @@ Symptoms:
 - replies never resume sessions
 
 Checks:
-- run `python3 agent_imessage_control_plane.py setup-launchd` (or `setup-permissions`) and keep it running while granting access
+- run `python3 agent_chat_control_plane.py setup-launchd` (or `setup-permissions`) and keep it running while granting access
 - when setup starts, grant exactly this permission:
   - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
 - setup prints the exact FDA targets to add:
@@ -57,7 +70,7 @@ Checks:
 - do not guess the target app from terminal name; use the printed path
 - setup starts polling `chat.db` before opening System Settings, then keeps polling until access is detected
 - wait for `Full Disk Access confirmed: chat.db is now readable.` before leaving setup
-- run `python3 agent_imessage_control_plane.py doctor` and use `Launchd.runtime_python` / `Launchd.permission_app` as the authoritative FDA targets
+- run `python3 agent_chat_control_plane.py doctor` and use `Launchd.runtime_python` / `Launchd.permission_app` as the authoritative FDA targets
 - prefer granting Full Disk Access to the shown app (usually `~/Applications/Codex iMessage Python.app`), or to the shown runtime Python binary if no app is shown
 - do not grant Full Disk Access to terminal apps unless `doctor` explicitly shows that terminal binary as `runtime_python`
 - `setup-permissions` now prefers launchd runtime targets from the installed plist, so its guidance should match `doctor`
@@ -65,7 +78,7 @@ Checks:
 - verify `CODEX_IMESSAGE_CHAT_DB` (if overridden) points to a readable DB
 - ensure `chat.db` exists at `~/Library/Messages/chat.db` when not overridden
 - if recurring failures happen after Python upgrades, use:
-  - `python3 agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
   - this resets stale Full Disk Access approvals for the runtime bundle id and reruns permission setup
 
 If launchd still cannot read `chat.db` after FDA was granted:
@@ -76,10 +89,10 @@ If launchd still cannot read `chat.db` after FDA was granted:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
   - re-enable Full Disk Access for `~/Applications/Codex iMessage Python.app`
 - rerun:
-  - `python3 agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"`
-  - `python3 agent_imessage_control_plane.py doctor`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"`
+  - `python3 agent_chat_control_plane.py doctor`
 - shortcut:
-  - `python3 agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
 
 ### `doctor` reports notify hook missing/mis-scoped or config parse errors
 
@@ -90,17 +103,17 @@ Symptoms:
 
 Fix:
 - run:
-  - `python3 agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"`
+  - `python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"`
 - then re-run:
-  - `python3 agent_imessage_control_plane.py doctor`
+  - `python3 agent_chat_control_plane.py doctor`
 
 ### Need to re-run setup automatically after permission changes
 
 Run:
 
 ```bash
-python3 agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"
-python3 agent_imessage_control_plane.py doctor
+python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"
+python3 agent_chat_control_plane.py doctor
 ```
 
 Notes:
@@ -114,7 +127,7 @@ Symptoms:
 
 Checks and fixes:
 - update to the latest repo version (friendly app provisioning is symlink-first to avoid broken copied bundles)
-- rerun `python3 agent_imessage_control_plane.py setup-launchd`
+- rerun `python3 agent_chat_control_plane.py setup-launchd`
 - if a stale app remains, remove and recreate:
   - `rm -rf ~/Applications/Codex\\ iMessage\\ Python.app`
   - rerun `setup-launchd`
@@ -131,19 +144,19 @@ Cause:
 
 Checks:
 - inspect cursor: `cat ~/.codex/tmp/imessage_inbound_cursor.json`
-- run one dry cycle: `python3 agent_imessage_control_plane.py once --dry-run --trace`
+- run one dry cycle: `python3 agent_chat_control_plane.py once --dry-run --trace`
 
 Recovery:
 - stop running control-plane processes
 - delete cursor and run one dry cycle to reseed:
   - `rm -f ~/.codex/tmp/imessage_inbound_cursor.json`
-  - `python3 agent_imessage_control_plane.py once --dry-run --trace`
+  - `python3 agent_chat_control_plane.py once --dry-run --trace`
 - then start normal runtime (`setup-launchd` or `run`)
 
 ### Launchd appears loaded but routing looks broken
 
 Checks:
-- run `python3 agent_imessage_control_plane.py setup-launchd` to regenerate + reload plist from current environment
+- run `python3 agent_chat_control_plane.py setup-launchd` to regenerate + reload plist from current environment
 - verify `ProgramArguments` paths in plist are absolute and current
 - set `CODEX_IMESSAGE_LAUNCHD_LABEL` to match your LaunchAgent label
 - inspect launchd stdout/stderr logs configured in the plist

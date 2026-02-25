@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Codex → iMessage notifier (macOS).
+"""Agent chat iMessage notify helper (macOS).
 
 This is best-effort and must never fail the calling process.
 
 Usage:
-  agent_imessage_notify.py attention [--cwd DIRNAME] [--need TEXT] [--to RECIPIENT] [--dry-run]
-  agent_imessage_notify.py route [--cwd DIRNAME] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
+  agent_chat_notify.py attention [--cwd DIRNAME] [--need TEXT] [--to RECIPIENT] [--dry-run]
+  agent_chat_notify.py route [--cwd DIRNAME] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
 
 Config:
   - CODEX_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
@@ -37,7 +37,7 @@ import sys
 import time
 from pathlib import Path
 
-import agent_imessage_dedupe
+import agent_chat_dedupe
 
 
 _ATTENTION_INDEX_MAX_ENTRIES = 100
@@ -825,20 +825,20 @@ def _send_routed_needs_input(
     queue_path: Path,
 ) -> None:
     if call_id:
-        call_key = agent_imessage_dedupe.build_dedupe_key(
+        call_key = agent_chat_dedupe.build_dedupe_key(
             category="needs_input_call_id",
             scope=scope,
             text=call_id,
         )
-        if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=call_key):
+        if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
             return
 
-    semantic_key = agent_imessage_dedupe.build_dedupe_key(
+    semantic_key = agent_chat_dedupe.build_dedupe_key(
         category="needs_input",
         scope=scope,
         text=dedupe_text,
     )
-    if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
+    if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
         return
 
     _send_structured(
@@ -866,12 +866,12 @@ def _send_routed_final_status(
     queue_path: Path,
 ) -> None:
     payload_fingerprint = _payload_blob(payload) or "completion"
-    final_key = agent_imessage_dedupe.build_dedupe_key(
+    final_key = agent_chat_dedupe.build_dedupe_key(
         category="final_status",
         scope=scope,
         text=payload_fingerprint,
     )
-    if not agent_imessage_dedupe.mark_once(
+    if not agent_chat_dedupe.mark_once(
         codex_home=codex_home,
         key=final_key,
         ttl_seconds=_FINAL_STATUS_DEDUPE_TTL_SECONDS,
@@ -1048,7 +1048,7 @@ def main(argv: list[str]) -> int:
         )
         return 0
 
-    # Legacy attention mode.
+    # Compatibility attention mode.
     questions_text: str | None = None
     if session_path:
         parsed_questions = _read_last_request_user_input_from_session(Path(session_path))

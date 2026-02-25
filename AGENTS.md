@@ -12,6 +12,8 @@ Use `README.md` as the single source of truth for setup and recovery:
 
 If `AGENTS.md` and `README.md` diverge, `README.md` is authoritative. Keep this file as a pointer and update `README.md` first.
 
+Canonical runtime entrypoint is `agent_chat_control_plane.py`.
+
 ## Agent Execution Contract
 
 - Prefer the built-in idempotent setup commands over ad-hoc file edits:
@@ -42,13 +44,13 @@ export CODEX_IMESSAGE_TO="+15555550123"   # replace
 export CODEX_HOME="$HOME/.codex"
 export CODEX_IMESSAGE_NOTIFY_MODE="route"
 
-"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook \
+"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
-"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd \
+"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
-"$PYTHON_BIN" agent_imessage_control_plane.py doctor
+"$PYTHON_BIN" agent_chat_control_plane.py doctor
 ```

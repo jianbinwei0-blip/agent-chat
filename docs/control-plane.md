@@ -2,7 +2,7 @@
 
 ## Runtime Contract
 
-- Authoritative long-lived process: `com.codex.imessage-control-plane` (launchd).
+- Authoritative long-lived process: launchd label defaults to `com.agent-chat-control-plane`.
 - Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons.
 - Single process handles:
   - outbound needs-input notifications to iMessage and/or Telegram
@@ -13,7 +13,7 @@
 
 ## Data Flow
 
-1. Codex or Claude emits notify payload to `agent_imessage_control_plane.py notify`.
+1. Codex or Claude emits notify payload to `agent_chat_control_plane.py notify`.
 2. Control plane updates session registry and sends routed messages for active transport mode.
 3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
 4. Replies are routed by `@ref`, reply context, or auto-create logic.
@@ -32,12 +32,12 @@
 ## Health Checks
 
 ```bash
-python3 agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
-python3 agent_imessage_control_plane.py setup-launchd
-python3 agent_imessage_control_plane.py setup-permissions
-python3 agent_imessage_control_plane.py doctor
-python3 agent_imessage_control_plane.py doctor --json
-python3 agent_imessage_control_plane.py once --trace
+python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-launchd
+python3 agent_chat_control_plane.py setup-permissions
+python3 agent_chat_control_plane.py doctor
+python3 agent_chat_control_plane.py doctor --json
+python3 agent_chat_control_plane.py once --trace
 ```
 
 `doctor` reports launchd load state, lock PID liveness, chat.db readability, queue depth, cursor/state summary, and routing snapshot:
@@ -66,7 +66,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 - `chat.db` unreadable:
   - Symptoms: inbound disabled warnings in stderr log.
-  - Fix: run `python3 agent_imessage_control_plane.py setup-launchd` (recommended) or `setup-permissions`, then grant the exact target printed by setup:
+  - Fix: run `python3 agent_chat_control_plane.py setup-launchd` (recommended) or `setup-permissions`, then grant the exact target printed by setup:
     - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
     - `Grant Full Disk Access to this app: ...` (preferred when shown)
     - `Grant access to this Python binary: ...`
@@ -84,11 +84,11 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 - `setup-launchd` uses the current Python interpreter by default and writes a LaunchAgent plist automatically.
 - when possible, `setup-launchd` prepares `~/Applications/Codex iMessage Python.app` and uses its embedded runtime path in LaunchAgent `ProgramArguments`.
-- Verify the launchd `ProgramArguments` path points to the intended control-plane script.
+- Verify the launchd `ProgramArguments` path points to `agent_chat_control_plane.py`.
 - Avoid protected-path mismatches (for example stale script paths under denied folders).
 - Grant Full Disk Access to the app or exact Python binary used by launchd (check via `launchctl print ...` and `ps`).
 
 ## Logs
 
-- `~/Library/Logs/codex-imessage-control-plane.launchd.out.log`
-- `~/Library/Logs/codex-imessage-control-plane.launchd.err.log`
+- `~/Library/Logs/agent-chat-control-plane.launchd.out.log`
+- `~/Library/Logs/agent-chat-control-plane.launchd.err.log`

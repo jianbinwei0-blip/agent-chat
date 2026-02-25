@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.codex.imessage-control-plane</string>
+  <string>com.agent-chat-control-plane</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/python3</string>
-    <string>/ABSOLUTE/PATH/TO/agent-imessage-control-plane/agent_imessage_control_plane.py</string>
+    <string>/ABSOLUTE/PATH/TO/agent-chat/agent_chat_control_plane.py</string>
     <string>run</string>
   </array>
 
@@ -24,7 +24,7 @@
     <string>route</string>
 
     <key>CODEX_IMESSAGE_LAUNCHD_LABEL</key>
-    <string>com.codex.imessage-control-plane</string>
+    <string>com.agent-chat-control-plane</string>
 
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
@@ -37,9 +37,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/USERNAME/Library/Logs/codex-imessage-control-plane.launchd.out.log</string>
+  <string>/Users/USERNAME/Library/Logs/agent-chat-control-plane.launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/USERNAME/Library/Logs/codex-imessage-control-plane.launchd.err.log</string>
+  <string>/Users/USERNAME/Library/Logs/agent-chat-control-plane.launchd.err.log</string>
 </dict>
 </plist>

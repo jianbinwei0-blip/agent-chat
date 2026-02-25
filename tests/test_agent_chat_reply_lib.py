@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import agent_imessage_reply_lib as bridge
+import agent_chat_reply_lib as bridge
 
 
-class TestCodexIMessageReplyBridge(unittest.TestCase):
+class TestAgentChatReplyBridge(unittest.TestCase):
     def test_tmux_send_prompt_falls_back_to_c_m_key(self) -> None:
         ok = subprocess.CompletedProcess(args=[], returncode=0)
         fail = subprocess.CompletedProcess(args=[], returncode=1)
@@ -555,7 +555,7 @@ class TestCodexIMessageReplyBridge(unittest.TestCase):
 
         self.assertEqual(ctx, {})
 
-    def test_select_attention_context_legacy_last_attention_without_session_id_still_falls_back(self) -> None:
+    def test_select_attention_context_last_attention_without_session_id_still_falls_back(self) -> None:
         session_id = "11111111-1111-1111-1111-111111111111"
         attention_index = {
             "22222222-2222-2222-2222-222222222222": {"tmux_pane": "%1"},
@@ -644,7 +644,7 @@ class TestCodexIMessageReplyBridge(unittest.TestCase):
 
     def test_send_imessage_uses_repo_local_script(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            module_file = Path(td) / "agent_imessage_reply_lib.py"
+            module_file = Path(td) / "agent_chat_reply_lib.py"
             script_path = Path(td) / "scripts" / "send-imessage.applescript"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("on run argv\nend run\n", encoding="utf-8")

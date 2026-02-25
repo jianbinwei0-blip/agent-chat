@@ -1,17 +1,17 @@
 # Contributing
 
-Thanks for contributing to `codex-imessage-control-plane`.
+Thanks for contributing to `agent-chat-control-plane`.
 
 ## Project Scope
 
-This repository is macOS-only and focuses on local Codex <-> iMessage runtime behavior.
+This repository is macOS-only and focuses on local Codex/Claude runtime behavior across iMessage and Telegram integrations.
 Please keep changes scoped to this runtime and its documentation.
 
 ## Development Setup
 
 ```bash
 git clone <your-fork-url>
-cd codex-imessage-control-plane
+cd agent-chat
 python3 -m compileall .
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```

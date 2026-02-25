@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unified Codex/Claude <-> iMessage control plane (macOS).
+"""Unified Codex/Claude messaging control plane (macOS).
 
 This daemon combines:
 - outbound needs-input notifications across all active Codex/Claude sessions
-- inbound iMessage command/reply intake and session routing
+- inbound iMessage/Telegram command-reply intake and session routing
 - optional notify-hook completion forwarding
 - fallback outbound queue draining
 
@@ -33,10 +33,10 @@ import urllib.parse as urllib_parse
 import urllib.request as urllib_request
 from pathlib import Path
 
-import agent_imessage_dedupe
-import agent_imessage_notify as notify
-import agent_imessage_outbound_lib as outbound
-import agent_imessage_reply_lib as reply
+import agent_chat_dedupe
+import agent_chat_notify as notify
+import agent_chat_outbound_lib as outbound
+import agent_chat_reply_lib as reply
 
 _MIN_PYTHON_VERSION = (3, 11)
 _SESSION_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -54,7 +54,7 @@ def _build_python_upgrade_message(*, executable: str, version: tuple[int, int, i
     major, minor, micro = (int(version[0]), int(version[1]), int(version[2]))
     detected = f"{major}.{minor}.{micro}"
     return (
-        f"agent_imessage_control_plane.py requires Python {min_major}.{min_minor}+.\n"
+        f"agent_chat_control_plane.py requires Python {min_major}.{min_minor}+.\n"
         f"Detected: Python {detected} ({executable})\n"
         "Please upgrade Python and rerun this command.\n"
     )
@@ -115,7 +115,7 @@ _CLAUDE_BIN_CANDIDATES = (
     "/usr/local/bin/claude",
     "/usr/bin/claude",
 )
-_DEFAULT_LAUNCHD_LABEL = "com.codex.imessage-control-plane"
+_DEFAULT_LAUNCHD_LABEL = "com.agent-chat-control-plane"
 _INBOUND_DISABLED_LOG_MARKER = "[imessage-control-plane] inbound disabled:"
 _INBOUND_RESTORED_LOG_MARKER = "[imessage-control-plane] inbound chat.db access restored."
 _TCC_FDA_SERVICE = "SystemPolicyAllFiles"
@@ -363,7 +363,7 @@ def _is_control_plane_notify_command(command: str) -> bool:
     cmd = command.lower()
     if "notify" not in cmd:
         return False
-    return "agent_imessage_control_plane.py" in cmd or "codex_imessage_control_plane.py" in cmd
+    return "agent_chat_control_plane.py" in cmd
 
 
 def _notify_hook_value_present(value: object) -> bool:
@@ -573,7 +573,7 @@ def _upsert_notify_hook_text(*, raw: str, notify_line: str) -> str:
             continue
 
         if re.match(r"^\s*notify\s*=", line):
-            # Ensure notify lives at top-level and clean up legacy misscoped entries.
+            # Ensure notify lives at top-level and clean up misscoped entries.
             if table_name is None or table_name == "notice.model_migrations":
                 continue
         kept.append(line)
@@ -1379,7 +1379,7 @@ def _launchd_err_log_path() -> Path:
     return Path(
         os.environ.get(
             "CODEX_IMESSAGE_LAUNCHD_ERR_LOG",
-            str(Path.home() / "Library" / "Logs" / "codex-imessage-control-plane.launchd.err.log"),
+            str(Path.home() / "Library" / "Logs" / "agent-chat-control-plane.launchd.err.log"),
         )
     )
 
@@ -1676,8 +1676,8 @@ def _launchagent_plist_path(*, label: str) -> Path:
 def _launchd_log_paths() -> tuple[Path, Path]:
     logs_dir = Path.home() / "Library" / "Logs"
     return (
-        logs_dir / "codex-imessage-control-plane.launchd.out.log",
-        logs_dir / "codex-imessage-control-plane.launchd.err.log",
+        logs_dir / "agent-chat-control-plane.launchd.out.log",
+        logs_dir / "agent-chat-control-plane.launchd.err.log",
     )
 
 
@@ -3191,20 +3191,20 @@ def _process_session_file(
                         dedupe_key = f"{cache_key}:{call_id}"
                         if dedupe_key in seen_needs_input_call_ids:
                             continue
-                        call_key = agent_imessage_dedupe.build_dedupe_key(
+                        call_key = agent_chat_dedupe.build_dedupe_key(
                             category="needs_input_call_id",
                             scope=session_scope,
                             text=call_id,
                         )
-                        if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=call_key):
+                        if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
                             continue
 
-                    semantic_key = agent_imessage_dedupe.build_dedupe_key(
+                    semantic_key = agent_chat_dedupe.build_dedupe_key(
                         category="needs_input",
                         scope=session_scope,
                         text=text,
                     )
-                    if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
+                    if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
                         continue
 
                     _send_structured(
@@ -4900,12 +4900,12 @@ def _handle_notify_payload(
         call_id = notify._extract_call_id(payload)
 
         if isinstance(call_id, str) and call_id.strip():
-            call_key = agent_imessage_dedupe.build_dedupe_key(
+            call_key = agent_chat_dedupe.build_dedupe_key(
                 category="needs_input_call_id",
                 scope=session_id,
                 text=call_id.strip(),
             )
-            if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=call_key):
+            if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
                 if not is_completion_event:
                     _save_registry(codex_home=codex_home, registry=registry)
                 return
@@ -4913,12 +4913,12 @@ def _handle_notify_payload(
         dedupe_text = prompt_text
         if dedupe_text == _DEFAULT_INPUT_NEEDED_TEXT:
             dedupe_text = f"{dedupe_text}\n{notify._payload_blob(payload) or 'fallback'}"
-        semantic_key = agent_imessage_dedupe.build_dedupe_key(
+        semantic_key = agent_chat_dedupe.build_dedupe_key(
             category="needs_input",
             scope=session_id,
             text=dedupe_text,
         )
-        if agent_imessage_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
+        if agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
             message_index = _load_message_index(codex_home=codex_home)
             _send_structured(
                 codex_home=codex_home,
@@ -4950,12 +4950,12 @@ def _handle_notify_payload(
 
     scope = session_id
     payload_fingerprint = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    final_key = agent_imessage_dedupe.build_dedupe_key(
+    final_key = agent_chat_dedupe.build_dedupe_key(
         category="final_status",
         scope=scope,
         text=payload_fingerprint,
     )
-    if not agent_imessage_dedupe.mark_once(codex_home=codex_home, key=final_key, ttl_seconds=120):
+    if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=final_key, ttl_seconds=120):
         return
 
     response_text: str | None = None
