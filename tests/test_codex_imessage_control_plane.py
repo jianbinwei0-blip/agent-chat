@@ -81,6 +81,81 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(cmd.get("action"), "implicit")
         self.assertEqual(cmd.get("prompt"), "please continue")
 
+    def test_lookup_agent_home_path_uses_default_codex_when_runtime_points_codex_home_to_claude(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "CODEX_IMESSAGE_AGENT": "claude",
+                "CODEX_HOME": "/tmp/claude-home",
+                "CLAUDE_HOME": "/tmp/claude-home",
+            },
+            clear=False,
+        ):
+            home = cp._lookup_agent_home_path(  # type: ignore[attr-defined]
+                agent="codex",
+                current_home=Path("/tmp/claude-home"),
+            )
+        self.assertEqual(home, Path.home() / ".codex")
+
+    def test_lookup_agent_home_path_respects_explicit_codex_override(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "CODEX_IMESSAGE_AGENT": "claude",
+                "CODEX_HOME": "/tmp/claude-home",
+                "CLAUDE_HOME": "/tmp/claude-home",
+                "CODEX_IMESSAGE_CODEX_HOME": "/tmp/real-codex-home",
+            },
+            clear=False,
+        ):
+            home = cp._lookup_agent_home_path(  # type: ignore[attr-defined]
+                agent="codex",
+                current_home=Path("/tmp/claude-home"),
+            )
+        self.assertEqual(home, Path("/tmp/real-codex-home"))
+
+    def test_control_lock_path_defaults_to_shared_codex_home_in_claude_runtime(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "CODEX_IMESSAGE_AGENT": "claude",
+                "CODEX_HOME": "/tmp/claude-home",
+                "CLAUDE_HOME": "/tmp/claude-home",
+            },
+            clear=False,
+        ):
+            lock_path = cp._control_lock_path(codex_home=Path("/tmp/claude-home"))  # type: ignore[attr-defined]
+
+        self.assertEqual(lock_path, Path.home() / ".codex" / "tmp" / "imessage_control_plane.lock")
+
+    def test_inbound_cursor_path_defaults_to_shared_codex_home_in_claude_runtime(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "CODEX_IMESSAGE_AGENT": "claude",
+                "CODEX_HOME": "/tmp/claude-home",
+                "CLAUDE_HOME": "/tmp/claude-home",
+            },
+            clear=False,
+        ):
+            cursor_path = cp._inbound_cursor_path(codex_home=Path("/tmp/claude-home"))  # type: ignore[attr-defined]
+
+        self.assertEqual(cursor_path, Path.home() / ".codex" / "tmp" / "imessage_inbound_cursor.json")
+
+    def test_telegram_inbound_cursor_path_defaults_to_shared_codex_home_in_claude_runtime(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "CODEX_IMESSAGE_AGENT": "claude",
+                "CODEX_HOME": "/tmp/claude-home",
+                "CLAUDE_HOME": "/tmp/claude-home",
+            },
+            clear=False,
+        ):
+            cursor_path = cp._telegram_inbound_cursor_path(codex_home=Path("/tmp/claude-home"))  # type: ignore[attr-defined]
+
+        self.assertEqual(cursor_path, Path.home() / ".codex" / "tmp" / "telegram_inbound_cursor.json")
+
     def test_ensure_inbound_cursor_seed_reseeds_when_existing_cursor_is_zero(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             codex_home = Path(td)
@@ -207,6 +282,18 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             params=None,
         )
         self.assertEqual(fields.get("session_path"), "/tmp/claude-session.jsonl")
+
+    def test_extract_notify_context_fields_prefers_payload_agent_over_runtime(self) -> None:
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {"CODEX_IMESSAGE_AGENT": "claude"},
+            clear=False,
+        ):
+            fields = cp._extract_notify_context_fields(  # type: ignore[attr-defined]
+                payload={"agent": "codex"},
+                params=None,
+            )
+        self.assertEqual(fields.get("agent"), "codex")
 
     def test_handle_notify_payload_routes_input_event(self) -> None:
         payload = {
@@ -504,6 +591,25 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(resolved, sid)
         self.assertIsNone(err)
 
+    def test_resolve_session_from_reply_context_uses_reply_reference_texts_without_guids(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        sid = "019c902c-40c0-7253-9580-e7f7ae35eb3d"
+        sid_ref = sid[:8]
+
+        resolved, err = cp._resolve_session_from_reply_context(  # type: ignore[attr-defined]
+            conn=conn,
+            reply_text="continue",
+            reply_to_guid=None,
+            reply_reference_guids=[],
+            reply_reference_texts=[f"[Codex] @{sid_ref} — accepted — follow execution on your Mac."],
+            registry={"sessions": {sid: {}}},
+            message_index={"messages": []},
+            require_explicit_ref=True,
+        )
+
+        self.assertEqual(resolved, sid)
+        self.assertIsNone(err)
+
     def test_resolve_session_from_reply_context_does_not_use_hash_when_session_not_waiting(self) -> None:
         conn = sqlite3.connect(":memory:")
         sid = "019c8e4f-392c-7650-84e4-1cbb73ae8037"
@@ -740,6 +846,106 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
         self.assertTrue(matches)
 
+    def test_tmux_pane_matches_session_uses_explicit_agent_not_runtime(self) -> None:
+        sid = "019c652e-11a2-7a90-9d30-da780acb95c8"
+        rec = {"cwd": "/Users/testuser"}
+        with (
+            mock.patch.object(
+                cp,
+                "_tmux_read_pane_context",
+                return_value=("codex-aarch64-a", "/Users/testuser"),
+            ),
+            mock.patch.object(
+                cp,
+                "_tmux_codex_panes_for_cwd",
+                return_value=["%0"],
+                create=True,
+            ),
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%0",
+                session_rec=rec,
+                session_id=sid,
+                agent="codex",
+            )
+
+        self.assertTrue(matches)
+
+    def test_tmux_discover_codex_pane_for_session_uses_explicit_agent_not_runtime(self) -> None:
+        rec = {"cwd": "/Users/testuser"}
+        pane_listing = "\n".join(
+            [
+                "%0\tcodex-aarch64-a\t/Users/testuser",
+                "%23\tclaude\t/Users/testuser",
+            ]
+        )
+
+        with (
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=pane_listing)),
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+        ):
+            pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
+                session_rec=rec,
+                session_id=None,
+                tmux_socket="/tmp/tmux-501/default",
+                agent="codex",
+            )
+
+        self.assertEqual(pane, "%0")
+        self.assertEqual(socket, "/tmp/tmux-501/default")
+
+    def test_dispatch_prompt_discovery_uses_session_agent_over_runtime(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "agent": "codex",
+            "cwd": "/tmp/project",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        discover_mock = mock.Mock(return_value=("%12", "/tmp/tmux-501/default"))
+        pane_match_mock = mock.Mock(return_value=True)
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", discover_mock),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", pane_match_mock, create=True),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value="fallback") as resume_mock,
+            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+                agent="codex",
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        discover_mock.assert_called_once_with(
+            session_rec=rec,
+            session_id=sid,
+            tmux_socket=None,
+            agent="codex",
+        )
+        pane_match_mock.assert_called_once_with(
+            pane="%12",
+            session_rec=rec,
+            session_id=sid,
+            tmux_socket="/tmp/tmux-501/default",
+            agent="codex",
+        )
+        tmux_send_mock.assert_called_once_with(
+            pane="%12",
+            prompt="continue",
+            tmux_socket="/tmp/tmux-501/default",
+        )
+        resume_mock.assert_not_called()
+
     def test_tmux_pane_mentions_session_id_uses_latest_session_id_in_capture(self) -> None:
         old_sid = "019c891f-cfa2-7e43-a60e-df1d683e6fe5"
         new_sid = "019c891f-bb63-71d2-ab92-40a574111e9f"
@@ -798,6 +1004,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             session_rec=rec,
             session_id=sid,
             tmux_socket=None,
+            agent="codex",
         )
         tmux_send_mock.assert_called_once_with(
             pane="%12",
@@ -923,6 +1130,37 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(mode, "resume")
         self.assertEqual(response, "ok")
         resume_mock.assert_called_once()
+
+    def test_dispatch_prompt_falls_back_to_resume_uses_session_agent_over_runtime(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        rec = {
+            "agent": "codex",
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=False),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True),
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value="ok") as resume_mock,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {"CODEX_IMESSAGE_STRICT_TMUX": "0", "CODEX_IMESSAGE_AGENT": "claude"},
+                clear=False,
+            ),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+            )
+
+        self.assertEqual(mode, "resume")
+        self.assertEqual(response, "ok")
+        resume_mock.assert_called_once()
+        self.assertEqual(resume_mock.call_args.kwargs.get("agent"), "codex")
 
     def test_dispatch_prompt_with_terminal_context_falls_back_to_resume(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
@@ -1204,6 +1442,117 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 101)
         self.assertTrue(any(m.get("kind") == "accepted" for m in sent))
 
+    def test_recover_session_record_from_disk_finds_other_agent_home_session(self) -> None:
+        sid = "019c92e8-a03c-71f3-858f-c0e2a14153e3"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex_home = root / "codex-home"
+            claude_home = root / "claude-home"
+            session_path = codex_home / "sessions" / "2026" / "02" / "24" / f"rollout-{sid}.jsonl"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text("", encoding="utf-8")
+
+            with mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "CODEX_IMESSAGE_AGENT": "claude",
+                    "CODEX_HOME": str(codex_home),
+                    "CLAUDE_HOME": str(claude_home),
+                },
+                clear=False,
+            ):
+                rec = cp._recover_session_record_from_disk(  # type: ignore[attr-defined]
+                    codex_home=claude_home,
+                    session_id=sid,
+                    registry=None,
+                )
+
+        self.assertIsInstance(rec, dict)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.get("agent"), "codex")
+        self.assertEqual(rec.get("session_path"), str(session_path))
+
+    def test_process_inbound_replies_tmux_failed_fallback_prefers_other_home_registry_agent(self) -> None:
+        sid = "019c92e8-a03c-71f3-858f-c0e2a14153e3"
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex_home = root / "codex-home"
+            claude_home = root / "claude-home"
+            (codex_home / "tmp").mkdir(parents=True, exist_ok=True)
+            (claude_home / "tmp").mkdir(parents=True, exist_ok=True)
+            (codex_home / "tmp" / "imessage_session_registry.json").write_text(
+                json.dumps(
+                    {
+                        "sessions": {
+                            sid: {
+                                "session_id": sid,
+                                "agent": "codex",
+                                "cwd": "/tmp/project",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = {"sessions": {}}
+            message_index: dict[str, object] = {
+                "messages": [
+                    {
+                        "session_id": sid,
+                        "kind": "error",
+                        "hash": "deadbeef",
+                        "agent": "claude",
+                    }
+                ]
+            }
+
+            with (
+                sqlite3.connect(":memory:") as conn,
+                mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+                mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+                mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+                mock.patch.object(cp, "_load_registry", return_value=registry),
+                mock.patch.object(cp, "_load_message_index", return_value=message_index),
+                mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+                mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+                mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_failed", None)),
+                mock.patch.object(cp.reply, "_run_agent_resume", return_value=None) as resume_mock,
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "CODEX_IMESSAGE_STRICT_TMUX": "0",
+                        "CODEX_IMESSAGE_AGENT": "claude",
+                        "CODEX_HOME": str(codex_home),
+                        "CLAUDE_HOME": str(claude_home),
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+                mock.patch.object(cp, "_save_registry"),
+                mock.patch.object(cp, "_save_message_index"),
+            ):
+                rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                    conn=conn,
+                    after_rowid=0,
+                    handle_ids=["+15551234567"],
+                    codex_home=claude_home,
+                    recipient="+15551234567",
+                    max_message_chars=1800,
+                    min_prefix=6,
+                    dry_run=False,
+                )
+
+        self.assertEqual(rowid, 101)
+        resume_mock.assert_called_once()
+        self.assertEqual(resume_mock.call_args.kwargs.get("agent"), "codex")
+        self.assertTrue(any("no response from codex resume" in str(m.get("text", "")).lower() for m in sent))
+
     def test_process_inbound_replies_tmux_failed_falls_back_when_strict_disabled(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         registry = {
@@ -1257,6 +1606,60 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             codex_home=Path("/tmp/codex-home"),
             timeout_s=None,
         )
+
+    def test_process_inbound_replies_tmux_failed_fallback_uses_session_agent_over_runtime(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "agent": "codex",
+                    "cwd": "/tmp/project",
+                    "tmux_pane": "%4",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_failed", None)),
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value=None) as resume_mock,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {"CODEX_IMESSAGE_STRICT_TMUX": "0", "CODEX_IMESSAGE_AGENT": "claude"},
+                clear=False,
+            ),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        resume_mock.assert_called_once()
+        self.assertEqual(resume_mock.call_args.kwargs.get("agent"), "codex")
+        self.assertTrue(any("no response from codex resume" in str(m.get("text", "")).lower() for m in sent))
 
     def test_process_inbound_replies_tmux_stale_strict_reports_error_without_fallback(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
@@ -2211,6 +2614,40 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             self.assertIn("CODEX_TELEGRAM_CHAT_ID=123456", joined)
             self.assertIn("CODEX_TELEGRAM_BOT_TOKEN=telegram-token", joined)
 
+    def test_run_setup_notify_hook_requires_telegram_bot_token_with_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    },
+                    clear=False,
+                ),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                )
+
+            self.assertEqual(rc, 1)
+            text = out.getvalue()
+            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN is required", text)
+            self.assertIn("@BotFather", text)
+            self.assertIn("/newbot", text)
+            self.assertIn("/token", text)
+
     def test_run_setup_notify_hook_writes_claude_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
@@ -2440,6 +2877,81 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0][0], 42)
         self.assertEqual(updates[0][1], "help")
+
+    def test_fetch_telegram_updates_captures_reply_to_message_text(self) -> None:
+        class _FakeHTTPResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode("utf-8")
+
+            def __enter__(self) -> "_FakeHTTPResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def read(self) -> bytes:
+                return self._body
+
+        payload = {
+            "ok": True,
+            "result": [
+                {
+                    "update_id": 52,
+                    "message": {
+                        "chat": {"id": 123456},
+                        "text": "continue",
+                        "reply_to_message": {"text": "[Codex] sid-123 — responded — done"},
+                    },
+                }
+            ],
+        }
+
+        with mock.patch.object(
+            cp.urllib_request,  # type: ignore[attr-defined]
+            "urlopen",
+            return_value=_FakeHTTPResponse(json.dumps(payload)),
+        ):
+            updates = cp._fetch_telegram_updates(  # type: ignore[attr-defined]
+                token="test-bot-token",
+                chat_id="123456",
+                after_update_id=0,
+            )
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0][0], 52)
+        self.assertEqual(updates[0][1], "continue")
+        self.assertEqual(updates[0][2], "[Codex] sid-123 — responded — done")
+
+    def test_process_inbound_telegram_replies_passes_reply_reference_texts(self) -> None:
+        with (
+            mock.patch.object(
+                cp,
+                "_fetch_telegram_updates",
+                return_value=[(77, "continue", "[Codex] sid-123 — responded — done")],
+            ),
+            mock.patch.object(cp, "_process_inbound_replies", return_value=77) as process_mock,
+            mock.patch.object(cp, "_telegram_bot_token", return_value="token"),
+            mock.patch.object(cp, "_telegram_chat_id", return_value="123456"),
+        ):
+            rowid = cp._process_inbound_telegram_replies(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                after_update_id=0,
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 77)
+        ref_texts_fn = process_mock.call_args.kwargs.get("reference_texts_fn")
+        self.assertTrue(callable(ref_texts_fn))
+        probe_conn = sqlite3.connect(":memory:")
+        try:
+            resolved = ref_texts_fn(conn=probe_conn, rowid=77, fallback_guid=None)
+        finally:
+            probe_conn.close()
+        self.assertEqual(resolved, ["[Codex] sid-123 — responded — done"])
 
     def test_main_notify_works_without_imessage_recipient_when_telegram_enabled(self) -> None:
         called: list[dict[str, object]] = []
@@ -3027,6 +3539,44 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_CHAT_ID"), "123456")
             self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_BOT_TOKEN"), "telegram-token")
             self.assertNotIn("CODEX_IMESSAGE_TO", env_vars or {})
+
+    def test_run_setup_launchd_requires_telegram_bot_token_with_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    },
+                    clear=False,
+                ),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=False,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+            self.assertEqual(rc, 1)
+            text = out.getvalue()
+            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN is required", text)
+            self.assertIn("@BotFather", text)
+            self.assertIn("/newbot", text)
+            self.assertIn("/token", text)
 
     def test_run_setup_launchd_enables_service_before_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -77,6 +77,13 @@ export PYTHON_BIN
 # export CLAUDE_HOME="$HOME/.claude"
 ```
 
+If you use Telegram transport (`CODEX_IMESSAGE_TRANSPORT=telegram|both`), get a bot token first:
+
+1. Open Telegram and chat with `@BotFather`.
+2. Run `/newbot` to create a bot (or `/token` for an existing bot).
+3. Copy the HTTP API token and set:
+   - `export CODEX_TELEGRAM_BOT_TOKEN="<bot token>"`
+
 4. Configure notify hook for your agent runtime.
 
 ```bash
@@ -87,6 +94,7 @@ export PYTHON_BIN
 ```
 
 `--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
+When transport includes Telegram, setup also requires `CODEX_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 
 This updater is idempotent:
 - `--agent codex`: writes `notify` at top-level in `~/.codex/config.toml`
@@ -107,6 +115,7 @@ Compatibility note:
 ```
 
 `--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
+When transport includes Telegram, setup also requires `CODEX_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
