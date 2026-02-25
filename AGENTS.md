@@ -6,6 +6,7 @@ This file is intentionally short.
 
 Use `README.md` as the single source of truth for setup and recovery:
 - `Quickstart`
+- `Codex / Claude Assisted Setup`
 - `First-Run Failure Modes`
 - `Launchd`
 - `Cleanup / Uninstall`
@@ -20,6 +21,7 @@ Canonical runtime entrypoint is `agent_chat_control_plane.py`.
   - `setup-notify-hook`
   - `setup-launchd`
   - `doctor`
+- Require Homebrew + `tmux` in setup flows; auto-install both when missing (otherwise fail with actionable guidance).
 - Do not default to `/usr/bin/python3`; resolve Python from `PATH` and require `3.11+`.
 - Do not point messaging send paths to external files outside this repo.
 - Do not remove launchd setup/doctor flows.
@@ -40,17 +42,31 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
-export AGENT_IMESSAGE_TO="+15555550123"   # replace
+if ! command -v brew >/dev/null 2>&1; then
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  brew install tmux
+fi
+
+export AGENT_CHAT_AGENT="${AGENT_CHAT_AGENT:-codex}"
 export AGENT_CHAT_HOME="$HOME/.codex"
 export AGENT_CHAT_NOTIFY_MODE="route"
+# export AGENT_CHAT_TRANSPORT="telegram"   # imessage|telegram|both
+# export AGENT_TELEGRAM_BOT_TOKEN="<bot token>"
+# export AGENT_TELEGRAM_CHAT_ID="<chat id>"
+# export AGENT_IMESSAGE_TO="+15555550123"  # required for imessage|both
 
 "$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
-  --recipient "$AGENT_IMESSAGE_TO" \
+  --agent "$AGENT_CHAT_AGENT" \
+  --recipient "${AGENT_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
 
 "$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
-  --recipient "$AGENT_IMESSAGE_TO" \
+  --agent "$AGENT_CHAT_AGENT" \
+  --recipient "${AGENT_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
 
-"$PYTHON_BIN" agent_chat_control_plane.py doctor
+"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent "$AGENT_CHAT_AGENT"
 ```

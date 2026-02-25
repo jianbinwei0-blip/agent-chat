@@ -101,10 +101,15 @@ _DEFAULT_SETUP_PERMISSIONS_POLL_S = 1.0
 _LAUNCHD_POST_START_VERIFY_DELAY_S = 0.8
 _FULL_DISK_ACCESS_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 _DEFAULT_FRIENDLY_PYTHON_APP_NAME = "AgentChatPython.app"
+_HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 _TMUX_BIN_CANDIDATES = (
     "/opt/homebrew/bin/tmux",
     "/usr/local/bin/tmux",
     "/usr/bin/tmux",
+)
+_BREW_BIN_CANDIDATES = (
+    "/opt/homebrew/bin/brew",
+    "/usr/local/bin/brew",
 )
 _CODEX_BIN_CANDIDATES = (
     "/opt/homebrew/bin/codex",
@@ -3607,6 +3612,27 @@ def _tmux_socket_from_env() -> str | None:
 
 
 def _resolve_tmux_bin() -> str:
+    discovered = _discover_tmux_bin()
+    if discovered:
+        return discovered
+    return "tmux"
+
+
+def _resolve_brew_bin() -> str | None:
+    discovered = shutil.which("brew")
+    if isinstance(discovered, str) and discovered.strip():
+        return discovered.strip()
+
+    for candidate in _BREW_BIN_CANDIDATES:
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _discover_tmux_bin() -> str | None:
     override = os.environ.get("AGENT_CHAT_TMUX_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
@@ -3621,7 +3647,119 @@ def _resolve_tmux_bin() -> str:
                 return candidate
         except Exception:
             continue
-    return "tmux"
+    return None
+
+
+def _ensure_tmux_available_for_setup() -> tuple[str | None, str | None]:
+    tmux_bin = _discover_tmux_bin()
+    if isinstance(tmux_bin, str) and tmux_bin.strip():
+        return tmux_bin.strip(), None
+
+    brew_bin = _resolve_brew_bin()
+    if not brew_bin:
+        brew_bin, brew_setup_err = _install_homebrew_for_setup()
+        if isinstance(brew_setup_err, str):
+            return None, brew_setup_err
+        if not isinstance(brew_bin, str) or not brew_bin.strip():
+            return (
+                None,
+                "tmux is required for setup commands, but Homebrew could not be resolved after install.\n"
+                "Install Homebrew (https://brew.sh/) and rerun setup.\n",
+            )
+        brew_bin = brew_bin.strip()
+
+    sys.stdout.write("tmux not found. Attempting automatic install via Homebrew...\n")
+    sys.stdout.write(f"Running: {shlex.join([brew_bin, 'install', 'tmux'])}\n")
+    sys.stdout.flush()
+    try:
+        proc = subprocess.run(
+            [brew_bin, "install", "tmux"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception as exc:
+        return (
+            None,
+            "Failed to run Homebrew while installing tmux: "
+            f"{type(exc).__name__}: {exc}\n"
+            "Run `brew install tmux` manually, then rerun setup.\n",
+        )
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if detail:
+            detail = detail.splitlines()[-1]
+        else:
+            detail = f"exit {proc.returncode}"
+        return (
+            None,
+            "Automatic tmux install failed via Homebrew: "
+            f"{detail}\n"
+            "Run `brew install tmux` manually, then rerun setup.\n",
+        )
+
+    tmux_bin = _discover_tmux_bin()
+    if isinstance(tmux_bin, str) and tmux_bin.strip():
+        sys.stdout.write(f"tmux installed: {tmux_bin.strip()}\n")
+        sys.stdout.flush()
+        return tmux_bin.strip(), None
+    return (
+        None,
+        "Homebrew reported success, but tmux is still not available in PATH.\n"
+        "Open a new shell (or set AGENT_CHAT_TMUX_BIN) and rerun setup.\n",
+    )
+
+
+def _install_homebrew_for_setup() -> tuple[str | None, str | None]:
+    sys.stdout.write("Homebrew not found. Attempting automatic Homebrew install...\n")
+    sys.stdout.write(f"Source: {_HOMEBREW_INSTALL_URL}\n")
+    sys.stdout.flush()
+
+    env = dict(os.environ)
+    env["NONINTERACTIVE"] = "1"
+    env.setdefault("HOMEBREW_NO_ANALYTICS", "1")
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", "-c", f"$(curl -fsSL {_HOMEBREW_INSTALL_URL})"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+    except Exception as exc:
+        return (
+            None,
+            "Failed to run automatic Homebrew install: "
+            f"{type(exc).__name__}: {exc}\n"
+            "Install Homebrew manually from https://brew.sh/, then rerun setup.\n",
+        )
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if detail:
+            detail = detail.splitlines()[-1]
+        else:
+            detail = f"exit {proc.returncode}"
+        return (
+            None,
+            "Automatic Homebrew install failed: "
+            f"{detail}\n"
+            "Install Homebrew manually from https://brew.sh/, then rerun setup.\n",
+        )
+
+    brew_bin = _resolve_brew_bin()
+    if isinstance(brew_bin, str) and brew_bin.strip():
+        sys.stdout.write(f"Homebrew installed: {brew_bin.strip()}\n")
+        sys.stdout.flush()
+        return brew_bin.strip(), None
+    return (
+        None,
+        "Homebrew install completed, but `brew` is still not available in PATH.\n"
+        "Open a new shell (or run brew shellenv), then rerun setup.\n",
+    )
 
 
 def _resolve_codex_bin() -> str:
@@ -5968,6 +6106,14 @@ def main(argv: list[str]) -> int:
 
     agent = _normalize_agent(agent=getattr(args, "agent", None))
     os.environ["AGENT_CHAT_AGENT"] = agent
+
+    if args.cmd in {"setup-notify-hook", "setup-launchd"}:
+        tmux_bin, tmux_setup_err = _ensure_tmux_available_for_setup()
+        if isinstance(tmux_setup_err, str):
+            sys.stdout.write(tmux_setup_err)
+            return 1
+        if isinstance(tmux_bin, str) and tmux_bin.strip():
+            os.environ["AGENT_CHAT_TMUX_BIN"] = tmux_bin.strip()
 
     recipient_raw = os.environ.get("AGENT_IMESSAGE_TO")
     codex_home = _agent_home_path(agent=agent)

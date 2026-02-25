@@ -2024,6 +2024,129 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertGreaterEqual(inbound_mock.call_count, 1)
         self.assertEqual(inbound_mock.call_args.kwargs.get("after_rowid"), 42)
 
+    def test_ensure_tmux_available_for_setup_returns_existing_tmux(self) -> None:
+        with (
+            mock.patch.object(cp, "_discover_tmux_bin", return_value="/opt/homebrew/bin/tmux"),
+            mock.patch.object(cp, "_resolve_brew_bin") as brew_mock,
+            mock.patch.object(cp.subprocess, "run") as run_mock,
+        ):
+            tmux_bin, err = cp._ensure_tmux_available_for_setup()  # type: ignore[attr-defined]
+
+        self.assertEqual(tmux_bin, "/opt/homebrew/bin/tmux")
+        self.assertIsNone(err)
+        brew_mock.assert_not_called()
+        run_mock.assert_not_called()
+
+    def test_ensure_tmux_available_for_setup_installs_via_homebrew_when_missing(self) -> None:
+        with (
+            mock.patch.object(cp, "_discover_tmux_bin", side_effect=[None, "/opt/homebrew/bin/tmux"]),
+            mock.patch.object(cp, "_resolve_brew_bin", return_value="/opt/homebrew/bin/brew"),
+            mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")) as run_mock,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            tmux_bin, err = cp._ensure_tmux_available_for_setup()  # type: ignore[attr-defined]
+
+        self.assertEqual(tmux_bin, "/opt/homebrew/bin/tmux")
+        self.assertIsNone(err)
+        run_mock.assert_called_once_with(
+            ["/opt/homebrew/bin/brew", "install", "tmux"],
+            check=False,
+            stdout=cp.subprocess.PIPE,  # type: ignore[attr-defined]
+            stderr=cp.subprocess.PIPE,  # type: ignore[attr-defined]
+            text=True,
+        )
+        text = out.getvalue()
+        self.assertIn("Attempting automatic install via Homebrew", text)
+        self.assertIn("tmux installed: /opt/homebrew/bin/tmux", text)
+
+    def test_ensure_tmux_available_for_setup_installs_homebrew_when_missing(self) -> None:
+        with (
+            mock.patch.object(cp, "_discover_tmux_bin", side_effect=[None, "/opt/homebrew/bin/tmux"]),
+            mock.patch.object(cp, "_resolve_brew_bin", return_value=None),
+            mock.patch.object(cp, "_install_homebrew_for_setup", return_value=("/opt/homebrew/bin/brew", None)) as install_brew_mock,
+            mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")),
+        ):
+            tmux_bin, err = cp._ensure_tmux_available_for_setup()  # type: ignore[attr-defined]
+
+        self.assertEqual(tmux_bin, "/opt/homebrew/bin/tmux")
+        self.assertIsNone(err)
+        install_brew_mock.assert_called_once()
+
+    def test_ensure_tmux_available_for_setup_fails_when_homebrew_auto_install_fails(self) -> None:
+        with (
+            mock.patch.object(cp, "_discover_tmux_bin", return_value=None),
+            mock.patch.object(cp, "_resolve_brew_bin", return_value=None),
+            mock.patch.object(
+                cp,
+                "_install_homebrew_for_setup",
+                return_value=(None, "Automatic Homebrew install failed: blocked\n"),
+            ),
+        ):
+            tmux_bin, err = cp._ensure_tmux_available_for_setup()  # type: ignore[attr-defined]
+
+        self.assertIsNone(tmux_bin)
+        self.assertIsInstance(err, str)
+        self.assertIn("Automatic Homebrew install failed", err or "")
+
+    def test_ensure_tmux_available_for_setup_surfaces_homebrew_failure(self) -> None:
+        with (
+            mock.patch.object(cp, "_discover_tmux_bin", return_value=None),
+            mock.patch.object(cp, "_resolve_brew_bin", return_value="/opt/homebrew/bin/brew"),
+            mock.patch.object(
+                cp.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=1, stdout="", stderr="Error: network unavailable"),
+            ),
+        ):
+            tmux_bin, err = cp._ensure_tmux_available_for_setup()  # type: ignore[attr-defined]
+
+        self.assertIsNone(tmux_bin)
+        self.assertIsInstance(err, str)
+        self.assertIn("Automatic tmux install failed", err or "")
+        self.assertIn("network unavailable", err or "")
+
+    def test_install_homebrew_for_setup_runs_noninteractive_installer(self) -> None:
+        with (
+            mock.patch.object(
+                cp.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+            ) as run_mock,
+            mock.patch.object(cp, "_resolve_brew_bin", return_value="/opt/homebrew/bin/brew"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            brew_bin, err = cp._install_homebrew_for_setup()  # type: ignore[attr-defined]
+
+        self.assertEqual(brew_bin, "/opt/homebrew/bin/brew")
+        self.assertIsNone(err)
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(cmd[:2], ["/bin/bash", "-c"])
+        self.assertIn(cp._HOMEBREW_INSTALL_URL, cmd[2])  # type: ignore[attr-defined]
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("check"), False)
+        env = kwargs.get("env")
+        self.assertIsInstance(env, dict)
+        env_dict = env if isinstance(env, dict) else {}
+        self.assertEqual(env_dict.get("NONINTERACTIVE"), "1")
+        self.assertEqual(env_dict.get("HOMEBREW_NO_ANALYTICS"), "1")
+        text = out.getvalue()
+        self.assertIn("Attempting automatic Homebrew install", text)
+        self.assertIn("Homebrew installed: /opt/homebrew/bin/brew", text)
+
+    def test_install_homebrew_for_setup_surfaces_install_failure(self) -> None:
+        with mock.patch.object(
+            cp.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=1, stdout="", stderr="Error: install blocked"),
+        ):
+            brew_bin, err = cp._install_homebrew_for_setup()  # type: ignore[attr-defined]
+
+        self.assertIsNone(brew_bin)
+        self.assertIsInstance(err, str)
+        self.assertIn("Automatic Homebrew install failed", err or "")
+        self.assertIn("https://brew.sh/", err or "")
+
     def test_tmux_ensure_active_session_reuses_agent_when_present(self) -> None:
         calls: list[list[str]] = []
 
@@ -2643,6 +2766,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
                         "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_BOT_TOKEN": "",
                         "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
@@ -3438,6 +3562,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
                 clear=False,
             ),
+            mock.patch.object(cp, "_ensure_tmux_available_for_setup", return_value=("/opt/homebrew/bin/tmux", None)) as tmux_mock,
             mock.patch.object(cp, "_run_setup_notify_hook", return_value=0) as setup_mock,
         ):
             rc = cp.main(
@@ -3455,6 +3580,34 @@ class TestAgentChatControlPlane(unittest.TestCase):
             python_bin="/usr/bin/python3",
             script_path=Path(cp.__file__).resolve(),  # type: ignore[attr-defined]
         )
+        tmux_mock.assert_called_once()
+
+    def test_main_setup_notify_hook_stops_when_tmux_setup_fails(self) -> None:
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
+                clear=False,
+            ),
+            mock.patch.object(
+                cp,
+                "_ensure_tmux_available_for_setup",
+                return_value=(None, "tmux install failed\n"),
+            ),
+            mock.patch.object(cp, "_run_setup_notify_hook") as setup_mock,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp.main(
+                [
+                    "setup-notify-hook",
+                    "--python-bin",
+                    "/usr/bin/python3",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        setup_mock.assert_not_called()
+        self.assertIn("tmux install failed", out.getvalue())
 
     def test_main_setup_permissions_prefers_launchd_runtime_targets(self) -> None:
         with (
@@ -3633,6 +3786,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
                         "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_BOT_TOKEN": "",
                         "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
@@ -3829,6 +3983,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
                 clear=False,
             ),
+            mock.patch.object(cp, "_ensure_tmux_available_for_setup", return_value=("/opt/homebrew/bin/tmux", None)) as tmux_mock,
             mock.patch.object(cp, "_run_setup_launchd", return_value=0) as setup_mock,
         ):
             rc = cp.main(
@@ -3860,6 +4015,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             open_settings=False,
             repair_tcc=False,
         )
+        tmux_mock.assert_called_once()
 
 
 

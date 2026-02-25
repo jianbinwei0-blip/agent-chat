@@ -29,7 +29,8 @@ Non-goals:
 - macOS (Messages app available and signed in)
 - Python 3.11+ (runtime enforces this)
 - Codex CLI or Claude CLI installed and authenticated
-- Optional but recommended: tmux
+- Required: Homebrew (setup auto-installs when missing)
+- Required: tmux (setup auto-installs via Homebrew when missing)
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
 
 Privacy/Security permissions required on macOS:
@@ -59,7 +60,17 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
 fi
 ```
 
-3. Set minimum environment.
+3. Optional Homebrew/tmux preflight (`setup-notify-hook`/`setup-launchd` auto-install both when missing).
+
+```bash
+if command -v tmux >/dev/null 2>&1; then
+  tmux -V
+else
+  echo "tmux not found. setup-notify-hook/setup-launchd will auto-install Homebrew (if needed) and run: brew install tmux"
+fi
+```
+
+4. Set minimum environment.
 
 ```bash
 export AGENT_IMESSAGE_TO="+15555550123"
@@ -97,6 +108,7 @@ If you use Telegram transport (`AGENT_CHAT_TRANSPORT=telegram|both`), get a bot 
 
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
 When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+`setup-notify-hook` and `setup-launchd` require Homebrew + tmux. If missing, setup first attempts automatic Homebrew install, then runs `brew install tmux`.
 
 This updater is idempotent:
 - `--agent codex`: writes `notify` at top-level in `~/.codex/config.toml`
@@ -145,6 +157,45 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 "$PYTHON_BIN" agent_chat_control_plane.py once --trace
 ```
 
+## Codex / Claude Assisted Setup
+
+You can ask Codex CLI or Claude CLI to run this setup end-to-end using the same idempotent commands.
+
+### Codex prompt template
+
+From the `agent-chat` repo root, run Codex and provide:
+
+```text
+Read README.md and set up agent-chat for codex.
+Homebrew + tmux are required; if missing, let setup auto-install both.
+Use Python 3.11+ preflight checks.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN and AGENT_TELEGRAM_CHAT_ID from my environment.
+Unset AGENT_IMESSAGE_TO for telegram-only mode.
+Run:
+- python3 agent_chat_control_plane.py setup-notify-hook --agent codex --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py setup-launchd --agent codex --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py doctor --agent codex --json
+Then report updated files and health status.
+```
+
+### Claude prompt template
+
+From the same repo root, run Claude and provide:
+
+```text
+Read README.md and set up agent-chat for claude.
+Homebrew + tmux are required; if missing, let setup auto-install both.
+Use Python 3.11+ preflight checks.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN and AGENT_TELEGRAM_CHAT_ID from my environment.
+Unset AGENT_IMESSAGE_TO for telegram-only mode.
+Set CLAUDE_HOME if needed.
+Run:
+- python3 agent_chat_control_plane.py setup-notify-hook --agent claude --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py setup-launchd --agent claude --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py doctor --agent claude --json
+Then report updated files and health status.
+```
+
 ## First-Run Failure Modes
 
 `setup-notify-hook` / `setup-launchd` exits with `Require Python 3.11+`:
@@ -153,6 +204,12 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
   - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
   - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+
+`setup-notify-hook` / `setup-launchd` exits with tmux/Homebrew guidance:
+- setup requires Homebrew + tmux; commands auto-install Homebrew first and then run `brew install tmux`.
+- If Homebrew or tmux install fails, run:
+  - install Homebrew (`https://brew.sh/`) and re-run setup, or
+  - install tmux manually and re-run setup.
 
 `doctor` says `notify hook is not configured...` or `unable to parse ~/.codex/config.toml`:
 - Re-run:
