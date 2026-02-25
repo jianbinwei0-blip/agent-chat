@@ -31,7 +31,7 @@ Recommendations:
 ## Permission Hardening
 
 1. Grant `Automation` only to the exact terminal/runner binaries you use.
-2. Grant `Full Disk Access` only to the app/runtime binary that executes the launchd runtime (for example `~/Applications/Codex iMessage Python.app` when provided by setup).
+2. Grant `Full Disk Access` only to the app/runtime binary that executes the launchd runtime (for example `~/Applications/AgentChatPython.app` when provided by setup).
 3. Prefer LaunchAgents (user context) over system daemons for this workflow.
 4. Review launchd `ProgramArguments` and `EnvironmentVariables` for least privilege.
 

@@ -10,7 +10,7 @@ checkout.
 
 - launchd service (default `com.agent-chat`, or custom `AGENT_CHAT_LAUNCHD_LABEL`)
 - LaunchAgent plist (`~/Library/LaunchAgents/<label>.plist`)
-- runtime app bundle (`~/Applications/Codex iMessage Python.app`)
+- runtime app bundle (`~/Applications/AgentChatPython.app`)
 - tmux-managed background control-plane session (`agent_chat_control_plane`)
 - Codex/Claude notify hook wiring to `agent_chat_control_plane.py notify`
 - integration runtime state under `~/.codex/tmp/agent_chat_*` (plus iMessage-specific cursors)
@@ -27,7 +27,7 @@ LABEL="${AGENT_CHAT_LAUNCHD_LABEL:-com.agent-chat}"
 UID_NUM="$(id -u)"
 SERVICE="gui/${UID_NUM}/${LABEL}"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-APP="$HOME/Applications/Codex iMessage Python.app"
+APP="$HOME/Applications/AgentChatPython.app"
 OUT_LOG="$HOME/Library/Logs/agent-chat.launchd.out.log"
 ERR_LOG="$HOME/Library/Logs/agent-chat.launchd.err.log"
 CONFIG="$HOME/.codex/config.toml"
