@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/ABSOLUTE/PATH/TO/python3</string>
-    <string>/ABSOLUTE/PATH/TO/codex-imessage-control-plane/codex_imessage_control_plane.py</string>
+    <string>/ABSOLUTE/PATH/TO/agent-imessage-control-plane/agent_imessage_control_plane.py</string>
     <string>run</string>
   </array>
 

@@ -12,10 +12,10 @@ class TestCleanupDocs(unittest.TestCase):
 
         self.assertIn("Uninstall is host-scoped", text)
         self.assertNotIn(
-            "python3 /ABSOLUTE/PATH/TO/agent-chat/codex_imessage_control_plane.py doctor",
+            "python3 /ABSOLUTE/PATH/TO/agent-chat/agent_imessage_control_plane.py doctor",
             text,
         )
-        self.assertIn("codex-imessage-control-plane doctor", text)
+        self.assertIn("agent-imessage-control-plane doctor", text)
         self.assertIn("tccutil reset SystemPolicyAllFiles", text)
         self.assertIn("org.python.python", text)
         self.assertNotIn("com.mitchellh.", text)

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 
-import codex_imessage_outbound_lib as bridge
+import agent_imessage_outbound_lib as bridge
 
 
 class TestCodexIMessageOutboundBridge(unittest.TestCase):
@@ -828,7 +828,7 @@ class TestCodexIMessageOutboundBridge(unittest.TestCase):
 
     def test_send_imessage_uses_repo_local_script(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            module_file = Path(td) / "codex_imessage_outbound_lib.py"
+            module_file = Path(td) / "agent_imessage_outbound_lib.py"
             script_path = Path(td) / "scripts" / "send-imessage.applescript"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("on run argv\nend run\n", encoding="utf-8")

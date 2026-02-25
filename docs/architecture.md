@@ -2,30 +2,30 @@
 
 ## Overview
 
-`codex-imessage-control-plane` is a local macOS runtime that synchronizes:
-- outbound Codex notifications -> iMessage
-- inbound iMessage replies -> Codex sessions
+`agent-imessage-control-plane` is a local macOS runtime that synchronizes:
+- outbound Codex/Claude notifications -> iMessage
+- inbound iMessage replies -> Codex/Claude sessions
 
-The primary daemon is `codex_imessage_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
+The primary daemon is `agent_imessage_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
 
 ## Components
 
-- `codex_imessage_control_plane.py`
+- `agent_imessage_control_plane.py`
   - Long-lived run loop (`run`) and one-shot cycle (`once`)
   - Notify payload ingestion (`notify`)
   - Health diagnostics (`doctor`)
   - Session registry, routing, queue draining, inbound polling
-- `codex_imessage_notify.py`
+- `agent_imessage_notify.py`
   - Best-effort notify formatter/sender
   - Supports `attention` and `route` modes
   - Can update attention state/index without sending (`state_only` mode)
-- `codex_imessage_outbound_lib.py`
+- `agent_imessage_outbound_lib.py`
   - Session JSONL tailing and outbound message extraction
   - Request-user-input detection and mirroring controls
-- `codex_imessage_reply_lib.py`
+- `agent_imessage_reply_lib.py`
   - `chat.db` inbound polling
   - Reply/session correlation and resume/tmux dispatch helpers
-- `codex_imessage_dedupe.py`
+- `agent_imessage_dedupe.py`
   - Shared dedupe key store + TTL
 
 ## Data and State
@@ -46,12 +46,12 @@ Inbound reads default to:
 
 ## Control Flow
 
-1. Codex emits a notify payload.
+1. Codex or Claude emits a notify payload.
 2. Runtime ingests payload via `notify` path and updates attention/session metadata.
 3. Outbound messages are sent through AppleScript (Messages app); failures are queued.
 4. Inbound iMessage replies are polled from `chat.db` and parsed.
 5. Routing selects a target session using explicit `@ref`, reply linkage, and registry context.
-6. Dispatch proceeds via tmux/Codex resume paths according to routing flags.
+6. Dispatch proceeds via tmux + agent resume paths according to routing flags.
 
 ## Routing Semantics
 

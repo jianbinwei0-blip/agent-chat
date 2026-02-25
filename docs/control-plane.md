@@ -1,9 +1,9 @@
-# Codex iMessage Control Plane
+# Agent iMessage Control Plane
 
 ## Runtime Contract
 
 - Authoritative long-lived process: `com.codex.imessage-control-plane` (launchd).
-- Codex `notify` hook forwards payloads only; it does not spawn daemons.
+- Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons.
 - Single process handles:
   - outbound needs-input notifications
   - inbound iMessage replies from `chat.db`
@@ -12,7 +12,7 @@
 
 ## Data Flow
 
-1. Codex emits notify payload to `codex_imessage_control_plane.py notify`.
+1. Codex or Claude emits notify payload to `agent_imessage_control_plane.py notify`.
 2. Control plane updates session registry and sends routed iMessages.
 3. During `run`, control plane tails session JSONL and polls `~/Library/Messages/chat.db`.
 4. Replies are routed by `@ref`, reply context, or auto-create logic.
@@ -30,19 +30,19 @@
 ## Health Checks
 
 ```bash
-python3 codex_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
-python3 codex_imessage_control_plane.py setup-launchd
-python3 codex_imessage_control_plane.py setup-permissions
-python3 codex_imessage_control_plane.py doctor
-python3 codex_imessage_control_plane.py doctor --json
-python3 codex_imessage_control_plane.py once --trace
+python3 agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
+python3 agent_imessage_control_plane.py setup-launchd
+python3 agent_imessage_control_plane.py setup-permissions
+python3 agent_imessage_control_plane.py doctor
+python3 agent_imessage_control_plane.py doctor --json
+python3 agent_imessage_control_plane.py once --trace
 ```
 
 `doctor` reports launchd load state, lock PID liveness, chat.db readability, queue depth, cursor/state summary, and routing snapshot:
 - strict tmux mode
 - require explicit session refs
 - selected tmux socket
-- active Codex pane count/sample
+- active agent pane count/sample
 - last dispatch error (if any)
 - launchd runtime permission targets (`runtime_python` and `permission_app` when available)
 
@@ -52,7 +52,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 - `CODEX_IMESSAGE_STRICT_TMUX` (default `1`)
   - `1`: never run non-tmux resume fallback when pane dispatch fails.
-  - `0`: allow codex resume fallback for `tmux_failed`/`tmux_stale`.
+  - `0`: allow agent resume fallback for `tmux_failed`/`tmux_stale`.
 - `CODEX_IMESSAGE_REQUIRE_SESSION_REF` (default follows strict mode)
   - when enabled, ambiguous implicit replies require `@<ref> <instruction>`.
 - `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S` (default `2.0`)
@@ -64,7 +64,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 - `chat.db` unreadable:
   - Symptoms: inbound disabled warnings in stderr log.
-  - Fix: run `python3 codex_imessage_control_plane.py setup-launchd` (recommended) or `setup-permissions`, then grant the exact target printed by setup:
+  - Fix: run `python3 agent_imessage_control_plane.py setup-launchd` (recommended) or `setup-permissions`, then grant the exact target printed by setup:
     - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
     - `Grant Full Disk Access to this app: ...` (preferred when shown)
     - `Grant access to this Python binary: ...`
@@ -76,7 +76,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - Confirm queue is being drained and launchd service is running.
 - Strict tmux routing failures:
   - Symptoms: iMessage receives strict routing error with no fallback response.
-  - Fix: ensure target session has a live Codex tmux pane and resend with `@<ref> ...`.
+  - Fix: ensure target session has a live agent tmux pane and resend with `@<ref> ...`.
 
 ## Launchd Runtime Notes
 

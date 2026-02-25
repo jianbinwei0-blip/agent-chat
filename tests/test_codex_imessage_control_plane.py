@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import codex_imessage_control_plane as cp
+import agent_imessage_control_plane as cp
 
 
 class TestCodexIMessageControlPlane(unittest.TestCase):
@@ -230,7 +230,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 mock.patch.object(cp, "_save_registry"),
                 mock.patch.object(cp, "_save_message_index"),
                 mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
-                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+                mock.patch.object(cp.agent_imessage_dedupe, "mark_once", return_value=True),
                 mock.patch("subprocess.Popen") as popen_mock,
             ):
                 cp._handle_notify_payload(  # type: ignore[attr-defined]
@@ -260,7 +260,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             codex_home = Path(td)
             with (
                 mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
-                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+                mock.patch.object(cp.agent_imessage_dedupe, "mark_once", return_value=True),
             ):
                 cp._handle_notify_payload(  # type: ignore[attr-defined]
                     codex_home=codex_home,
@@ -287,7 +287,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             codex_home = Path(td)
             with (
                 mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
-                mock.patch.object(cp.codex_imessage_dedupe, "mark_once", return_value=True),
+                mock.patch.object(cp.agent_imessage_dedupe, "mark_once", return_value=True),
             ):
                 cp._handle_notify_payload(  # type: ignore[attr-defined]
                     codex_home=codex_home,
@@ -1789,7 +1789,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 plistlib.dumps(
                     {
                         "Label": "com.codex.imessage-control-plane",
-                        "ProgramArguments": [str(runtime_python), "/tmp/codex_imessage_control_plane.py", "run"],
+                        "ProgramArguments": [str(runtime_python), "/tmp/agent_imessage_control_plane.py", "run"],
                         "EnvironmentVariables": {"CODEX_IMESSAGE_TO": "+15551234567"},
                     },
                     sort_keys=False,
@@ -2136,7 +2136,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -2180,7 +2180,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             claude_home.mkdir(parents=True, exist_ok=True)
             settings_path = claude_home / "settings.json"
             settings_path.write_text("{}", encoding="utf-8")
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -2216,6 +2216,61 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 ]
                 self.assertTrue(any("notify" in cmd for cmd in command_values))
                 self.assertTrue(any("CODEX_IMESSAGE_AGENT=claude" in cmd for cmd in command_values))
+
+    def test_run_setup_notify_hook_replaces_legacy_codex_hook_command_for_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            claude_home = home / ".claude"
+            claude_home.mkdir(parents=True, exist_ok=True)
+            legacy_command = (
+                "bash -lc 'payload=\"${1:-}\"; if [ -n \"$payload\" ]; then "
+                "CODEX_IMESSAGE_TO=+15555550123 CODEX_IMESSAGE_AGENT=claude "
+                "/opt/homebrew/bin/python3 /tmp/codex_imessage_control_plane.py notify \"$payload\" >/dev/null 2>&1 || true; fi' --"
+            )
+            settings_path = claude_home / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Notification": [{"matcher": "", "hooks": [{"type": "command", "command": legacy_command}]}],
+                            "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": legacy_command}]}],
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False):
+                rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
+                    codex_home=claude_home,
+                    recipient="+15555550123",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                )
+
+            self.assertEqual(rc, 0)
+            parsed = json.loads(settings_path.read_text(encoding="utf-8"))
+            hooks = parsed.get("hooks")
+            self.assertIsInstance(hooks, dict)
+            for event_name in ("Notification", "Stop"):
+                event_hooks = hooks.get(event_name) if isinstance(hooks, dict) else None
+                self.assertIsInstance(event_hooks, list)
+                first = event_hooks[0] if isinstance(event_hooks, list) and event_hooks else None
+                self.assertIsInstance(first, dict)
+                hook_entries = first.get("hooks") if isinstance(first, dict) else None
+                self.assertIsInstance(hook_entries, list)
+                commands = [
+                    item.get("command")
+                    for item in hook_entries
+                    if isinstance(item, dict) and isinstance(item.get("command"), str)
+                ]
+                self.assertEqual(len(commands), 1)
+                self.assertIn("agent_imessage_control_plane.py notify", commands[0])
+                self.assertNotIn("codex_imessage_control_plane.py notify", commands[0])
 
     def test_find_all_session_files_supports_claude_projects_layout(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2346,7 +2401,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         text = out.getvalue()
-        self.assertIn("Codex iMessage doctor: DEGRADED", text)
+        self.assertIn("Agent iMessage doctor: DEGRADED", text)
         self.assertIn("Recipient: (missing)", text)
 
     def test_main_doctor_prints_launchd_runtime_targets(self) -> None:
@@ -2703,7 +2758,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             codex_home = home / ".codex"
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -2769,7 +2824,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
                 recipient="",
                 label="com.codex.imessage-control-plane",
                 python_bin="/usr/bin/python3",
-                script_path=Path("/tmp/codex_imessage_control_plane.py"),
+                script_path=Path("/tmp/agent_imessage_control_plane.py"),
                 setup_permissions=False,
                 timeout_s=10.0,
                 poll_s=1.0,
@@ -2782,7 +2837,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             codex_home = home / ".codex"
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -2826,7 +2881,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             codex_home = home / ".codex"
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
@@ -2861,7 +2916,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             codex_home = home / ".codex"
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
             permission_app = home / "Applications" / "Codex iMessage Python.app"
@@ -2903,7 +2958,7 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             codex_home = home / ".codex"
-            script_path = home / "repo" / "codex_imessage_control_plane.py"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
             permission_app = home / "Applications" / "Codex iMessage Python.app"

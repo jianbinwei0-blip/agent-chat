@@ -42,13 +42,13 @@ export CODEX_IMESSAGE_TO="+15555550123"   # replace
 export CODEX_HOME="$HOME/.codex"
 export CODEX_IMESSAGE_NOTIFY_MODE="route"
 
-"$PYTHON_BIN" codex_imessage_control_plane.py setup-notify-hook \
+"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
-"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd \
+"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
-"$PYTHON_BIN" codex_imessage_control_plane.py doctor
+"$PYTHON_BIN" agent_imessage_control_plane.py doctor
 ```

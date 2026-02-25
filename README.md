@@ -1,6 +1,6 @@
-# codex-imessage-control-plane
+# agent-imessage-control-plane
 
-`codex-imessage-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage.
+`agent-imessage-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage.
 
 `README.md` is the canonical setup guide for both humans and coding agents.
 `AGENTS.md` is intentionally lightweight and points back here.
@@ -38,7 +38,7 @@ Privacy/Security permissions required on macOS:
 1. Clone and enter the repo.
 
 ```bash
-cd /path/to/codex-imessage-control-plane
+cd /path/to/agent-imessage-control-plane
 ```
 
 2. Resolve Python from `PATH` and enforce `3.11+`.
@@ -72,7 +72,7 @@ export PYTHON_BIN
 4. Configure notify hook for your agent runtime.
 
 ```bash
-"$PYTHON_BIN" codex_imessage_control_plane.py setup-notify-hook \
+"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook \
   --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
@@ -89,11 +89,11 @@ Compatibility note:
 5. Install and start launchd (recommended).
 
 ```bash
-"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd \
+"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd \
   --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
   --recipient "$CODEX_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
-"$PYTHON_BIN" codex_imessage_control_plane.py doctor --agent "${CODEX_IMESSAGE_AGENT:-codex}"
+"$PYTHON_BIN" agent_imessage_control_plane.py doctor --agent "${CODEX_IMESSAGE_AGENT:-codex}"
 ```
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
@@ -111,13 +111,13 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 6. Optional: run in foreground instead of launchd.
 
 ```bash
-"$PYTHON_BIN" codex_imessage_control_plane.py run
+"$PYTHON_BIN" agent_imessage_control_plane.py run
 ```
 
 7. Optional one-cycle smoke test.
 
 ```bash
-"$PYTHON_BIN" codex_imessage_control_plane.py once --trace
+"$PYTHON_BIN" agent_imessage_control_plane.py once --trace
 ```
 
 ## First-Run Failure Modes
@@ -126,20 +126,20 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 - On some macOS hosts, `python3` in `PATH` still points to Apple Python 3.9.
 - Use an explicit 3.11+ binary, then re-run setup:
   - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 `doctor` says `notify hook is not configured...` or `unable to parse ~/.codex/config.toml`:
 - Re-run:
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 `setup-launchd` says shell can read `chat.db` but launchd cannot:
 - Grant Full Disk Access to `permission_app` shown by `doctor` (usually `~/Applications/Codex iMessage Python.app`).
 - Re-run:
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py doctor`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py doctor`
 - If this keeps repeating after Python upgrades/reinstalls, run:
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
   - This attempts to reset stale TCC Full Disk Access approval for the runtime bundle id and re-runs permission setup.
 
 `setup-launchd` keeps failing with shell/runtime readable but launchd still denied (even after granting FDA):
@@ -152,7 +152,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - re-enable FDA for `~/Applications/Codex iMessage Python.app`
   - re-run `setup-launchd` and `doctor`
 - Shortcut:
-  - `"$PYTHON_BIN" codex_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
+  - `"$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
 
 `doctor` transiently shows `control-plane lock PID not alive` immediately after restart:
 - Wait 1-2 seconds and run `doctor` again.
@@ -163,18 +163,28 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 
 ```bash
 # Unified control plane
-python3 codex_imessage_control_plane.py run [--agent codex|claude] [--poll 0.5] [--dry-run] [--trace]
-python3 codex_imessage_control_plane.py once [--agent codex|claude] [--dry-run] [--trace]
-python3 codex_imessage_control_plane.py notify [--agent codex|claude] [PAYLOAD_JSON] [--dry-run]
-python3 codex_imessage_control_plane.py doctor [--agent codex|claude] [--json]
-python3 codex_imessage_control_plane.py setup-notify-hook [--agent codex|claude] [--recipient TO] [--python-bin PATH]
-python3 codex_imessage_control_plane.py setup-permissions [--agent codex|claude] [--timeout 180] [--poll 1.0] [--no-open]
-python3 codex_imessage_control_plane.py setup-launchd [--agent codex|claude] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
+python3 agent_imessage_control_plane.py run [--agent codex|claude] [--poll 0.5] [--dry-run] [--trace]
+python3 agent_imessage_control_plane.py once [--agent codex|claude] [--dry-run] [--trace]
+python3 agent_imessage_control_plane.py notify [--agent codex|claude] [PAYLOAD_JSON] [--dry-run]
+python3 agent_imessage_control_plane.py doctor [--agent codex|claude] [--json]
+python3 agent_imessage_control_plane.py setup-notify-hook [--agent codex|claude] [--recipient TO] [--python-bin PATH]
+python3 agent_imessage_control_plane.py setup-permissions [--agent codex|claude] [--timeout 180] [--poll 1.0] [--no-open]
+python3 agent_imessage_control_plane.py setup-launchd [--agent codex|claude] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
 
 # Notify helper (best-effort)
-python3 codex_imessage_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]
-python3 codex_imessage_notify.py route [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
+python3 agent_imessage_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]
+python3 agent_imessage_notify.py route [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
+
+# Installed console scripts
+agent-imessage-control-plane ...
+agent-imessage-notify ...
+agent-imessage-outbound ...
+agent-imessage-reply ...
 ```
+
+Legacy compatibility:
+- `codex_imessage_*.py` files remain as wrappers.
+- `codex-imessage-*` console scripts remain available.
 
 ### Inbound iMessage command grammar
 
@@ -207,7 +217,7 @@ When inbound routing is enabled, reply messages support:
 Use:
 
 ```bash
-python3 codex_imessage_control_plane.py setup-launchd
+python3 agent_imessage_control_plane.py setup-launchd
 ```
 
 This command:
@@ -222,7 +232,7 @@ This command:
 
 If `setup-launchd` reports that the shell can read `chat.db` but launchd cannot, grant Full Disk Access to the app or Python binary shown in command output, then re-run `setup-launchd`.
 
-Tip: `python3 codex_imessage_control_plane.py doctor` now shows both `runtime_python` and `permission_app` under Launchd so you can grant FDA to the exact runtime target.
+Tip: `python3 agent_imessage_control_plane.py doctor` now shows both `runtime_python` and `permission_app` under Launchd so you can grant FDA to the exact runtime target.
 
 When `permission_app` is present (usually `~/Applications/Codex iMessage Python.app`), grant FDA there first; do not grant FDA to terminal apps unless that terminal binary is the runtime target shown by `doctor`.
 
