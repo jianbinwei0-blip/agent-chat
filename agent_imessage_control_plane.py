@@ -29,6 +29,8 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.parse as urllib_parse
+import urllib.request as urllib_request
 from pathlib import Path
 
 import agent_imessage_dedupe
@@ -89,6 +91,8 @@ _DEFAULT_QUEUE_DRAIN_LIMIT = 25
 _DEFAULT_INPUT_NEEDED_TEXT = "Waiting on approval / question / input."
 _DEFAULT_TMUX_ACK_TIMEOUT_S = 2.0
 _CHAT_DB_WARN_INTERVAL_S = 300.0
+_DEFAULT_TELEGRAM_SEND_TIMEOUT_S = 10.0
+_DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org"
 _DEFAULT_TMUX_NEW_SESSION_NAME = "agent"
 _DEFAULT_TMUX_WINDOW_PREFIX = "agent"
 _DEFAULT_SETUP_PERMISSIONS_TIMEOUT_S = 180.0
@@ -426,16 +430,44 @@ def _resolve_python_bin_for_notify_hook(*, python_bin: str) -> str:
     return str((Path.cwd() / python_text).resolve())
 
 
+def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
+    recipient_text = recipient.strip()
+    agent_text = _normalize_agent(agent=agent)
+    items: list[str] = []
+
+    if recipient_text:
+        items.append(f"CODEX_IMESSAGE_TO={shlex.quote(recipient_text)}")
+    items.append(f"CODEX_IMESSAGE_AGENT={shlex.quote(agent_text)}")
+
+    transport_mode = _transport_mode()
+    if transport_mode != "imessage":
+        items.append(f"CODEX_IMESSAGE_TRANSPORT={shlex.quote(transport_mode)}")
+
+    if _transport_telegram_enabled(mode=transport_mode):
+        token = _telegram_bot_token()
+        chat_id = _telegram_chat_id()
+        if token:
+            items.append(f"CODEX_TELEGRAM_BOT_TOKEN={shlex.quote(token)}")
+        if chat_id:
+            items.append(f"CODEX_TELEGRAM_CHAT_ID={shlex.quote(chat_id)}")
+        api_base_raw = os.environ.get("CODEX_TELEGRAM_API_BASE", "")
+        api_base = api_base_raw.strip() if isinstance(api_base_raw, str) else ""
+        if api_base:
+            items.append(f"CODEX_TELEGRAM_API_BASE={shlex.quote(api_base)}")
+
+    return " ".join(items)
+
+
 def _build_notify_hook_command(*, recipient: str, python_bin: str, script_path: Path, agent: str) -> list[str]:
     recipient_text = recipient.strip()
     python_text = python_bin.strip()
     script_text = str(script_path)
     agent_text = _normalize_agent(agent=agent)
+    env_prefix = _notify_hook_env_prefix(recipient=recipient_text, agent=agent_text)
     notify_cmd = (
         'payload="${1:-}"; if [ -z "$payload" ]; then payload="${CODEX_NOTIFY_PAYLOAD:-}"; fi; '
         'if [ -z "$payload" ]; then payload="$(cat)"; fi; '
-        f'if [ -n "$payload" ]; then CODEX_IMESSAGE_TO={shlex.quote(recipient_text)} '
-        f'CODEX_IMESSAGE_AGENT={shlex.quote(agent_text)} '
+        f'if [ -n "$payload" ]; then {env_prefix} '
         f'{shlex.quote(python_text)} {shlex.quote(script_text)} '
         'notify "$payload" >/dev/null 2>&1 || true; fi'
     )
@@ -566,8 +598,9 @@ def _run_setup_notify_hook(
     script_path: Path,
 ) -> int:
     agent = _current_agent()
+    transport_mode = _transport_mode()
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
-    if not recipient_text:
+    if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
         sys.stdout.write("CODEX_IMESSAGE_TO is required. Provide --recipient or set CODEX_IMESSAGE_TO.\n")
         return 1
 
@@ -622,7 +655,7 @@ def _run_setup_notify_hook(
         return 1
 
     sys.stdout.write(f"Updated notify hook in {config_path}\n")
-    sys.stdout.write(f"Recipient: {recipient_text}\n")
+    sys.stdout.write(f"Recipient: {recipient_text or '(none)'}\n")
     sys.stdout.write(f"Python binary: {python_text}\n")
     sys.stdout.write(f"Script: {script_abs}\n")
     sys.stdout.write(f"Restart {_agent_display_name(agent=agent)} to apply notify hook changes.\n")
@@ -735,6 +768,148 @@ def _queue_path(*, codex_home: Path) -> Path:
             str(codex_home / "tmp" / "imessage_queue.jsonl"),
         )
     )
+
+
+def _transport_mode() -> str:
+    raw = os.environ.get("CODEX_IMESSAGE_TRANSPORT", "imessage")
+    mode = raw.strip().lower() if isinstance(raw, str) else "imessage"
+    if mode in {"imessage", "telegram", "both"}:
+        return mode
+    return "imessage"
+
+
+def _transport_imessage_enabled(*, mode: str | None = None) -> bool:
+    selected = mode if isinstance(mode, str) else _transport_mode()
+    return selected in {"imessage", "both"}
+
+
+def _transport_telegram_enabled(*, mode: str | None = None) -> bool:
+    selected = mode if isinstance(mode, str) else _transport_mode()
+    return selected in {"telegram", "both"}
+
+
+def _telegram_bot_token() -> str | None:
+    raw = os.environ.get("CODEX_TELEGRAM_BOT_TOKEN", "")
+    token = raw.strip() if isinstance(raw, str) else ""
+    return token or None
+
+
+def _telegram_chat_id() -> str | None:
+    raw = os.environ.get("CODEX_TELEGRAM_CHAT_ID", "")
+    chat_id = raw.strip() if isinstance(raw, str) else ""
+    return chat_id or None
+
+
+def _telegram_api_base() -> str:
+    raw = os.environ.get("CODEX_TELEGRAM_API_BASE", _DEFAULT_TELEGRAM_API_BASE)
+    base = raw.strip() if isinstance(raw, str) else _DEFAULT_TELEGRAM_API_BASE
+    if not base:
+        base = _DEFAULT_TELEGRAM_API_BASE
+    return base.rstrip("/")
+
+
+def _telegram_inbound_cursor_path(*, codex_home: Path) -> Path:
+    return Path(
+        os.environ.get(
+            "CODEX_TELEGRAM_INBOUND_CURSOR",
+            str(codex_home / "tmp" / "telegram_inbound_cursor.json"),
+        )
+    )
+
+
+def _load_telegram_inbound_cursor(*, codex_home: Path) -> int:
+    raw = _read_json(_telegram_inbound_cursor_path(codex_home=codex_home))
+    if not isinstance(raw, dict):
+        return 0
+    last_update_id = raw.get("last_update_id")
+    return int(last_update_id) if isinstance(last_update_id, int) else 0
+
+
+def _save_telegram_inbound_cursor(*, codex_home: Path, last_update_id: int) -> None:
+    payload: dict[str, object] = {
+        "last_update_id": int(last_update_id),
+        "ts": int(time.time()),
+    }
+    _write_json(_telegram_inbound_cursor_path(codex_home=codex_home), payload)
+
+
+def _send_telegram_message(*, token: str, chat_id: str, message: str, timeout_s: float = _DEFAULT_TELEGRAM_SEND_TIMEOUT_S) -> bool:
+    token_text = token.strip()
+    chat_id_text = chat_id.strip()
+    if not token_text or not chat_id_text:
+        return False
+
+    url = f"{_telegram_api_base()}/bot{token_text}/sendMessage"
+    payload = urllib_parse.urlencode({"chat_id": chat_id_text, "text": message}).encode("utf-8")
+    request = urllib_request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=float(timeout_s)) as response:
+            raw = response.read()
+    except Exception:
+        return False
+
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("ok"))
+
+
+def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id: int) -> list[tuple[int, str]]:
+    token_text = token.strip()
+    if not token_text:
+        return []
+
+    params: dict[str, str] = {"timeout": "0", "allowed_updates": json.dumps(["message"])}
+    if int(after_update_id) > 0:
+        params["offset"] = str(int(after_update_id) + 1)
+
+    url = f"{_telegram_api_base()}/bot{token_text}/getUpdates?{urllib_parse.urlencode(params)}"
+    request = urllib_request.Request(url)
+    try:
+        with urllib_request.urlopen(request, timeout=_DEFAULT_TELEGRAM_SEND_TIMEOUT_S) as response:
+            raw = response.read()
+    except Exception:
+        return []
+
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    if not isinstance(parsed, dict) or not bool(parsed.get("ok")):
+        return []
+    result = parsed.get("result")
+    if not isinstance(result, list):
+        return []
+
+    target_chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
+    out: list[tuple[int, str]] = []
+    for update in result:
+        if not isinstance(update, dict):
+            continue
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int):
+            continue
+        message = update.get("message")
+        if not isinstance(message, dict):
+            continue
+        chat = message.get("chat")
+        if not isinstance(chat, dict):
+            continue
+        incoming_chat_id = chat.get("id")
+        incoming_chat_text = str(incoming_chat_id).strip() if incoming_chat_id is not None else ""
+        if target_chat_id and incoming_chat_text != target_chat_id:
+            continue
+        text = message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        out.append((update_id, text.strip()))
+    return out
 
 
 def _attention_index_path(*, codex_home: Path) -> Path:
@@ -894,6 +1069,85 @@ def _queue_stats(queue_path: Path) -> dict[str, object]:
     return stats
 
 
+def _enqueue_fallback_event(
+    *,
+    queue_path: Path,
+    transport: str,
+    recipient: str,
+    message: str,
+) -> None:
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": int(time.time()),
+        "transport": transport,
+        "to": recipient,
+        "text": message,
+    }
+    with queue_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False))
+        f.write("\n")
+
+
+def _send_message_with_transport(*, transport: str, recipient: str, message: str) -> bool:
+    if transport == "imessage":
+        recipient_text = recipient.strip()
+        if not recipient_text:
+            return False
+        return bool(outbound._send_imessage(recipient=recipient_text, message=message))
+    if transport == "telegram":
+        token = _telegram_bot_token()
+        if not token:
+            return False
+        chat_id = recipient.strip()
+        if not chat_id:
+            return False
+        return _send_telegram_message(token=token, chat_id=chat_id, message=message)
+    return False
+
+
+def _deliver_message_across_transports(
+    *,
+    codex_home: Path,
+    imessage_recipient: str,
+    message: str,
+) -> bool:
+    queue_path = _queue_path(codex_home=codex_home)
+    mode = _transport_mode()
+    sent_any = False
+    attempted = False
+
+    if _transport_imessage_enabled(mode=mode):
+        recipient_text = imessage_recipient.strip()
+        if recipient_text:
+            attempted = True
+            if _send_message_with_transport(transport="imessage", recipient=recipient_text, message=message):
+                sent_any = True
+            else:
+                _enqueue_fallback_event(
+                    queue_path=queue_path,
+                    transport="imessage",
+                    recipient=recipient_text,
+                    message=message,
+                )
+
+    if _transport_telegram_enabled(mode=mode):
+        chat_id = _telegram_chat_id()
+        if isinstance(chat_id, str) and chat_id.strip():
+            attempted = True
+            chat_id_text = chat_id.strip()
+            if _send_message_with_transport(transport="telegram", recipient=chat_id_text, message=message):
+                sent_any = True
+            else:
+                _enqueue_fallback_event(
+                    queue_path=queue_path,
+                    transport="telegram",
+                    recipient=chat_id_text,
+                    message=message,
+                )
+
+    return sent_any if attempted else False
+
+
 def _drain_fallback_queue(
     *,
     codex_home: Path,
@@ -951,6 +1205,8 @@ def _drain_fallback_queue(
                     stats["parse_errors"] = int(stats["parse_errors"]) + 1
                     continue
 
+                transport = event.get("transport")
+                transport_text = transport.strip().lower() if isinstance(transport, str) else "imessage"
                 recipient = event.get("to")
                 message = event.get("text")
                 if not isinstance(recipient, str) or not isinstance(message, str):
@@ -964,7 +1220,11 @@ def _drain_fallback_queue(
                     stats["retained"] = int(stats["retained"]) + 1
                     continue
 
-                ok = outbound._send_imessage(recipient=recipient, message=message)
+                ok = _send_message_with_transport(
+                    transport=transport_text,
+                    recipient=recipient,
+                    message=message,
+                )
                 if ok:
                     stats["sent"] = int(stats["sent"]) + 1
                 else:
@@ -1332,15 +1592,17 @@ def _build_launchagent_plist(
     out_log, err_log = _launchd_log_paths()
     notify_mode = os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "route").strip() or "route"
     agent = _current_agent()
+    recipient_text = recipient.strip()
 
     env_vars: dict[str, str] = {
-        "CODEX_IMESSAGE_TO": recipient,
         "CODEX_HOME": str(codex_home),
         "CODEX_IMESSAGE_AGENT": agent,
         "CODEX_IMESSAGE_NOTIFY_MODE": notify_mode,
         "CODEX_IMESSAGE_LAUNCHD_LABEL": label,
         "PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
     }
+    if recipient_text:
+        env_vars["CODEX_IMESSAGE_TO"] = recipient_text
 
     if agent == "claude":
         env_vars["CLAUDE_HOME"] = str(codex_home)
@@ -1365,6 +1627,11 @@ def _build_launchagent_plist(
         "CODEX_IMESSAGE_CODEX_BIN",
         "CODEX_IMESSAGE_SETUP_PERMISSIONS_TIMEOUT_S",
         "CODEX_IMESSAGE_SETUP_PERMISSIONS_POLL_S",
+        "CODEX_IMESSAGE_TRANSPORT",
+        "CODEX_TELEGRAM_BOT_TOKEN",
+        "CODEX_TELEGRAM_CHAT_ID",
+        "CODEX_TELEGRAM_API_BASE",
+        "CODEX_TELEGRAM_INBOUND_CURSOR",
     )
     for key in passthrough:
         raw = os.environ.get(key)
@@ -1545,8 +1812,9 @@ def _run_setup_launchd(
     open_settings: bool,
     repair_tcc: bool = False,
 ) -> int:
+    transport_mode = _transport_mode()
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
-    if not recipient_text:
+    if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
         sys.stdout.write("CODEX_IMESSAGE_TO is required. Provide --recipient or set CODEX_IMESSAGE_TO.\n")
         return 1
 
@@ -1852,6 +2120,11 @@ def _run_setup_permissions(
 def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, object]:
     now_ts = int(time.time())
     agent = _current_agent()
+    transport_mode = _transport_mode()
+    imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
+    telegram_enabled = _transport_telegram_enabled(mode=transport_mode)
+    telegram_chat_id = _telegram_chat_id()
+    telegram_token_present = bool(_telegram_bot_token())
     launchd_label = os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
     launchd_err_log = _launchd_err_log_path()
@@ -1907,6 +2180,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
 
     outbound_cursor_raw = _read_json(_outbound_cursor_path(codex_home=codex_home)) or {}
     inbound_cursor = _load_inbound_cursor(codex_home=codex_home)
+    telegram_inbound_cursor = _load_telegram_inbound_cursor(codex_home=codex_home)
     reply_cursor_raw = _read_json(
         Path(
             os.environ.get(
@@ -1928,13 +2202,17 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
         if isinstance(fallback_recipient, str):
             recipient_text = fallback_recipient
     health: list[str] = []
-    if not recipient_text:
+    if imessage_enabled and not recipient_text:
         health.append("missing recipient (CODEX_IMESSAGE_TO)")
+    if telegram_enabled and not telegram_token_present:
+        health.append("missing Telegram bot token (CODEX_TELEGRAM_BOT_TOKEN)")
+    if telegram_enabled and not (isinstance(telegram_chat_id, str) and telegram_chat_id.strip()):
+        health.append("missing Telegram chat id (CODEX_TELEGRAM_CHAT_ID)")
     if not launchd_loaded:
         health.append("launchd service not loaded")
     if launchd_inbound_warning:
         health.append("launchd reports inbound disabled (check chat.db permissions)")
-    if not chat_db_readable:
+    if imessage_enabled and not chat_db_readable:
         health.append("chat.db unreadable for inbound replies")
     if isinstance(queue.get("lines"), int) and int(queue.get("lines")) > 0:
         health.append("fallback queue has pending messages")
@@ -1959,6 +2237,13 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
         "agent": agent,
         "codex_home": str(codex_home),
         "recipient": recipient_text or None,
+        "transport": {
+            "mode": transport_mode,
+            "imessage_enabled": imessage_enabled,
+            "telegram_enabled": telegram_enabled,
+            "telegram_chat_id": telegram_chat_id,
+            "telegram_token_present": telegram_token_present,
+        },
         "launchd": {
             "label": launchd_label,
             "loaded": launchd_loaded,
@@ -1989,6 +2274,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
             "session_count": len(sessions) if isinstance(sessions, dict) else 0,
             "alias_count": len(aliases) if isinstance(aliases, dict) else 0,
             "inbound_cursor_rowid": inbound_cursor,
+            "telegram_inbound_cursor_update_id": telegram_inbound_cursor,
             "outbound_cursor_ts": outbound_cursor_raw.get("ts") if isinstance(outbound_cursor_raw, dict) else None,
             "reply_cursor_rowid": reply_cursor_raw.get("last_rowid") if isinstance(reply_cursor_raw, dict) else None,
             "last_dispatch_error": last_dispatch_error,
@@ -2017,6 +2303,19 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     sys.stdout.write(f"Agent: {report.get('agent') or _current_agent()}\n")
     sys.stdout.write(f"Home: {report.get('codex_home')}\n")
     sys.stdout.write(f"Recipient: {report.get('recipient') or '(missing)'}\n")
+    transport = report.get("transport") if isinstance(report.get("transport"), dict) else {}
+    sys.stdout.write(
+        "Transport: "
+        f"mode={transport.get('mode') or _transport_mode()} "
+        f"imessage={bool(transport.get('imessage_enabled'))} "
+        f"telegram={bool(transport.get('telegram_enabled'))}\n"
+    )
+    if bool(transport.get("telegram_enabled")):
+        telegram_chat_id = transport.get("telegram_chat_id")
+        sys.stdout.write(f"Telegram chat: {telegram_chat_id or '(missing)'}\n")
+        sys.stdout.write(
+            f"Telegram token: {'configured' if bool(transport.get('telegram_token_present')) else 'missing'}\n"
+        )
 
     launchd = report.get("launchd") if isinstance(report.get("launchd"), dict) else {}
     sys.stdout.write(
@@ -2643,8 +2942,6 @@ def _send_structured(
     except Exception:
         messages = [f"{header}\n{body}"]
 
-    queue = _queue_path(codex_home=codex_home)
-
     for msg in messages:
         _record_outbound_message(index=message_index, session_id=session_id, kind=kind, text=msg)
         if dry_run:
@@ -2652,9 +2949,11 @@ def _send_structured(
             sys.stdout.write("\n---\n")
             continue
 
-        ok = outbound._send_imessage(recipient=recipient, message=msg)
-        if not ok:
-            outbound._enqueue_fallback(queue_path=queue, recipient=recipient, message=msg)
+        _deliver_message_across_transports(
+            codex_home=codex_home,
+            imessage_recipient=recipient,
+            message=msg,
+        )
 
 
 def _find_all_session_files(*, codex_home: Path) -> list[Path]:
@@ -4391,8 +4690,13 @@ def _process_inbound_replies(
     dry_run: bool,
     resume_timeout_s: float | None = None,
     trace: bool = False,
+    fetch_replies_fn: object | None = None,
+    reference_guids_fn: object | None = None,
 ) -> int:
-    replies = reply._fetch_new_replies(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
+    if callable(fetch_replies_fn):
+        replies = fetch_replies_fn(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
+    else:
+        replies = reply._fetch_new_replies(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
     if not replies:
         return after_rowid
 
@@ -4414,11 +4718,14 @@ def _process_inbound_replies(
     for rowid, text, reply_to_guid in replies:
         last_rowid = rowid
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
-        reference_guids = _reply_reference_guids_for_row(
-            conn=conn,
-            rowid=rowid,
-            fallback_guid=reply_to_guid,
-        )
+        if callable(reference_guids_fn):
+            reference_guids = reference_guids_fn(conn=conn, rowid=rowid, fallback_guid=reply_to_guid)
+        else:
+            reference_guids = _reply_reference_guids_for_row(
+                conn=conn,
+                rowid=rowid,
+                fallback_guid=reply_to_guid,
+            )
 
         if reply._is_attention_message(text):
             continue
@@ -4939,6 +5246,63 @@ def _process_inbound_replies(
     return last_rowid
 
 
+def _process_inbound_telegram_replies(
+    *,
+    codex_home: Path,
+    recipient: str,
+    after_update_id: int,
+    max_message_chars: int,
+    min_prefix: int,
+    dry_run: bool,
+    resume_timeout_s: float | None = None,
+    trace: bool = False,
+) -> int:
+    token = _telegram_bot_token()
+    chat_id = _telegram_chat_id()
+    if not isinstance(token, str) or not token.strip():
+        return after_update_id
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return after_update_id
+
+    updates = _fetch_telegram_updates(
+        token=token.strip(),
+        chat_id=chat_id.strip(),
+        after_update_id=after_update_id,
+    )
+    if not updates:
+        return after_update_id
+
+    def _fetch_virtual_replies(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> list[tuple[int, str, str | None]]:
+        del conn, handle_ids
+        return [(update_id, text, None) for update_id, text in updates if int(update_id) > int(after_rowid)]
+
+    def _empty_reference_guids(*, conn: sqlite3.Connection, rowid: int, fallback_guid: str | None) -> list[str]:
+        del conn, rowid, fallback_guid
+        return []
+
+    temp_conn = sqlite3.connect(":memory:")
+    try:
+        return _process_inbound_replies(
+            codex_home=codex_home,
+            conn=temp_conn,
+            recipient=recipient,
+            handle_ids=[],
+            after_rowid=after_update_id,
+            max_message_chars=max_message_chars,
+            min_prefix=min_prefix,
+            dry_run=dry_run,
+            resume_timeout_s=resume_timeout_s,
+            trace=trace,
+            fetch_replies_fn=_fetch_virtual_replies,
+            reference_guids_fn=_empty_reference_guids,
+        )
+    finally:
+        try:
+            temp_conn.close()
+        except Exception:
+            pass
+
+
 def _process_outbound(
     *,
     codex_home: Path,
@@ -5212,6 +5576,7 @@ def main(argv: list[str]) -> int:
     recipient_raw = os.environ.get("CODEX_IMESSAGE_TO")
     codex_home = _agent_home_path(agent=agent)
     recipient = _normalize_recipient(recipient_raw) if isinstance(recipient_raw, str) and recipient_raw.strip() else ""
+    transport_mode = _transport_mode()
     trace_enabled = bool(getattr(args, "trace", False)) or _env_enabled("CODEX_IMESSAGE_TRACE", default=False)
 
     if args.cmd == "doctor":
@@ -5266,9 +5631,6 @@ def main(argv: list[str]) -> int:
             repair_tcc=bool(args.repair_tcc),
         )
 
-    if not recipient:
-        return 0
-
     if args.cmd == "notify":
         payload = args.payload.strip()
         if not payload:
@@ -5279,6 +5641,9 @@ def main(argv: list[str]) -> int:
             payload_text=payload,
             dry_run=bool(args.dry_run),
         )
+        return 0
+
+    if not recipient and not _transport_telegram_enabled(mode=transport_mode):
         return 0
 
     lock_handle = _acquire_single_instance_lock(codex_home=codex_home)
@@ -5333,6 +5698,7 @@ def main(argv: list[str]) -> int:
             recipient=recipient,
             handle_ids=handle_ids,
         )
+    telegram_update_id = _load_telegram_inbound_cursor(codex_home=codex_home)
 
     inbound_retry_s = 30.0
     env_retry = os.environ.get("CODEX_IMESSAGE_INBOUND_RETRY_S", "").strip()
@@ -5370,7 +5736,7 @@ def main(argv: list[str]) -> int:
     _ensure_inbound_ready(now_monotonic=0.0)
 
     def cycle() -> None:
-        nonlocal files_cursor, seen_needs_input_call_ids, inbound_rowid
+        nonlocal files_cursor, seen_needs_input_call_ids, inbound_rowid, telegram_update_id
 
         _drain_fallback_queue(
             codex_home=codex_home,
@@ -5411,6 +5777,24 @@ def main(argv: list[str]) -> int:
                 recipient=recipient,
                 handle_ids=handle_ids,
             )
+
+        if _transport_telegram_enabled(mode=transport_mode):
+            next_telegram_update_id = _process_inbound_telegram_replies(
+                codex_home=codex_home,
+                recipient=recipient,
+                after_update_id=telegram_update_id,
+                max_message_chars=max_message_chars,
+                min_prefix=min_prefix,
+                dry_run=bool(args.dry_run),
+                resume_timeout_s=resume_timeout_s,
+                trace=trace_enabled,
+            )
+            if next_telegram_update_id != telegram_update_id:
+                _save_telegram_inbound_cursor(
+                    codex_home=codex_home,
+                    last_update_id=next_telegram_update_id,
+                )
+                telegram_update_id = next_telegram_update_id
 
     if args.cmd == "once":
         cycle()

@@ -2173,6 +2173,44 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             self.assertNotIn("notify", model_migrations or {})
             self.assertIn("Restart Codex to apply notify hook changes.", out.getvalue())
 
+    def test_run_setup_notify_hook_allows_telegram_without_imessage_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True, exist_ok=True)
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                        "CODEX_TELEGRAM_BOT_TOKEN": "telegram-token",
+                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    },
+                    clear=False,
+                ),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                )
+
+            self.assertEqual(rc, 0)
+            parsed = cp.tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+            self.assertIsInstance(parsed, dict)
+            notify_val = parsed.get("notify")
+            self.assertIsInstance(notify_val, list)
+            joined = " ".join(notify_val) if isinstance(notify_val, list) else ""
+            self.assertIn("CODEX_IMESSAGE_TRANSPORT=telegram", joined)
+            self.assertIn("CODEX_TELEGRAM_CHAT_ID=123456", joined)
+            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN=telegram-token", joined)
+
     def test_run_setup_notify_hook_writes_claude_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
@@ -2320,6 +2358,112 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
 
         self.assertGreaterEqual(len(sent), 1)
         self.assertIn("[Claude] sid-123 — responded — ", sent[0])
+
+    def test_send_structured_uses_telegram_transport_when_enabled(self) -> None:
+        sent_telegram: list[tuple[str, str, str]] = []
+
+        def _capture_telegram(*, token: str, chat_id: str, message: str, timeout_s: float = 10.0) -> bool:
+            del timeout_s
+            sent_telegram.append((token, chat_id, message))
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                    "CODEX_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "CODEX_TELEGRAM_CHAT_ID": "123456",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_send_telegram_message", side_effect=_capture_telegram),
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="+15551234567",
+                session_id="sid-123",
+                kind="responded",
+                text="done",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        self.assertGreaterEqual(len(sent_telegram), 1)
+        self.assertEqual(sent_telegram[0][0], "test-bot-token")
+        self.assertEqual(sent_telegram[0][1], "123456")
+        self.assertIn("sid-123", sent_telegram[0][2])
+
+    def test_fetch_telegram_updates_parses_text_messages(self) -> None:
+        class _FakeHTTPResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode("utf-8")
+
+            def __enter__(self) -> "_FakeHTTPResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def read(self) -> bytes:
+                return self._body
+
+        payload = {
+            "ok": True,
+            "result": [
+                {
+                    "update_id": 42,
+                    "message": {
+                        "chat": {"id": 123456},
+                        "text": "help",
+                    },
+                }
+            ],
+        }
+
+        with mock.patch.object(
+            cp.urllib_request,  # type: ignore[attr-defined]
+            "urlopen",
+            return_value=_FakeHTTPResponse(json.dumps(payload)),
+        ):
+            updates = cp._fetch_telegram_updates(  # type: ignore[attr-defined]
+                token="test-bot-token",
+                chat_id="123456",
+                after_update_id=0,
+            )
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0][0], 42)
+        self.assertEqual(updates[0][1], "help")
+
+    def test_main_notify_works_without_imessage_recipient_when_telegram_enabled(self) -> None:
+        called: list[dict[str, object]] = []
+
+        def _capture_notify(**kwargs: object) -> None:
+            called.append(dict(kwargs))
+
+        with (
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "CODEX_HOME": "/tmp/codex-home",
+                    "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                    "CODEX_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "CODEX_TELEGRAM_CHAT_ID": "123456",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_handle_notify_payload", side_effect=_capture_notify),
+        ):
+            rc = cp.main(["notify", '{"type":"agent-turn-complete","session_id":"sid-123"}'])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(called), 1)
 
     def test_doctor_report_includes_routing_snapshot_and_last_dispatch_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2832,6 +2976,57 @@ class TestCodexIMessageControlPlane(unittest.TestCase):
             )
         self.assertEqual(rc, 1)
         self.assertIn("CODEX_IMESSAGE_TO is required", out.getvalue())
+
+    def test_run_setup_launchd_allows_missing_recipient_for_telegram_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            codex_home = home / ".codex"
+            script_path = home / "repo" / "agent_imessage_control_plane.py"
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
+                        "CODEX_TELEGRAM_BOT_TOKEN": "telegram-token",
+                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp.Path, "home", return_value=home),
+                mock.patch.object(cp, "_run_setup_permissions", return_value=0),
+                mock.patch.object(
+                    cp,
+                    "_resolve_launchd_runtime_python",
+                    return_value=("/opt/homebrew/bin/python3", None, None),
+                ),
+                mock.patch.object(cp.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="")),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    recipient="",
+                    label="com.codex.imessage-control-plane",
+                    python_bin="/opt/homebrew/bin/python3",
+                    script_path=script_path,
+                    setup_permissions=True,
+                    timeout_s=15.0,
+                    poll_s=0.5,
+                    open_settings=False,
+                )
+
+            self.assertEqual(rc, 0)
+            plist_path = home / "Library" / "LaunchAgents" / "com.codex.imessage-control-plane.plist"
+            with plist_path.open("rb") as f:
+                payload = plistlib.load(f)
+            env_vars = payload.get("EnvironmentVariables")
+            self.assertIsInstance(env_vars, dict)
+            self.assertEqual((env_vars or {}).get("CODEX_IMESSAGE_TRANSPORT"), "telegram")
+            self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_CHAT_ID"), "123456")
+            self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_BOT_TOKEN"), "telegram-token")
+            self.assertNotIn("CODEX_IMESSAGE_TO", env_vars or {})
 
     def test_run_setup_launchd_enables_service_before_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as td:

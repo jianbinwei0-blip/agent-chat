@@ -1,13 +1,14 @@
 # agent-imessage-control-plane
 
-`agent-imessage-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage.
+`agent-imessage-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage and/or Telegram.
 
 `README.md` is the canonical setup guide for both humans and coding agents.
 `AGENTS.md` is intentionally lightweight and points back here.
 
 It provides one control-plane process that can:
-- forward Codex/Claude `notify` payloads to iMessage
+- forward Codex/Claude `notify` payloads to iMessage and/or Telegram
 - read inbound iMessage replies from Messages `chat.db`
+- read inbound Telegram bot updates
 - route replies back to the right Codex/Claude session (including tmux-based routing)
 - drain a fallback outbound queue when AppleScript send attempts fail
 
@@ -64,6 +65,13 @@ export CODEX_HOME="$HOME/.codex"
 export CODEX_IMESSAGE_NOTIFY_MODE="route"
 export PYTHON_BIN
 
+# Optional transport mode:
+#   imessage (default), telegram, or both
+# export CODEX_IMESSAGE_TRANSPORT="telegram"
+# export CODEX_TELEGRAM_BOT_TOKEN="<bot token>"
+# export CODEX_TELEGRAM_CHAT_ID="<chat id>"
+# export CODEX_TELEGRAM_API_BASE="https://api.telegram.org"
+
 # Optional: switch runtime from codex (default) to claude
 # export CODEX_IMESSAGE_AGENT="claude"
 # export CLAUDE_HOME="$HOME/.claude"
@@ -74,9 +82,11 @@ export PYTHON_BIN
 ```bash
 "$PYTHON_BIN" agent_imessage_control_plane.py setup-notify-hook \
   --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
-  --recipient "$CODEX_IMESSAGE_TO" \
+  --recipient "${CODEX_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
 ```
+
+`--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
 
 This updater is idempotent:
 - `--agent codex`: writes `notify` at top-level in `~/.codex/config.toml`
@@ -91,10 +101,12 @@ Compatibility note:
 ```bash
 "$PYTHON_BIN" agent_imessage_control_plane.py setup-launchd \
   --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
-  --recipient "$CODEX_IMESSAGE_TO" \
+  --recipient "${CODEX_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
 "$PYTHON_BIN" agent_imessage_control_plane.py doctor --agent "${CODEX_IMESSAGE_AGENT:-codex}"
 ```
+
+`--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
@@ -186,9 +198,9 @@ Legacy compatibility:
 - `codex_imessage_*.py` files remain as wrappers.
 - `codex-imessage-*` console scripts remain available.
 
-### Inbound iMessage command grammar
+### Inbound command grammar (iMessage / Telegram)
 
-When inbound routing is enabled, reply messages support:
+When inbound routing is enabled (from iMessage and/or Telegram), reply messages support:
 - `help`
 - `list`
 - `status @<session_ref>`
@@ -197,9 +209,14 @@ When inbound routing is enabled, reply messages support:
 
 ### Important environment variables
 
-- `CODEX_IMESSAGE_TO`: destination phone number or Apple ID email
+- `CODEX_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
 - `CODEX_HOME`: Codex home directory (defaults to `~/.codex`)
 - `CODEX_IMESSAGE_NOTIFY_MODE`: `send`, `state_only`, or `route`
+- `CODEX_IMESSAGE_TRANSPORT`: `imessage` (default), `telegram`, or `both`
+- `CODEX_TELEGRAM_BOT_TOKEN`: Telegram bot token (required for `telegram` / `both`)
+- `CODEX_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (required for `telegram` / `both`)
+- `CODEX_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
+- `CODEX_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
 - `CODEX_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
 - `CODEX_IMESSAGE_QUEUE`: fallback queue JSONL path
 - `CODEX_IMESSAGE_MAX_LEN`: max outgoing message chunk size

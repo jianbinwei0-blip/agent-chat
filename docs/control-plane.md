@@ -1,20 +1,21 @@
-# Agent iMessage Control Plane
+# Agent Messaging Control Plane
 
 ## Runtime Contract
 
 - Authoritative long-lived process: `com.codex.imessage-control-plane` (launchd).
 - Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons.
 - Single process handles:
-  - outbound needs-input notifications
+  - outbound needs-input notifications to iMessage and/or Telegram
   - inbound iMessage replies from `chat.db`
+  - inbound Telegram bot updates
   - session routing (tmux + resume fallback)
   - fallback queue draining
 
 ## Data Flow
 
 1. Codex or Claude emits notify payload to `agent_imessage_control_plane.py notify`.
-2. Control plane updates session registry and sends routed iMessages.
-3. During `run`, control plane tails session JSONL and polls `~/Library/Messages/chat.db`.
+2. Control plane updates session registry and sends routed messages for active transport mode.
+3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
 4. Replies are routed by `@ref`, reply context, or auto-create logic.
 5. Failed outbound sends are queued in `~/.codex/tmp/imessage_queue.jsonl`; run loop drains queue on subsequent cycles.
 
@@ -25,6 +26,7 @@
 - `~/.codex/tmp/imessage_message_session_index.json`
 - `~/.codex/tmp/imessage_control_outbound_cursor.json`
 - `~/.codex/tmp/imessage_inbound_cursor.json`
+- `~/.codex/tmp/telegram_inbound_cursor.json`
 - `~/.codex/tmp/imessage_queue.jsonl`
 
 ## Health Checks
