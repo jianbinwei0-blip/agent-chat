@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -884,7 +885,7 @@ def _candidate_handle_ids(recipient: str) -> list[str]:
     return sorted(i for i in ids if i)
 
 
-def _read_json(path: Path) -> dict[str, object] | None:
+def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
@@ -894,7 +895,7 @@ def _read_json(path: Path) -> dict[str, object] | None:
         return None
 
 
-def _write_json(path: Path, data: dict[str, object]) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -1073,7 +1074,7 @@ def _resume_session(*, session_id: str, cwd: str | None, prompt: str, dry_run: b
         return
 
 
-def _load_last_attention_state(codex_home: Path) -> dict[str, object] | None:
+def _load_last_attention_state(codex_home: Path) -> dict[str, Any] | None:
     state_path = Path(
         os.environ.get(
             "CODEX_IMESSAGE_LAST_ATTENTION",
@@ -1092,7 +1093,7 @@ def _attention_index_path(*, codex_home: Path) -> Path:
     )
 
 
-def _load_attention_index(codex_home: Path) -> dict[str, object] | None:
+def _load_attention_index(codex_home: Path) -> dict[str, Any] | None:
     return _read_json(_attention_index_path(codex_home=codex_home))
 
 
@@ -1105,7 +1106,7 @@ def _session_registry_path(*, codex_home: Path) -> Path:
     )
 
 
-def _load_session_registry(codex_home: Path) -> dict[str, object] | None:
+def _load_session_registry(codex_home: Path) -> dict[str, Any] | None:
     return _read_json(_session_registry_path(codex_home=codex_home))
 
 
@@ -1119,9 +1120,9 @@ def _coerce_nonempty_str(value: object) -> str | None:
 def _select_attention_context(
     *,
     session_id: str,
-    attention_index: dict[str, object] | None,
-    last_attention_state: dict[str, object] | None,
-    session_registry: dict[str, object] | None = None,
+    attention_index: dict[str, Any] | None,
+    last_attention_state: dict[str, Any] | None,
+    session_registry: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return best-effort context for a session.
 
@@ -1131,7 +1132,7 @@ def _select_attention_context(
     """
     out: dict[str, str] = {}
 
-    primary: dict[str, object] | None = None
+    primary: dict[str, Any] | None = None
     if isinstance(attention_index, dict):
         candidate = attention_index.get(session_id)
         if isinstance(candidate, dict):

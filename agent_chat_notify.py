@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import agent_chat_dedupe
 
@@ -118,7 +119,7 @@ def _read_last_user_text(history_path: Path) -> str | None:
         return None
 
 
-def _read_session_meta_from_session(session_path: Path) -> dict[str, object] | None:
+def _read_session_meta_from_session(session_path: Path) -> dict[str, Any] | None:
     try:
         if not session_path.exists():
             return None
@@ -149,7 +150,7 @@ def _read_session_meta_from_session(session_path: Path) -> dict[str, object] | N
         return None
 
 
-def _read_latest_session_meta(*, codex_home: Path) -> dict[str, object] | None:
+def _read_latest_session_meta(*, codex_home: Path) -> dict[str, Any] | None:
     try:
         session_path_env = os.environ.get("CODEX_SESSION_PATH") or os.environ.get("CODEX_SESSION_FILE")
         if session_path_env:
@@ -231,7 +232,7 @@ def _read_last_assistant_text_from_session(session_path: Path) -> str | None:
         return None
 
 
-def _read_last_request_user_input_from_session(session_path: Path) -> dict[str, object] | None:
+def _read_last_request_user_input_from_session(session_path: Path) -> dict[str, Any] | None:
     """Return request_user_input payload arguments for iMessage rendering.
 
     Prefer the latest unanswered prompt. If everything was already answered
@@ -242,9 +243,9 @@ def _read_last_request_user_input_from_session(session_path: Path) -> dict[str, 
         if not session_path.exists():
             return None
 
-        pending_args_by_call_id: dict[str, dict[str, object]] = {}
+        pending_args_by_call_id: dict[str, dict[str, Any]] = {}
         pending_order: list[str] = []
-        latest_seen_args: dict[str, object] | None = None
+        latest_seen_args: dict[str, Any] | None = None
         with session_path.open("r", encoding="utf-8") as f:
             for raw_line in f:
                 line = raw_line.strip()
@@ -276,7 +277,7 @@ def _read_last_request_user_input_from_session(session_path: Path) -> dict[str, 
                         continue
 
                     raw_args = payload.get("arguments")
-                    parsed: dict[str, object] | None = None
+                    parsed: dict[str, Any] | None = None
                     if isinstance(raw_args, dict):
                         parsed = raw_args
                     elif isinstance(raw_args, str) and raw_args.strip():
@@ -315,7 +316,7 @@ def _read_last_request_user_input_from_session(session_path: Path) -> dict[str, 
         return None
 
 
-def _format_request_user_input_for_imessage(payload: dict[str, object]) -> str | None:
+def _format_request_user_input_for_imessage(payload: dict[str, Any]) -> str | None:
     try:
         questions = payload.get("questions")
         if not isinstance(questions, list) or not questions:
@@ -502,7 +503,7 @@ def _enqueue_fallback(*, queue_path: Path, recipient: str, message: str) -> None
         return
 
 
-def _read_json_dict(path: Path) -> dict[str, object] | None:
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
@@ -512,7 +513,7 @@ def _read_json_dict(path: Path) -> dict[str, object] | None:
         return None
 
 
-def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -531,8 +532,8 @@ def _attention_index_path(*, codex_home: Path) -> Path:
     )
 
 
-def _prune_attention_index(index: dict[str, object], *, now_ts: int) -> dict[str, object]:
-    pruned: dict[str, object] = {}
+def _prune_attention_index(index: dict[str, Any], *, now_ts: int) -> dict[str, Any]:
+    pruned: dict[str, Any] = {}
     cutoff = now_ts - _ATTENTION_INDEX_MAX_AGE_S
 
     for sid, record in index.items():
@@ -564,7 +565,7 @@ def _upsert_attention_index(
     *,
     codex_home: Path,
     session_id: str | None,
-    record: dict[str, object],
+    record: dict[str, Any],
 ) -> None:
     if not (isinstance(session_id, str) and session_id.strip()):
         return
@@ -643,7 +644,7 @@ def _max_message_chars() -> int:
         return 1800
 
 
-def _extract_notify_payload(unknown: list[str]) -> dict[str, object] | None:
+def _extract_notify_payload(unknown: list[str]) -> dict[str, Any] | None:
     for extra in unknown:
         if not isinstance(extra, str):
             continue
@@ -659,7 +660,7 @@ def _extract_notify_payload(unknown: list[str]) -> dict[str, object] | None:
     return None
 
 
-def _payload_blob(payload: dict[str, object] | None) -> str:
+def _payload_blob(payload: dict[str, Any] | None) -> str:
     if not isinstance(payload, dict):
         return ""
     try:
@@ -668,7 +669,7 @@ def _payload_blob(payload: dict[str, object] | None) -> str:
         return ""
 
 
-def _payload_event_type(payload: dict[str, object] | None) -> str | None:
+def _payload_event_type(payload: dict[str, Any] | None) -> str | None:
     if not isinstance(payload, dict):
         return None
     for key in (
@@ -706,7 +707,7 @@ def _payload_event_type(payload: dict[str, object] | None) -> str | None:
     return None
 
 
-def _is_completion_event(payload: dict[str, object] | None) -> bool:
+def _is_completion_event(payload: dict[str, Any] | None) -> bool:
     event_type = _payload_event_type(payload)
     if event_type in {
         "agent-turn-complete",
@@ -726,7 +727,7 @@ def _is_completion_event(payload: dict[str, object] | None) -> bool:
     return "agent-turn-complete" in blob or "turn.completed" in blob or "turn/completed" in blob
 
 
-def _is_input_event(payload: dict[str, object] | None) -> bool:
+def _is_input_event(payload: dict[str, Any] | None) -> bool:
     if payload is None:
         return False
 
@@ -766,7 +767,7 @@ def _is_input_event(payload: dict[str, object] | None) -> bool:
     return any(hint in blob for hint in hints)
 
 
-def _extract_call_id(payload: dict[str, object] | None) -> str | None:
+def _extract_call_id(payload: dict[str, Any] | None) -> str | None:
     if not isinstance(payload, dict):
         return None
     for key in ("call_id", "call-id", "callId"):
@@ -858,7 +859,7 @@ def _send_routed_final_status(
     recipient: str,
     session_id: str | None,
     scope: str,
-    payload: dict[str, object] | None,
+    payload: dict[str, Any] | None,
     response_text: str | None,
     cwd: str | None,
     max_message_chars: int,

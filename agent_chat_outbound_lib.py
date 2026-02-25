@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import agent_chat_dedupe
 
@@ -101,7 +101,7 @@ def _find_newest_session_file(*, codex_home: Path) -> Path | None:
         return None
 
 
-def _load_json(path: Path) -> dict[str, object] | None:
+def _load_json(path: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
@@ -111,7 +111,7 @@ def _load_json(path: Path) -> dict[str, object] | None:
         return None
 
 
-def _write_json(path: Path, data: dict[str, object]) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -232,8 +232,8 @@ def _attention_index_path(*, codex_home: Path) -> Path:
     )
 
 
-def _prune_attention_index(index: dict[str, object], *, now_ts: int) -> dict[str, object]:
-    pruned: dict[str, object] = {}
+def _prune_attention_index(index: dict[str, Any], *, now_ts: int) -> dict[str, Any]:
+    pruned: dict[str, Any] = {}
     cutoff = now_ts - _ATTENTION_INDEX_MAX_AGE_S
     for sid, record in index.items():
         if not isinstance(record, dict):
@@ -263,7 +263,7 @@ def _upsert_attention_index(
     *,
     codex_home: Path,
     session_id: str | None,
-    record: dict[str, object],
+    record: dict[str, Any],
 ) -> None:
     if not (isinstance(session_id, str) and session_id.strip()):
         return
@@ -328,7 +328,7 @@ def _parse_mirror_roles(raw: str | None) -> set[str]:
     return set(_VALID_MESSAGE_ROLES)
 
 
-def _extract_message_text_from_payload(payload: dict[str, object]) -> tuple[str, str] | None:
+def _extract_message_text_from_payload(payload: dict[str, Any]) -> tuple[str, str] | None:
     if payload.get("type") != "message":
         return None
 
@@ -356,7 +356,7 @@ def _extract_message_text_from_payload(payload: dict[str, object]) -> tuple[str,
     return role, "".join(chunks)
 
 
-def _parse_request_user_input_arguments(raw_args: object) -> dict[str, object] | None:
+def _parse_request_user_input_arguments(raw_args: object) -> dict[str, Any] | None:
     if isinstance(raw_args, dict):
         return raw_args
     if isinstance(raw_args, str) and raw_args.strip():
@@ -368,12 +368,12 @@ def _parse_request_user_input_arguments(raw_args: object) -> dict[str, object] |
     return None
 
 
-def _normalize_request_user_input_questions(args: dict[str, object]) -> list[dict[str, object]]:
+def _normalize_request_user_input_questions(args: dict[str, Any]) -> list[dict[str, Any]]:
     raw_questions = args.get("questions")
     if not isinstance(raw_questions, list):
         return []
 
-    normalized: list[dict[str, object]] = []
+    normalized: list[dict[str, Any]] = []
     for q in raw_questions:
         if not isinstance(q, dict):
             continue
@@ -383,7 +383,7 @@ def _normalize_request_user_input_questions(args: dict[str, object]) -> list[dic
         if not question_text:
             continue
 
-        rec: dict[str, object] = {"question": question_text}
+        rec: dict[str, Any] = {"question": question_text}
 
         qid = q.get("id")
         if isinstance(qid, str) and qid.strip():
@@ -394,7 +394,7 @@ def _normalize_request_user_input_questions(args: dict[str, object]) -> list[dic
             rec["header"] = header.strip()
 
         raw_options = q.get("options")
-        options_out: list[dict[str, object]] = []
+        options_out: list[dict[str, Any]] = []
         if isinstance(raw_options, list):
             for opt in raw_options:
                 if not isinstance(opt, dict):
@@ -404,7 +404,7 @@ def _normalize_request_user_input_questions(args: dict[str, object]) -> list[dic
                 if not label_text:
                     continue
 
-                option_rec: dict[str, object] = {"label": label_text}
+                option_rec: dict[str, Any] = {"label": label_text}
                 desc = opt.get("description")
                 if isinstance(desc, str) and desc.strip():
                     option_rec["description"] = desc.strip()
@@ -418,7 +418,7 @@ def _normalize_request_user_input_questions(args: dict[str, object]) -> list[dic
     return normalized
 
 
-def _render_request_user_input_questions(questions: list[dict[str, object]]) -> str | None:
+def _render_request_user_input_questions(questions: list[dict[str, Any]]) -> str | None:
     lines: list[str] = []
     for idx, q in enumerate(questions, start=1):
         if not isinstance(q, dict):
@@ -462,7 +462,7 @@ def _render_request_user_input_questions(questions: list[dict[str, object]]) -> 
     return rendered or None
 
 
-def _extract_request_user_input_payload(payload: dict[str, object]) -> dict[str, object] | None:
+def _extract_request_user_input_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     if payload.get("type") != "function_call" or payload.get("name") != "request_user_input":
         return None
 
@@ -476,7 +476,7 @@ def _extract_request_user_input_payload(payload: dict[str, object]) -> dict[str,
     return {"questions": questions}
 
 
-def _extract_request_user_input_text(payload: dict[str, object]) -> str | None:
+def _extract_request_user_input_text(payload: dict[str, Any]) -> str | None:
     parsed = _extract_request_user_input_payload(payload)
     if not isinstance(parsed, dict):
         return None
@@ -515,7 +515,7 @@ def _format_tool_call_args(args: object | None) -> str | None:
         return None
 
 
-def _extract_tool_call(payload: dict[str, object]) -> tuple[str, str] | None:
+def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, str] | None:
     if payload.get("type") != "function_call":
         return None
 
@@ -539,7 +539,7 @@ def _extract_tool_call(payload: dict[str, object]) -> tuple[str, str] | None:
 
 
 def _extract_tool_result(
-    payload: dict[str, object],
+    payload: dict[str, Any],
     *,
     call_id_to_name: dict[str, str],
 ) -> tuple[str, str] | None:

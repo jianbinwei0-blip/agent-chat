@@ -427,6 +427,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         sid, err = cp._resolve_session_ref(registry=registry, session_ref="019c33b4", min_prefix=6)  # type: ignore[attr-defined]
         self.assertIsNone(sid)
         self.assertIsInstance(err, str)
+        if not isinstance(err, str):
+            self.fail("expected ambiguous prefix error text")
         self.assertIn("Ambiguous", err)
 
     def test_choose_implicit_session_unique_waiting(self) -> None:
@@ -450,6 +452,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         sid, err = cp._choose_implicit_session(registry=registry)  # type: ignore[attr-defined]
         self.assertIsNone(sid)
         self.assertIsInstance(err, str)
+        if not isinstance(err, str):
+            self.fail("expected ambiguous implicit session error text")
         self.assertIn("Ambiguous", err)
 
     def test_resolve_session_from_reply_context_conflicting_guids_prefers_first_resolved_guid(self) -> None:
@@ -561,6 +565,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertIsNone(resolved)
         self.assertIsInstance(err, str)
+        if not isinstance(err, str):
+            self.fail("expected strict tmux routing error text")
         self.assertIn("Strict tmux routing", err)
 
     def test_resolve_session_from_reply_context_uses_hash_only_when_session_waiting(self) -> None:
@@ -637,6 +643,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertIsNone(resolved)
         self.assertIsInstance(err, str)
+        if not isinstance(err, str):
+            self.fail("expected strict tmux routing error text")
         self.assertIn("Strict tmux routing", err)
 
     def test_reply_reference_guids_for_row_collects_and_orders_candidates(self) -> None:
@@ -1469,6 +1477,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertIsInstance(rec, dict)
         self.assertIsNotNone(rec)
+        if not isinstance(rec, dict):
+            self.fail("expected recovered session record")
         self.assertEqual(rec.get("agent"), "codex")
         self.assertEqual(rec.get("session_path"), str(session_path))
 
@@ -1870,7 +1880,11 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 101)
         self.assertEqual(captured.get("label"), "bugfix")
         self.assertEqual(captured.get("cwd"), "/tmp/project")
-        self.assertIn("sid-123", registry.get("sessions", {}))
+        sessions = registry.get("sessions")
+        self.assertIsInstance(sessions, dict)
+        if not isinstance(sessions, dict):
+            self.fail("expected sessions map in registry")
+        self.assertIn("sid-123", sessions)
         self.assertTrue(any(msg.get("kind") == "accepted" for msg in sent))
 
     def test_rewrite_numeric_choice_prompt_single_question(self) -> None:
@@ -2676,19 +2690,29 @@ class TestAgentChatControlPlane(unittest.TestCase):
             parsed = json.loads(settings_path.read_text(encoding="utf-8"))
             hooks = parsed.get("hooks")
             self.assertIsInstance(hooks, dict)
+            if not isinstance(hooks, dict):
+                self.fail("expected hooks map in Claude settings")
             for event_name in ("Notification", "Stop"):
-                event_hooks = hooks.get(event_name) if isinstance(hooks, dict) else None
+                event_hooks = hooks.get(event_name)
                 self.assertIsInstance(event_hooks, list)
+                if not isinstance(event_hooks, list):
+                    self.fail(f"expected hook list for {event_name}")
                 self.assertGreaterEqual(len(event_hooks), 1)
-                first = event_hooks[0] if isinstance(event_hooks, list) and event_hooks else None
+                first = event_hooks[0] if event_hooks else None
                 self.assertIsInstance(first, dict)
-                hook_entries = first.get("hooks") if isinstance(first, dict) else None
+                if not isinstance(first, dict):
+                    self.fail(f"expected first hook record for {event_name}")
+                hook_entries = first.get("hooks")
                 self.assertIsInstance(hook_entries, list)
-                command_values = [
-                    item.get("command")
-                    for item in hook_entries
-                    if isinstance(item, dict) and isinstance(item.get("command"), str)
-                ]
+                if not isinstance(hook_entries, list):
+                    self.fail(f"expected nested hooks list for {event_name}")
+                command_values: list[str] = []
+                for item in hook_entries:
+                    if not isinstance(item, dict):
+                        continue
+                    command = item.get("command")
+                    if isinstance(command, str):
+                        command_values.append(command)
                 self.assertTrue(any("notify" in cmd for cmd in command_values))
                 self.assertTrue(any("CODEX_IMESSAGE_AGENT=claude" in cmd for cmd in command_values))
 
@@ -2891,6 +2915,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 77)
         ref_texts_fn = process_mock.call_args.kwargs.get("reference_texts_fn")
         self.assertTrue(callable(ref_texts_fn))
+        if not callable(ref_texts_fn):
+            self.fail("expected reference_texts_fn callback")
         probe_conn = sqlite3.connect(":memory:")
         try:
             resolved = ref_texts_fn(conn=probe_conn, rowid=77, fallback_guid=None)
@@ -3138,6 +3164,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 home / "Applications" / "Codex iMessage Python.app",
             )
             self.assertIsNone(detail)
+            if target_app is None:
+                self.fail("expected target app path")
             self.assertTrue(target_app.is_symlink())
             self.assertEqual(target_app.resolve(), source_app.resolve())
 

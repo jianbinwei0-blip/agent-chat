@@ -32,6 +32,7 @@ import traceback
 import urllib.parse as urllib_parse
 import urllib.request as urllib_request
 from pathlib import Path
+from typing import Any, Callable
 
 import agent_chat_dedupe
 import agent_chat_notify as notify
@@ -378,7 +379,7 @@ def _notify_hook_value_present(value: object) -> bool:
     return False
 
 
-def _claude_hook_event_has_notify(*, hooks: dict[str, object], event_name: str) -> bool:
+def _claude_hook_event_has_notify(*, hooks: dict[str, Any], event_name: str) -> bool:
     event_rules = hooks.get(event_name)
     if not isinstance(event_rules, list):
         return False
@@ -400,9 +401,9 @@ def _claude_hook_event_has_notify(*, hooks: dict[str, object], event_name: str) 
     return False
 
 
-def _notify_hook_status_claude(*, codex_home: Path) -> dict[str, object]:
+def _notify_hook_status_claude(*, codex_home: Path) -> dict[str, Any]:
     path = _claude_settings_path(codex_home=codex_home)
-    status: dict[str, object] = {
+    status: dict[str, Any] = {
         "path": str(path),
         "exists": path.exists(),
         "top_level_present": False,
@@ -437,12 +438,12 @@ def _notify_hook_status_claude(*, codex_home: Path) -> dict[str, object]:
     return status
 
 
-def _notify_hook_status(*, codex_home: Path) -> dict[str, object]:
+def _notify_hook_status(*, codex_home: Path) -> dict[str, Any]:
     if _current_agent() == "claude":
         return _notify_hook_status_claude(codex_home=codex_home)
 
     path = _codex_config_path(codex_home=codex_home)
-    status: dict[str, object] = {
+    status: dict[str, Any] = {
         "path": str(path),
         "exists": path.exists(),
         "top_level_present": False,
@@ -589,7 +590,7 @@ def _upsert_notify_hook_text(*, raw: str, notify_line: str) -> str:
 
 
 def _upsert_claude_notify_hook_text(*, raw: str, hook_command: str) -> str:
-    parsed: dict[str, object]
+    parsed: dict[str, Any]
     if raw.strip():
         loaded = json.loads(raw)
         if not isinstance(loaded, dict):
@@ -607,7 +608,7 @@ def _upsert_claude_notify_hook_text(*, raw: str, hook_command: str) -> str:
         if not isinstance(event_rules, list):
             event_rules = []
 
-        target_rule: dict[str, object] | None = None
+        target_rule: dict[str, Any] | None = None
         for rule in event_rules:
             if not isinstance(rule, dict):
                 continue
@@ -774,7 +775,7 @@ def _acquire_single_instance_lock(*, codex_home: Path) -> object | None:
         return object()
 
 
-def _read_json(path: Path) -> dict[str, object] | None:
+def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
@@ -784,7 +785,7 @@ def _read_json(path: Path) -> dict[str, object] | None:
         return None
 
 
-def _write_json(path: Path, data: dict[str, object]) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -916,7 +917,7 @@ def _load_telegram_inbound_cursor(*, codex_home: Path) -> int:
 
 
 def _save_telegram_inbound_cursor(*, codex_home: Path, last_update_id: int) -> None:
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "last_update_id": int(last_update_id),
         "ts": int(time.time()),
     }
@@ -1029,11 +1030,11 @@ def _last_attention_state_path(*, codex_home: Path) -> Path:
     )
 
 
-def _load_attention_index(*, codex_home: Path) -> dict[str, object] | None:
+def _load_attention_index(*, codex_home: Path) -> dict[str, Any] | None:
     return _read_json(_attention_index_path(codex_home=codex_home))
 
 
-def _load_last_attention_state(*, codex_home: Path) -> dict[str, object] | None:
+def _load_last_attention_state(*, codex_home: Path) -> dict[str, Any] | None:
     return _read_json(_last_attention_state_path(codex_home=codex_home))
 
 
@@ -1045,11 +1046,17 @@ def _coerce_nonempty_str(value: object) -> str | None:
     return None
 
 
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def _select_attention_context(
     *,
     session_id: str,
-    attention_index: dict[str, object] | None,
-    last_attention_state: dict[str, object] | None,
+    attention_index: dict[str, Any] | None,
+    last_attention_state: dict[str, Any] | None,
 ) -> dict[str, str]:
     keys = (
         "agent",
@@ -1086,9 +1093,9 @@ def _select_attention_context(
 def _apply_attention_context_to_session(
     *,
     session_id: str,
-    session_rec: dict[str, object] | None,
-    attention_index: dict[str, object] | None,
-    last_attention_state: dict[str, object] | None,
+    session_rec: dict[str, Any] | None,
+    attention_index: dict[str, Any] | None,
+    last_attention_state: dict[str, Any] | None,
 ) -> None:
     if not isinstance(session_rec, dict):
         return
@@ -1128,8 +1135,8 @@ def _is_pid_alive(pid: int | None) -> bool:
     return True
 
 
-def _queue_stats(queue_path: Path) -> dict[str, object]:
-    stats: dict[str, object] = {
+def _queue_stats(queue_path: Path) -> dict[str, Any]:
+    stats: dict[str, Any] = {
         "path": str(queue_path),
         "exists": queue_path.exists(),
         "size_bytes": 0,
@@ -1253,9 +1260,9 @@ def _drain_fallback_queue(
     codex_home: Path,
     dry_run: bool,
     max_items: int,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     queue_path = _queue_path(codex_home=codex_home)
-    stats: dict[str, object] = {
+    stats: dict[str, Any] = {
         "attempted": 0,
         "sent": 0,
         "retained": 0,
@@ -1688,7 +1695,7 @@ def _build_launchagent_plist(
     script_path: Path,
     codex_home: Path,
     recipient: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     out_log, err_log = _launchd_log_paths()
     notify_mode = os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "route").strip() or "route"
     agent = _current_agent()
@@ -2222,7 +2229,7 @@ def _run_setup_permissions(
         sys.stdout.write("Timed out waiting for chat.db access.\n")
     return 1
 
-def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, object]:
+def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]:
     now_ts = int(time.time())
     agent = _current_agent()
     transport_mode = _transport_mode()
@@ -2319,7 +2326,8 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, obje
         health.append("launchd reports inbound disabled (check chat.db permissions)")
     if imessage_enabled and not chat_db_readable:
         health.append("chat.db unreadable for inbound replies")
-    if isinstance(queue.get("lines"), int) and int(queue.get("lines")) > 0:
+    queue_lines = queue.get("lines")
+    if isinstance(queue_lines, int) and queue_lines > 0:
         health.append("fallback queue has pending messages")
     if not lock_alive:
         health.append("control-plane lock PID not alive")
@@ -2408,7 +2416,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     sys.stdout.write(f"Agent: {report.get('agent') or _current_agent()}\n")
     sys.stdout.write(f"Home: {report.get('codex_home')}\n")
     sys.stdout.write(f"Recipient: {report.get('recipient') or '(missing)'}\n")
-    transport = report.get("transport") if isinstance(report.get("transport"), dict) else {}
+    transport = _coerce_dict(report.get("transport"))
     sys.stdout.write(
         "Transport: "
         f"mode={transport.get('mode') or _transport_mode()} "
@@ -2422,7 +2430,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
             f"Telegram token: {'configured' if bool(transport.get('telegram_token_present')) else 'missing'}\n"
         )
 
-    launchd = report.get("launchd") if isinstance(report.get("launchd"), dict) else {}
+    launchd = _coerce_dict(report.get("launchd"))
     sys.stdout.write(
         "Launchd: "
         f"{'loaded' if launchd.get('loaded') else 'not loaded'}"
@@ -2440,7 +2448,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     if bool(launchd.get("inbound_warning")):
         sys.stdout.write(f"  warning: inbound-disabled seen in {launchd.get('err_log_path')}\n")
 
-    lock = report.get("lock") if isinstance(report.get("lock"), dict) else {}
+    lock = _coerce_dict(report.get("lock"))
     sys.stdout.write(
         "Lock: "
         f"pid={lock.get('pid') or '-'}"
@@ -2448,7 +2456,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
         f" path={lock.get('path')}\n"
     )
 
-    chat_db = report.get("chat_db") if isinstance(report.get("chat_db"), dict) else {}
+    chat_db = _coerce_dict(report.get("chat_db"))
     sys.stdout.write(
         "Inbound chat.db: "
         f"{'readable' if chat_db.get('readable') else 'unreadable'}"
@@ -2458,7 +2466,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     if isinstance(chat_err, str) and chat_err.strip():
         sys.stdout.write(f"  detail: {chat_err.strip()}\n")
 
-    queue = report.get("queue") if isinstance(report.get("queue"), dict) else {}
+    queue = _coerce_dict(report.get("queue"))
     sys.stdout.write(
         "Fallback queue: "
         f"lines={queue.get('lines', 0)}"
@@ -2466,7 +2474,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
         f" path={queue.get('path')}\n"
     )
 
-    notify_hook = report.get("notify_hook") if isinstance(report.get("notify_hook"), dict) else {}
+    notify_hook = _coerce_dict(report.get("notify_hook"))
     sys.stdout.write(
         "Notify hook: "
         f"{'configured' if notify_hook.get('top_level_present') else 'missing'}"
@@ -2478,8 +2486,8 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     if isinstance(notify_err, str) and notify_err.strip():
         sys.stdout.write(f"  detail: {notify_err.strip()}\n")
 
-    routing = report.get("routing") if isinstance(report.get("routing"), dict) else {}
-    active = routing.get("active_codex_panes") if isinstance(routing.get("active_codex_panes"), dict) else {}
+    routing = _coerce_dict(report.get("routing"))
+    active = _coerce_dict(routing.get("active_codex_panes"))
     sys.stdout.write(
         "Routing: "
         f"strict_tmux={bool(routing.get('strict_tmux'))} "
@@ -2497,7 +2505,7 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     return 0
 
 
-def _default_registry() -> dict[str, object]:
+def _default_registry() -> dict[str, Any]:
     return {
         "sessions": {},
         "aliases": {},
@@ -2506,7 +2514,7 @@ def _default_registry() -> dict[str, object]:
     }
 
 
-def _load_registry(*, codex_home: Path) -> dict[str, object]:
+def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     raw = _read_json(_registry_path(codex_home=codex_home))
     if not isinstance(raw, dict):
         return _default_registry()
@@ -2516,7 +2524,7 @@ def _load_registry(*, codex_home: Path) -> dict[str, object]:
     last_dispatch_error = raw.get("last_dispatch_error")
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
-    out: dict[str, object] = {
+    out: dict[str, Any] = {
         "sessions": sessions if isinstance(sessions, dict) else {},
         "aliases": aliases if isinstance(aliases, dict) else {},
         "last_dispatch_error": last_dispatch_error,
@@ -2525,7 +2533,7 @@ def _load_registry(*, codex_home: Path) -> dict[str, object]:
     return out
 
 
-def _save_registry(*, codex_home: Path, registry: dict[str, object]) -> None:
+def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict):
         sessions = {}
@@ -2579,9 +2587,9 @@ def _session_ref(session_id: str, ref_len: int = _DEFAULT_REF_LEN) -> str:
 
 def _upsert_session(
     *,
-    registry: dict[str, object],
+    registry: dict[str, Any],
     session_id: str,
-    fields: dict[str, object],
+    fields: dict[str, Any],
 ) -> None:
     sid = session_id.strip()
     if not sid:
@@ -2612,7 +2620,7 @@ def _upsert_session(
         aliases[alias_norm] = sid
 
 
-def _set_alias(*, registry: dict[str, object], session_id: str, label: str) -> None:
+def _set_alias(*, registry: dict[str, Any], session_id: str, label: str) -> None:
     sid = session_id.strip()
     alias = label.strip().lower()
     if not sid or not alias:
@@ -2673,7 +2681,7 @@ def _parse_inbound_command(text: str) -> dict[str, str]:
 def _rewrite_numeric_choice_prompt(
     *,
     prompt: str,
-    session_rec: dict[str, object] | None,
+    session_rec: dict[str, Any] | None,
 ) -> tuple[str | None, str | None]:
     raw = prompt.strip()
     if not raw:
@@ -2764,7 +2772,7 @@ def _rewrite_numeric_choice_prompt(
 
 def _resolve_session_ref(
     *,
-    registry: dict[str, object],
+    registry: dict[str, Any],
     session_ref: str,
     min_prefix: int = _DEFAULT_MIN_PREFIX,
 ) -> tuple[str | None, str | None]:
@@ -2816,7 +2824,7 @@ def _resolve_session_ref(
     return None, f"No session found for ref '{ref}'. Send list to view active refs."
 
 
-def _choose_implicit_session(*, registry: dict[str, object]) -> tuple[str | None, str | None]:
+def _choose_implicit_session(*, registry: dict[str, Any]) -> tuple[str | None, str | None]:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict) or not sessions:
         return None, "No tracked sessions. Send list, @<ref> ..., or new <label>: ..."
@@ -2839,7 +2847,7 @@ def _choose_implicit_session(*, registry: dict[str, object]) -> tuple[str | None
     return None, "No session is currently awaiting input. Use @<ref> ... or new <label>: ..."
 
 
-def _session_is_waiting_for_input(*, session_rec: dict[str, object] | None) -> bool:
+def _session_is_waiting_for_input(*, session_rec: dict[str, Any] | None) -> bool:
     if not isinstance(session_rec, dict):
         return False
     if session_rec.get("awaiting_input") is True:
@@ -2856,7 +2864,7 @@ def _message_hash(text: str) -> str:
     return hashlib.sha256(_normalize_message_text(text).encode("utf-8")).hexdigest()[:24]
 
 
-def _load_message_index(*, codex_home: Path) -> dict[str, object]:
+def _load_message_index(*, codex_home: Path) -> dict[str, Any]:
     raw = _read_json(_message_index_path(codex_home=codex_home))
     if not isinstance(raw, dict):
         return {"messages": [], "ts": int(time.time())}
@@ -2866,7 +2874,7 @@ def _load_message_index(*, codex_home: Path) -> dict[str, object]:
     return {"messages": messages, "ts": int(time.time())}
 
 
-def _save_message_index(*, codex_home: Path, index: dict[str, object]) -> None:
+def _save_message_index(*, codex_home: Path, index: dict[str, Any]) -> None:
     messages = index.get("messages")
     if not isinstance(messages, list):
         messages = []
@@ -2880,7 +2888,7 @@ def _save_message_index(*, codex_home: Path, index: dict[str, object]) -> None:
 
 def _record_outbound_message(
     *,
-    index: dict[str, object],
+    index: dict[str, Any],
     session_id: str | None,
     kind: str,
     text: str,
@@ -2904,7 +2912,7 @@ def _record_outbound_message(
 
 def _lookup_agent_by_session_id(
     *,
-    index: dict[str, object],
+    index: dict[str, Any],
     session_id: str,
 ) -> str | None:
     sid = session_id.strip()
@@ -2927,7 +2935,7 @@ def _lookup_agent_by_session_id(
 
 def _lookup_session_by_message_hash(
     *,
-    index: dict[str, object],
+    index: dict[str, Any],
     replied_text: str,
 ) -> str | None:
     h = _message_hash(replied_text)
@@ -2959,7 +2967,7 @@ def _session_refs_from_text(text: str) -> list[str]:
 
 def _lookup_session_by_text_ref(
     *,
-    registry: dict[str, object],
+    registry: dict[str, Any],
     replied_text: str,
 ) -> str | None:
     refs = _session_refs_from_text(replied_text)
@@ -3020,7 +3028,7 @@ def _normalize_handle_ids(handle_ids: list[str] | None) -> list[str]:
     return sorted(normalized)
 
 
-def _load_inbound_cursor_state(*, codex_home: Path) -> dict[str, object] | None:
+def _load_inbound_cursor_state(*, codex_home: Path) -> dict[str, Any] | None:
     raw = _read_json(_inbound_cursor_path(codex_home=codex_home))
     if not isinstance(raw, dict):
         return None
@@ -3042,7 +3050,7 @@ def _save_inbound_cursor(
     recipient: str | None = None,
     handle_ids: list[str] | None = None,
 ) -> None:
-    payload: dict[str, object] = {"last_rowid": int(rowid), "ts": int(time.time())}
+    payload: dict[str, Any] = {"last_rowid": int(rowid), "ts": int(time.time())}
     recipient_text = recipient.strip() if isinstance(recipient, str) else ""
     if recipient_text:
         payload["recipient"] = recipient_text
@@ -3061,7 +3069,7 @@ def _send_structured(
     text: str,
     max_message_chars: int,
     dry_run: bool,
-    message_index: dict[str, object],
+    message_index: dict[str, Any],
     agent: str | None = None,
 ) -> None:
     normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
@@ -3113,8 +3121,8 @@ def _process_session_file(
     recipient: str,
     max_message_chars: int,
     dry_run: bool,
-    registry: dict[str, object],
-    message_index: dict[str, object],
+    registry: dict[str, Any],
+    message_index: dict[str, Any],
     session_id_cache: dict[str, str | None],
     call_id_to_name: dict[str, str],
     seen_needs_input_call_ids: dict[str, int],
@@ -3135,7 +3143,7 @@ def _process_session_file(
     session_cwd = outbound._read_session_cwd(session_path=session_path)
 
     if isinstance(session_id, str) and session_id.strip():
-        fields: dict[str, object] = {"session_path": str(session_path), "agent": _current_agent()}
+        fields: dict[str, Any] = {"session_path": str(session_path), "agent": _current_agent()}
         if isinstance(session_cwd, str) and session_cwd.strip():
             fields["cwd"] = session_cwd.strip()
         _upsert_session(registry=registry, session_id=session_id.strip(), fields=fields)
@@ -3218,7 +3226,7 @@ def _process_session_file(
                         message_index=message_index,
                     )
 
-                    session_fields: dict[str, object] = {
+                    session_fields: dict[str, Any] = {
                         "agent": _current_agent(),
                         "cwd": session_cwd,
                         "session_path": str(session_path),
@@ -3298,12 +3306,12 @@ def _process_session_file(
         return offset
 
 
-def _render_session_list(*, registry: dict[str, object]) -> str:
+def _render_session_list(*, registry: dict[str, Any]) -> str:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict) or not sessions:
         return "No tracked sessions yet."
 
-    rows: list[tuple[int, str, dict[str, object]]] = []
+    rows: list[tuple[int, str, dict[str, Any]]] = []
     for sid, rec in sessions.items():
         if not isinstance(sid, str) or not isinstance(rec, dict):
             continue
@@ -3328,7 +3336,7 @@ def _render_session_list(*, registry: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _render_session_status(*, session_id: str, registry: dict[str, object]) -> str:
+def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict):
         return f"Session {session_id} not found."
@@ -3359,7 +3367,7 @@ def _render_session_status(*, session_id: str, registry: dict[str, object]) -> s
 
 def _first_nonempty_from_sources(
     *,
-    sources: tuple[dict[str, object] | None, ...],
+    sources: tuple[dict[str, Any] | None, ...],
     keys: tuple[str, ...],
 ) -> str | None:
     for source in sources:
@@ -3374,7 +3382,7 @@ def _first_nonempty_from_sources(
     return None
 
 
-def _extract_session_id_from_notify_payload(payload: dict[str, object]) -> tuple[str | None, dict[str, object] | None]:
+def _extract_session_id_from_notify_payload(payload: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     params_raw = payload.get("params")
     params = params_raw if isinstance(params_raw, dict) else None
     sources = (payload, params)
@@ -3417,10 +3425,10 @@ def _extract_session_id_from_notify_payload(payload: dict[str, object]) -> tuple
 
 def _extract_notify_context_fields(
     *,
-    payload: dict[str, object],
-    params: dict[str, object] | None,
-) -> dict[str, object]:
-    fields: dict[str, object] = {}
+    payload: dict[str, Any],
+    params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
     sources = (payload, params)
 
     payload_agent = _first_nonempty_from_sources(
@@ -3503,12 +3511,12 @@ def _tmux_ack_timeout_s() -> float:
 
 def _set_last_dispatch_error(
     *,
-    registry: dict[str, object],
+    registry: dict[str, Any],
     session_id: str | None,
     mode: str,
     reason: str | None = None,
 ) -> None:
-    payload: dict[str, object] = {"ts": int(time.time()), "mode": mode}
+    payload: dict[str, Any] = {"ts": int(time.time()), "mode": mode}
     if isinstance(session_id, str) and session_id.strip():
         payload["session_id"] = session_id.strip()
     if isinstance(reason, str) and reason.strip():
@@ -3516,7 +3524,7 @@ def _set_last_dispatch_error(
     registry["last_dispatch_error"] = payload
 
 
-def _clear_last_dispatch_error(*, registry: dict[str, object]) -> None:
+def _clear_last_dispatch_error(*, registry: dict[str, Any]) -> None:
     if registry.get("last_dispatch_error") is None:
         return
     registry["last_dispatch_error"] = None
@@ -3545,7 +3553,7 @@ def _dispatch_failure_text(*, session_id: str, mode: str, reason: str | None) ->
     )
 
 
-def _render_notify_input_text(*, session_path: str | None) -> tuple[str, dict[str, object] | None]:
+def _render_notify_input_text(*, session_path: str | None) -> tuple[str, dict[str, Any] | None]:
     if not (isinstance(session_path, str) and session_path.strip()):
         return _DEFAULT_INPUT_NEEDED_TEXT, None
     parsed = notify._read_last_request_user_input_from_session(Path(session_path.strip()))
@@ -3660,7 +3668,7 @@ def _tmux_cmd(*parts: str, tmux_socket: str | None = None) -> list[str]:
     return cmd
 
 
-def _choose_registry_tmux_socket(*, registry: dict[str, object]) -> str | None:
+def _choose_registry_tmux_socket(*, registry: dict[str, Any]) -> str | None:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict):
         return None
@@ -3692,7 +3700,7 @@ def _choose_registry_tmux_socket(*, registry: dict[str, object]) -> str | None:
     return best_socket
 
 
-def _tmux_active_codex_panes(*, tmux_socket: str | None) -> dict[str, object]:
+def _tmux_active_codex_panes(*, tmux_socket: str | None) -> dict[str, Any]:
     socket_value = _normalize_tmux_socket(tmux_socket=tmux_socket)
     try:
         proc = subprocess.run(
@@ -4014,7 +4022,7 @@ def _tmux_codex_panes_for_cwd(*, cwd: str, tmux_socket: str | None = None, agent
 def _tmux_pane_matches_session(
     *,
     pane: str,
-    session_rec: dict[str, object],
+    session_rec: dict[str, Any],
     session_id: str | None = None,
     tmux_socket: str | None = None,
     agent: str | None = None,
@@ -4137,7 +4145,7 @@ def _tmux_filter_panes_by_session_id(
 
 def _tmux_discover_codex_pane_for_session(
     *,
-    session_rec: dict[str, object],
+    session_rec: dict[str, Any],
     session_id: str | None = None,
     tmux_socket: str | None = None,
     agent: str | None = None,
@@ -4221,7 +4229,7 @@ def _dispatch_prompt_to_session(
     *,
     target_sid: str,
     prompt: str,
-    session_rec: dict[str, object] | None,
+    session_rec: dict[str, Any] | None,
     codex_home: Path,
     resume_timeout_s: float | None = None,
     agent: str | None = None,
@@ -4314,7 +4322,7 @@ def _dispatch_prompt_to_session(
                         return "tmux_stale", None
                 session_path_obj = Path(session_path_norm)
                 before_user_text = reply._read_last_user_text_from_session(session_path_obj)
-                send_kwargs: dict[str, object] = {"pane": pane_norm, "prompt": prompt}
+                send_kwargs: dict[str, Any] = {"pane": pane_norm, "prompt": prompt}
                 if tmux_socket_norm:
                     send_kwargs["tmux_socket"] = tmux_socket_norm
                 if not reply._tmux_send_prompt(**send_kwargs):
@@ -4387,8 +4395,8 @@ def _resolve_session_from_reply_context(
     reply_to_guid: str | None,
     reply_reference_guids: list[str] | None = None,
     reply_reference_texts: list[str] | None = None,
-    registry: dict[str, object],
-    message_index: dict[str, object],
+    registry: dict[str, Any],
+    message_index: dict[str, Any],
     require_explicit_ref: bool = False,
 ) -> tuple[str | None, str | None]:
     direct = reply._extract_session_id(reply_text)
@@ -4500,8 +4508,8 @@ def _recover_session_record_from_disk(
     *,
     codex_home: Path,
     session_id: str,
-    registry: dict[str, object] | None = None,
-) -> dict[str, object] | None:
+    registry: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     def _candidate_agent_homes(*, current_home: Path) -> list[tuple[str, Path]]:
         out: list[tuple[str, Path]] = []
         seen: set[tuple[str, str]] = set()
@@ -4542,7 +4550,7 @@ def _recover_session_record_from_disk(
     if newest is None:
         return None
 
-    fields: dict[str, object] = {
+    fields: dict[str, Any] = {
         "session_path": str(newest),
         "agent": _normalize_agent(agent=newest_agent if newest_agent is not None else _current_agent()),
     }
@@ -4559,7 +4567,7 @@ def _recover_session_record_from_disk(
     return fields
 
 
-def _session_agent_from_record(*, session_rec: dict[str, object] | None) -> str | None:
+def _session_agent_from_record(*, session_rec: dict[str, Any] | None) -> str | None:
     if not isinstance(session_rec, dict):
         return None
     raw = session_rec.get("agent")
@@ -4580,8 +4588,8 @@ def _lookup_agent_by_session_id_across_homes(
     *,
     session_id: str,
     codex_home: Path,
-    current_registry: dict[str, object] | None,
-    current_message_index: dict[str, object],
+    current_registry: dict[str, Any] | None,
+    current_message_index: dict[str, Any],
 ) -> str | None:
     sid = session_id.strip()
     if not sid:
@@ -4628,7 +4636,7 @@ def _lookup_agent_by_session_id_across_homes(
     # Fall back to message indexes (prefer other homes first).
     for _, home in ordered_homes:
         if str(home) == current_home:
-            index_data: dict[str, object] | None = current_message_index
+            index_data: dict[str, Any] | None = current_message_index
         else:
             loaded = _read_json(_message_index_path_for_home(home=home))
             index_data = loaded if isinstance(loaded, dict) else None
@@ -4664,11 +4672,11 @@ def _resolve_session_agent(
     *,
     conn: sqlite3.Connection,
     codex_home: Path,
-    registry: dict[str, object],
+    registry: dict[str, Any],
     session_id: str | None,
-    session_rec: dict[str, object] | None,
+    session_rec: dict[str, Any] | None,
     reply_reference_guids: list[str] | None,
-    message_index: dict[str, object],
+    message_index: dict[str, Any],
 ) -> str:
     from_record = _session_agent_from_record(session_rec=session_rec)
     if isinstance(from_record, str):
@@ -4735,14 +4743,14 @@ def _create_new_session_in_tmux(
     before = {str(path) for path in _find_all_session_files(codex_home=codex_home)}
 
     tmux_socket_norm = _normalize_tmux_socket(tmux_socket=tmux_socket)
-    ensure_kwargs: dict[str, object] = {"cwd": cwd}
+    ensure_kwargs: dict[str, Any] = {"cwd": cwd}
     if tmux_socket_norm:
         ensure_kwargs["tmux_socket"] = tmux_socket_norm
     tmux_session, tmux_err = _tmux_ensure_active_session(**ensure_kwargs)
     if not tmux_session:
         return None, None, None, tmux_err or "Could not resolve tmux session."
 
-    window_kwargs: dict[str, object] = {
+    window_kwargs: dict[str, Any] = {
         "session_name": tmux_session,
         "cwd": cwd,
         "label": label,
@@ -4755,12 +4763,12 @@ def _create_new_session_in_tmux(
 
     # Best-effort warmup only. Do not fail solely on command-name mismatch because
     # packaged/wrapped Codex binaries may appear as different pane commands.
-    wait_kwargs: dict[str, object] = {"pane": pane, "expected": _agent_command_keyword(agent=agent), "timeout_s": 8.0}
+    wait_kwargs: dict[str, Any] = {"pane": pane, "expected": _agent_command_keyword(agent=agent), "timeout_s": 8.0}
     if tmux_socket_norm:
         wait_kwargs["tmux_socket"] = tmux_socket_norm
     _tmux_wait_for_pane_command(**wait_kwargs)
 
-    send_kwargs: dict[str, object] = {"pane": pane, "prompt": text}
+    send_kwargs: dict[str, Any] = {"pane": pane, "prompt": text}
     if tmux_socket_norm:
         send_kwargs["tmux_socket"] = tmux_socket_norm
     if not reply._tmux_send_prompt(**send_kwargs):
@@ -4932,7 +4940,7 @@ def _handle_notify_payload(
             )
             _save_message_index(codex_home=codex_home, index=message_index)
 
-            update_fields: dict[str, object] = {
+            update_fields: dict[str, Any] = {
                 "awaiting_input": True,
                 "pending_completion": True,
                 "last_attention_ts": int(time.time()),
@@ -5018,11 +5026,11 @@ def _process_inbound_replies(
     dry_run: bool,
     resume_timeout_s: float | None = None,
     trace: bool = False,
-    fetch_replies_fn: object | None = None,
-    reference_guids_fn: object | None = None,
-    reference_texts_fn: object | None = None,
+    fetch_replies_fn: Callable[..., list[tuple[int, str, str | None]]] | None = None,
+    reference_guids_fn: Callable[..., list[str]] | None = None,
+    reference_texts_fn: Callable[..., list[str] | None] | None = None,
 ) -> int:
-    if callable(fetch_replies_fn):
+    if fetch_replies_fn is not None:
         replies = fetch_replies_fn(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
     else:
         replies = reply._fetch_new_replies(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
@@ -5047,7 +5055,7 @@ def _process_inbound_replies(
     for rowid, text, reply_to_guid in replies:
         last_rowid = rowid
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
-        if callable(reference_guids_fn):
+        if reference_guids_fn is not None:
             reference_guids = reference_guids_fn(conn=conn, rowid=rowid, fallback_guid=reply_to_guid)
         else:
             reference_guids = _reply_reference_guids_for_row(
@@ -5055,7 +5063,7 @@ def _process_inbound_replies(
                 rowid=rowid,
                 fallback_guid=reply_to_guid,
             )
-        if callable(reference_texts_fn):
+        if reference_texts_fn is not None:
             reference_texts = reference_texts_fn(conn=conn, rowid=rowid, fallback_guid=reply_to_guid)
         else:
             reference_texts = None
@@ -5248,7 +5256,7 @@ def _process_inbound_replies(
                         if isinstance(extracted_cwd, str) and extracted_cwd.strip():
                             session_cwd = extracted_cwd.strip()
 
-                    fields: dict[str, object] = {
+                    fields: dict[str, Any] = {
                         "agent": _current_agent(),
                         "awaiting_input": False,
                         "pending_completion": True,
@@ -5973,7 +5981,7 @@ def main(argv: list[str]) -> int:
         launchd_runtime_python, launchd_permission_app = _launchd_runtime_targets_from_plist(
             label=launchd_label
         )
-        setup_kwargs: dict[str, object] = {}
+        setup_kwargs: dict[str, Any] = {}
         if isinstance(launchd_runtime_python, str) and launchd_runtime_python.strip():
             setup_kwargs["probe_python_bin"] = launchd_runtime_python.strip()
         if isinstance(launchd_permission_app, str) and launchd_permission_app.strip():
@@ -6131,9 +6139,12 @@ def main(argv: list[str]) -> int:
         )
 
         if _ensure_inbound_ready():
+            conn_ready = conn
+            if conn_ready is None:
+                return
             inbound_rowid = _process_inbound_replies(
                 codex_home=codex_home,
-                conn=conn,
+                conn=conn_ready,
                 recipient=recipient,
                 handle_ids=handle_ids,
                 after_rowid=inbound_rowid,

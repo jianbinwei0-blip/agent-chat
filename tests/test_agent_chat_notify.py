@@ -56,8 +56,12 @@ class TestAgentChatNotify(unittest.TestCase):
 
             parsed = notify._read_last_request_user_input_from_session(session_path)  # type: ignore[attr-defined]
             self.assertIsInstance(parsed, dict)
+            if not isinstance(parsed, dict):
+                self.fail("expected parsed payload to be a dict")
             questions = parsed.get("questions")
             self.assertIsInstance(questions, list)
+            if not isinstance(questions, list):
+                self.fail("expected questions to be a list")
             self.assertEqual(questions[0]["id"], "scope_target")
 
     def test_read_last_request_user_input_from_session_falls_back_to_latest_answered_questions(self) -> None:
@@ -117,8 +121,12 @@ class TestAgentChatNotify(unittest.TestCase):
 
             parsed = notify._read_last_request_user_input_from_session(session_path)  # type: ignore[attr-defined]
             self.assertIsInstance(parsed, dict)
+            if not isinstance(parsed, dict):
+                self.fail("expected parsed payload to be a dict")
             questions = parsed.get("questions")
             self.assertIsInstance(questions, list)
+            if not isinstance(questions, list):
+                self.fail("expected questions to be a list")
             self.assertEqual(questions[0]["id"], "scope_target")
 
     def test_read_last_request_user_input_from_session_returns_latest_pending(self) -> None:
@@ -188,8 +196,12 @@ class TestAgentChatNotify(unittest.TestCase):
 
             parsed = notify._read_last_request_user_input_from_session(session_path)  # type: ignore[attr-defined]
             self.assertIsInstance(parsed, dict)
+            if not isinstance(parsed, dict):
+                self.fail("expected parsed payload to be a dict")
             questions = parsed.get("questions")
             self.assertIsInstance(questions, list)
+            if not isinstance(questions, list):
+                self.fail("expected questions to be a list")
             self.assertEqual(questions[0]["id"], "second_scope")
 
     def test_read_last_request_user_input_from_session_ignores_missing_call_id(self) -> None:

@@ -78,6 +78,8 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
         }
         rendered = bridge._extract_request_user_input_text(payload)  # type: ignore[attr-defined]
         self.assertIsInstance(rendered, str)
+        if not isinstance(rendered, str):
+            self.fail("expected rendered request_user_input text")
         self.assertIn("Where should this live?", rendered)
         self.assertIn("1. Option A", rendered)
         self.assertIn("2. Option B", rendered)
