@@ -2,7 +2,7 @@
 
 ## Overview
 
-`agent-chat-control-plane` is a local macOS runtime that synchronizes:
+`agent-chat` is a local macOS runtime that synchronizes:
 - outbound Codex/Claude notifications -> iMessage and/or Telegram
 - inbound iMessage and Telegram replies -> Codex/Claude sessions
 
@@ -30,20 +30,20 @@ The primary daemon is `agent_chat_control_plane.py`, which consolidates behavior
 
 ## Data and State
 
-By default, state lives under `$CODEX_HOME/tmp` (usually `~/.codex/tmp`).
+By default, state lives under `$AGENT_CHAT_HOME/tmp` (usually `~/.codex/tmp`).
 
 Key files include:
-- `imessage_control_plane.lock`
-- `imessage_session_registry.json`
-- `imessage_message_session_index.json`
-- `imessage_control_outbound_cursor.json`
+- `agent_chat_control_plane.lock`
+- `agent_chat_session_registry.json`
+- `agent_chat_message_session_index.json`
+- `agent_chat_control_outbound_cursor.json`
 - `imessage_inbound_cursor.json`
 - `telegram_inbound_cursor.json`
-- `imessage_queue.jsonl`
-- `imessage_dedupe_index.json`
+- `agent_chat_queue.jsonl`
+- `agent_chat_dedupe_index.json`
 
 Inbound reads default to:
-- `~/Library/Messages/chat.db` (override with `CODEX_IMESSAGE_CHAT_DB`)
+- `~/Library/Messages/chat.db` (override with `AGENT_IMESSAGE_CHAT_DB`)
 
 ## Control Flow
 
@@ -65,12 +65,12 @@ Supported inbound command grammar:
 - otherwise: implicit routing (subject to strict/reference settings)
 
 Key controls:
-- `CODEX_IMESSAGE_STRICT_TMUX`
-- `CODEX_IMESSAGE_REQUIRE_SESSION_REF`
-- `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S`
-- `CODEX_IMESSAGE_ROUTE_VIA_TMUX`
-- `CODEX_IMESSAGE_ENABLE_NEW_SESSION`
-- `CODEX_IMESSAGE_AUTO_CREATE_ON_MISSING`
+- `AGENT_CHAT_STRICT_TMUX`
+- `AGENT_CHAT_REQUIRE_SESSION_REF`
+- `AGENT_CHAT_TMUX_ACK_TIMEOUT_S`
+- `AGENT_CHAT_ROUTE_VIA_TMUX`
+- `AGENT_CHAT_ENABLE_NEW_SESSION`
+- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`
 
 ## Operational Model
 

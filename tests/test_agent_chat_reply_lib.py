@@ -104,7 +104,7 @@ class TestAgentChatReplyBridge(unittest.TestCase):
     def test_handle_prompt_sends_reply_when_send_reply_enabled(self) -> None:
         codex_home = Path("/tmp/codex-home")
         with (
-            mock.patch.dict(os.environ, {"CODEX_IMESSAGE_SEND_REPLY": "1"}, clear=True),
+            mock.patch.dict(os.environ, {"AGENT_IMESSAGE_SEND_REPLY": "1"}, clear=True),
             mock.patch.object(bridge, "_run_codex_resume", return_value="assistant reply") as run_mock,  # type: ignore[attr-defined]
             mock.patch.object(bridge, "_send_imessage", return_value=True) as send_mock,  # type: ignore[attr-defined]
         ):
@@ -237,7 +237,7 @@ class TestAgentChatReplyBridge(unittest.TestCase):
             out_dir = codex_home / "tmp"
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            out_path = out_dir / f"imessage_last_response_{fixed_time}_{fixed_pid}.txt"
+            out_path = out_dir / f"agent_chat_last_response_{fixed_time}_{fixed_pid}.txt"
             out_path.write_text("assistant reply", encoding="utf-8")
 
             observed_timeout: object = object()

@@ -1,6 +1,6 @@
-# agent-chat-control-plane
+# agent-chat
 
-`agent-chat-control-plane` is a macOS-only runtime that connects Codex or Claude sessions to iMessage and/or Telegram.
+`agent-chat` is a macOS-only runtime that connects Codex or Claude sessions to iMessage and/or Telegram.
 
 `README.md` is the canonical setup guide for both humans and coding agents.
 `AGENTS.md` is intentionally lightweight and points back here.
@@ -41,7 +41,7 @@ Privacy/Security permissions required on macOS:
 1. Clone and enter the repo.
 
 ```bash
-cd /path/to/agent-chat-control-plane
+cd /path/to/agent-chat
 ```
 
 2. Resolve Python from `PATH` and enforce `3.11+`.
@@ -62,41 +62,41 @@ fi
 3. Set minimum environment.
 
 ```bash
-export CODEX_IMESSAGE_TO="+15555550123"
-export CODEX_HOME="$HOME/.codex"
-export CODEX_IMESSAGE_NOTIFY_MODE="route"
+export AGENT_IMESSAGE_TO="+15555550123"
+export AGENT_CHAT_HOME="$HOME/.codex"
+export AGENT_CHAT_NOTIFY_MODE="route"
 export PYTHON_BIN
 
 # Optional transport mode:
 #   imessage (default), telegram, or both
-# export CODEX_IMESSAGE_TRANSPORT="telegram"
-# export CODEX_TELEGRAM_BOT_TOKEN="<bot token>"
-# export CODEX_TELEGRAM_CHAT_ID="<chat id>"
-# export CODEX_TELEGRAM_API_BASE="https://api.telegram.org"
+# export AGENT_CHAT_TRANSPORT="telegram"
+# export AGENT_TELEGRAM_BOT_TOKEN="<bot token>"
+# export AGENT_TELEGRAM_CHAT_ID="<chat id>"
+# export AGENT_TELEGRAM_API_BASE="https://api.telegram.org"
 
 # Optional: switch runtime from codex (default) to claude
-# export CODEX_IMESSAGE_AGENT="claude"
+# export AGENT_CHAT_AGENT="claude"
 # export CLAUDE_HOME="$HOME/.claude"
 ```
 
-If you use Telegram transport (`CODEX_IMESSAGE_TRANSPORT=telegram|both`), get a bot token first:
+If you use Telegram transport (`AGENT_CHAT_TRANSPORT=telegram|both`), get a bot token first:
 
 1. Open Telegram and chat with `@BotFather`.
 2. Run `/newbot` to create a bot (or `/token` for an existing bot).
 3. Copy the HTTP API token and set:
-   - `export CODEX_TELEGRAM_BOT_TOKEN="<bot token>"`
+   - `export AGENT_TELEGRAM_BOT_TOKEN="<bot token>"`
 
 4. Configure notify hook for your agent runtime.
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
-  --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
-  --recipient "${CODEX_IMESSAGE_TO:-}" \
+  --agent "${AGENT_CHAT_AGENT:-codex}" \
+  --recipient "${AGENT_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
 ```
 
-`--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
-When transport includes Telegram, setup also requires `CODEX_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+`--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
+When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 
 This updater is idempotent:
 - `--agent codex`: writes `notify` at top-level in `~/.codex/config.toml`
@@ -109,14 +109,14 @@ Compatibility note:
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
-  --agent "${CODEX_IMESSAGE_AGENT:-codex}" \
-  --recipient "${CODEX_IMESSAGE_TO:-}" \
+  --agent "${AGENT_CHAT_AGENT:-codex}" \
+  --recipient "${AGENT_IMESSAGE_TO:-}" \
   --python-bin "$PYTHON_BIN"
-"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent "${CODEX_IMESSAGE_AGENT:-codex}"
+"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent "${AGENT_CHAT_AGENT:-codex}"
 ```
 
-`--recipient` is required only when transport includes iMessage (`CODEX_IMESSAGE_TRANSPORT=imessage|both`).
-When transport includes Telegram, setup also requires `CODEX_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+`--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
+When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
@@ -148,20 +148,20 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 - On some macOS hosts, `python3` in `PATH` still points to Apple Python 3.9.
 - Use an explicit 3.11+ binary, then re-run setup:
   - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 `doctor` says `notify hook is not configured...` or `unable to parse ~/.codex/config.toml`:
 - Re-run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 `setup-launchd` says shell can read `chat.db` but launchd cannot:
 - Grant Full Disk Access to `permission_app` shown by `doctor` (usually `~/Applications/Codex iMessage Python.app`).
 - Re-run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
   - `"$PYTHON_BIN" agent_chat_control_plane.py doctor`
 - If this keeps repeating after Python upgrades/reinstalls, run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
   - This attempts to reset stale TCC Full Disk Access approval for the runtime bundle id and re-runs permission setup.
 
 `setup-launchd` keeps failing with shell/runtime readable but launchd still denied (even after granting FDA):
@@ -174,7 +174,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - re-enable FDA for `~/Applications/Codex iMessage Python.app`
   - re-run `setup-launchd` and `doctor`
 - Shortcut:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
 
 `doctor` transiently shows `control-plane lock PID not alive` immediately after restart:
 - Wait 1-2 seconds and run `doctor` again.
@@ -198,7 +198,7 @@ python3 agent_chat_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT
 python3 agent_chat_notify.py route [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
 
 # Installed console scripts
-agent-chat-control-plane ...
+agent-chat ...
 agent-chat-notify ...
 agent-chat-outbound ...
 agent-chat-reply ...
@@ -215,25 +215,25 @@ When inbound routing is enabled (from iMessage and/or Telegram), reply messages 
 
 ### Important environment variables
 
-- `CODEX_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
-- `CODEX_HOME`: Codex home directory (defaults to `~/.codex`)
-- `CODEX_IMESSAGE_NOTIFY_MODE`: `send`, `state_only`, or `route`
-- `CODEX_IMESSAGE_TRANSPORT`: `imessage` (default), `telegram`, or `both`
-- `CODEX_TELEGRAM_BOT_TOKEN`: Telegram bot token (required for `telegram` / `both`)
-- `CODEX_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (required for `telegram` / `both`)
-- `CODEX_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
-- `CODEX_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
-- `CODEX_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
-- `CODEX_IMESSAGE_QUEUE`: fallback queue JSONL path
-- `CODEX_IMESSAGE_MAX_LEN`: max outgoing message chunk size
-- `CODEX_IMESSAGE_INBOUND_POLL_S`: control-plane polling interval for `run`
-- `CODEX_IMESSAGE_STRICT_TMUX`: strict tmux routing mode (`1` default)
-- `CODEX_IMESSAGE_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
-- `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
-- `CODEX_IMESSAGE_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
-- `CODEX_IMESSAGE_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
-- `CODEX_IMESSAGE_AUTO_CREATE_ON_MISSING`: auto-create when no session matches (`1` default)
-- `CODEX_IMESSAGE_LAUNCHD_LABEL`: launchd service label used by `doctor`
+- `AGENT_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
+- `AGENT_CHAT_HOME`: runtime home directory for Codex state (defaults to `~/.codex`)
+- `AGENT_CHAT_NOTIFY_MODE`: `send`, `state_only`, or `route`
+- `AGENT_CHAT_TRANSPORT`: `imessage` (default), `telegram`, or `both`
+- `AGENT_TELEGRAM_BOT_TOKEN`: Telegram bot token (required for `telegram` / `both`)
+- `AGENT_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (required for `telegram` / `both`)
+- `AGENT_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
+- `AGENT_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
+- `AGENT_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
+- `AGENT_CHAT_QUEUE`: fallback queue JSONL path
+- `AGENT_IMESSAGE_MAX_LEN`: max outgoing message chunk size
+- `AGENT_CHAT_INBOUND_POLL_S`: control-plane polling interval for `run`
+- `AGENT_CHAT_STRICT_TMUX`: strict tmux routing mode (`1` default)
+- `AGENT_CHAT_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
+- `AGENT_CHAT_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
+- `AGENT_CHAT_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
+- `AGENT_CHAT_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
+- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`: auto-create when no session matches (`1` default)
+- `AGENT_CHAT_LAUNCHD_LABEL`: launchd service label used by `doctor`
 
 ## Launchd
 
@@ -264,7 +264,7 @@ If you are unsure which app to grant, use `doctor` as source of truth:
 - `Launchd.runtime_python` (binary target when no app is shown)
 
 Template for manual customization:
-- `examples/com.agent-chat-control-plane.plist`
+- `examples/com.agent-chat.plist`
 
 ## Cleanup / Uninstall
 

@@ -2,7 +2,7 @@
 
 ## Runtime Contract
 
-- Authoritative long-lived process: launchd label defaults to `com.agent-chat-control-plane`.
+- Authoritative long-lived process: launchd label defaults to `com.agent-chat`.
 - Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons.
 - Single process handles:
   - outbound needs-input notifications to iMessage and/or Telegram
@@ -17,22 +17,22 @@
 2. Control plane updates session registry and sends routed messages for active transport mode.
 3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
 4. Replies are routed by `@ref`, reply context, or auto-create logic.
-5. Failed outbound sends are queued in `~/.codex/tmp/imessage_queue.jsonl`; run loop drains queue on subsequent cycles.
+5. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
 
 ## Key State Files
 
-- `~/.codex/tmp/imessage_control_plane.lock`
-- `~/.codex/tmp/imessage_session_registry.json`
-- `~/.codex/tmp/imessage_message_session_index.json`
-- `~/.codex/tmp/imessage_control_outbound_cursor.json`
+- `~/.codex/tmp/agent_chat_control_plane.lock`
+- `~/.codex/tmp/agent_chat_session_registry.json`
+- `~/.codex/tmp/agent_chat_message_session_index.json`
+- `~/.codex/tmp/agent_chat_control_outbound_cursor.json`
 - `~/.codex/tmp/imessage_inbound_cursor.json`
 - `~/.codex/tmp/telegram_inbound_cursor.json`
-- `~/.codex/tmp/imessage_queue.jsonl`
+- `~/.codex/tmp/agent_chat_queue.jsonl`
 
 ## Health Checks
 
 ```bash
-python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$(command -v python3)"
 python3 agent_chat_control_plane.py setup-launchd
 python3 agent_chat_control_plane.py setup-permissions
 python3 agent_chat_control_plane.py doctor
@@ -52,14 +52,14 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 ## Routing Controls
 
-- `CODEX_IMESSAGE_STRICT_TMUX` (default `1`)
+- `AGENT_CHAT_STRICT_TMUX` (default `1`)
   - `1`: never run non-tmux resume fallback when pane dispatch fails.
   - `0`: allow agent resume fallback for `tmux_failed`/`tmux_stale`.
-- `CODEX_IMESSAGE_REQUIRE_SESSION_REF` (default follows strict mode)
+- `AGENT_CHAT_REQUIRE_SESSION_REF` (default follows strict mode)
   - when enabled, ambiguous implicit replies require `@<ref> <instruction>`.
-- `CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S` (default `2.0`)
+- `AGENT_CHAT_TMUX_ACK_TIMEOUT_S` (default `2.0`)
   - controls user-message ack wait window after tmux send.
-- `CODEX_IMESSAGE_TRACE` or `run/once --trace`
+- `AGENT_CHAT_TRACE` or `run/once --trace`
   - emits per-message routing traces to stderr logs.
 
 ## Failure Modes
@@ -90,5 +90,5 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 ## Logs
 
-- `~/Library/Logs/agent-chat-control-plane.launchd.out.log`
-- `~/Library/Logs/agent-chat-control-plane.launchd.err.log`
+- `~/Library/Logs/agent-chat.launchd.out.log`
+- `~/Library/Logs/agent-chat.launchd.err.log`

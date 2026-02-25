@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to `agent-chat-control-plane`.
+Thanks for contributing to `agent-chat`.
 
 ## Project Scope
 

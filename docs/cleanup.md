@@ -8,13 +8,13 @@ checkout.
 
 ## What This Removes
 
-- launchd service (default `com.agent-chat-control-plane`, or custom `CODEX_IMESSAGE_LAUNCHD_LABEL`)
+- launchd service (default `com.agent-chat`, or custom `AGENT_CHAT_LAUNCHD_LABEL`)
 - LaunchAgent plist (`~/Library/LaunchAgents/<label>.plist`)
 - runtime app bundle (`~/Applications/Codex iMessage Python.app`)
 - tmux-managed background control-plane session (`agent_chat_control_plane`)
 - Codex/Claude notify hook wiring to `agent_chat_control_plane.py notify`
-- integration runtime state under `~/.codex/tmp/imessage_*`
-- integration tmux log (`~/.codex/log/imessage-control-plane-tmux.log`)
+- integration runtime state under `~/.codex/tmp/agent_chat_*` (plus iMessage-specific cursors)
+- legacy integration tmux log (`~/.codex/log/imessage-control-plane-tmux.log`)
 - Full Disk Access TCC grants commonly used by this integration (`org.python.python`)
 
 ## One-shot Cleanup
@@ -23,16 +23,16 @@ Run from any shell:
 
 ```bash
 set -euo pipefail
-LABEL="${CODEX_IMESSAGE_LAUNCHD_LABEL:-com.agent-chat-control-plane}"
+LABEL="${AGENT_CHAT_LAUNCHD_LABEL:-com.agent-chat}"
 UID_NUM="$(id -u)"
 SERVICE="gui/${UID_NUM}/${LABEL}"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 APP="$HOME/Applications/Codex iMessage Python.app"
-OUT_LOG="$HOME/Library/Logs/agent-chat-control-plane.launchd.out.log"
-ERR_LOG="$HOME/Library/Logs/agent-chat-control-plane.launchd.err.log"
+OUT_LOG="$HOME/Library/Logs/agent-chat.launchd.out.log"
+ERR_LOG="$HOME/Library/Logs/agent-chat.launchd.err.log"
 CONFIG="$HOME/.codex/config.toml"
 TMP_DIR="$HOME/.codex/tmp"
-TMUX_LOG="$HOME/.codex/log/imessage-control-plane-tmux.log"
+LEGACY_TMUX_LOG="$HOME/.codex/log/imessage-control-plane-tmux.log"
 
 launchctl bootout "$SERVICE" >/dev/null 2>&1 || true
 launchctl disable "$SERVICE" >/dev/null 2>&1 || true
@@ -42,7 +42,7 @@ pkill -f 'agent_chat_control_plane.py run' >/dev/null 2>&1 || true
 rm -f "$PLIST"
 rm -rf "$APP"
 rm -f "$OUT_LOG" "$ERR_LOG"
-rm -f "$TMUX_LOG"
+rm -f "$LEGACY_TMUX_LOG"
 
 for BUNDLE_ID in org.python.python; do
   tccutil reset SystemPolicyAllFiles "$BUNDLE_ID" >/dev/null 2>&1 || true
@@ -68,10 +68,10 @@ PY
 
 if [ -d "$TMP_DIR" ]; then
   find "$TMP_DIR" -maxdepth 1 -type f \
-    \( -name 'imessage_*' -o -name 'imessage_queue.jsonl' -o -name 'imessage_control_plane.lock' -o -name 'imessage_reply_cursor.json' \) \
+    \( -name 'imessage_*' -o -name 'agent_chat_queue.jsonl' -o -name 'agent_chat_control_plane.lock' -o -name 'agent_chat_reply_cursor.json' \) \
     -delete
 fi
-find "$TMP_DIR" -maxdepth 1 -type f -name 'imessage_queue.jsonl.drain.*' -delete 2>/dev/null || true
+find "$TMP_DIR" -maxdepth 1 -type f -name 'agent_chat_queue.jsonl.drain.*' -delete 2>/dev/null || true
 ```
 
 Note:
@@ -84,7 +84,7 @@ Run all checks below. A reset is complete only when every check passes.
 
 ```bash
 # 1) launchd service absent
-launchctl print gui/$(id -u)/com.agent-chat-control-plane
+launchctl print gui/$(id -u)/com.agent-chat
 
 # 2) no control-plane tmux session/window
 tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | rg -i 'agent_chat|control_plane|imessage'
@@ -96,7 +96,7 @@ pgrep -af 'agent_chat|control_plane|send-imessage|osascript'
 rg -n 'agent_chat|send-imessage|notify\\s*=\\s*\\[' ~/.codex/config.toml
 
 # 5) launch agent/app removed
-[ -e ~/Library/LaunchAgents/com.agent-chat-control-plane.plist ] && echo "present" || echo "absent"
+[ -e ~/Library/LaunchAgents/com.agent-chat.plist ] && echo "present" || echo "absent"
 [ -e ~/Applications/Codex\\ iMessage\\ Python.app ] && echo "present" || echo "absent"
 
 # 6) no runtime state/log leftovers
@@ -111,8 +111,8 @@ Expected:
 Optional post-cleanup doctor check (installed entrypoint only, no repo path):
 
 ```bash
-if command -v agent-chat-control-plane >/dev/null 2>&1; then
-  PYTHONDONTWRITEBYTECODE=1 agent-chat-control-plane doctor
+if command -v agent-chat >/dev/null 2>&1; then
+  PYTHONDONTWRITEBYTECODE=1 agent-chat doctor
 fi
 ```
 

@@ -13,18 +13,18 @@ Usage:
   python3 agent_chat_outbound_lib.py once [--dry-run] [--session-path PATH]
 
 Config:
-  - CODEX_IMESSAGE_TO: recipient phone/email
-  - CODEX_HOME: defaults to ~/.codex
+  - AGENT_IMESSAGE_TO: recipient phone/email
+  - AGENT_CHAT_HOME: defaults to ~/.codex
   - CODEX_SESSION_PATH / CODEX_SESSION_FILE: optional explicit session file
-  - CODEX_IMESSAGE_MIRROR_ROLES: comma-separated roles to mirror; default user,assistant
+  - AGENT_CHAT_MIRROR_ROLES: comma-separated roles to mirror; default user,assistant
     (example: assistant)
-  - CODEX_IMESSAGE_ONLY_NEEDS_INPUT: when set (default: 1), notify only when Codex
+  - AGENT_CHAT_ONLY_NEEDS_INPUT: when set (default: 1), notify only when Codex
     requests user input/approval via request_user_input. Set to 0 to restore full mirroring.
-  - CODEX_IMESSAGE_QUEUE: fallback queue path (JSONL); defaults to $CODEX_HOME/tmp/imessage_queue.jsonl
-  - CODEX_IMESSAGE_OUTBOUND_CURSOR: cursor JSON path; defaults to $CODEX_HOME/tmp/imessage_outbound_cursor.json
-  - CODEX_IMESSAGE_OUTBOUND_BRIDGE_LOCK: lock path; defaults to $CODEX_HOME/tmp/imessage_outbound_bridge.lock
-  - CODEX_IMESSAGE_DEDUPE_INDEX: shared dedupe index path (JSON)
-  - CODEX_IMESSAGE_DEDUPE_TTL_S: dedupe TTL seconds (default: 86400)
+  - AGENT_CHAT_QUEUE: fallback queue path (JSONL); defaults to $AGENT_CHAT_HOME/tmp/agent_chat_queue.jsonl
+  - AGENT_CHAT_OUTBOUND_CURSOR: cursor JSON path; defaults to $AGENT_CHAT_HOME/tmp/agent_chat_outbound_cursor.json
+  - AGENT_CHAT_OUTBOUND_BRIDGE_LOCK: lock path; defaults to $AGENT_CHAT_HOME/tmp/agent_chat_outbound_bridge.lock
+  - AGENT_CHAT_DEDUPE_INDEX: shared dedupe index path (JSON)
+  - AGENT_CHAT_DEDUPE_TTL_S: dedupe TTL seconds (default: 86400)
 """
 
 from __future__ import annotations
@@ -124,8 +124,8 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 def _acquire_single_instance_lock(*, codex_home: Path) -> object | None:
     lock_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_OUTBOUND_BRIDGE_LOCK",
-            str(codex_home / "tmp" / "imessage_outbound_bridge.lock"),
+            "AGENT_CHAT_OUTBOUND_BRIDGE_LOCK",
+            str(codex_home / "tmp" / "agent_chat_outbound_bridge.lock"),
         )
     )
     try:
@@ -226,8 +226,8 @@ def _read_session_cwd(*, session_path: Path) -> str | None:
 def _attention_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_ATTENTION_INDEX",
-            str(codex_home / "tmp" / "imessage_attention_index.json"),
+            "AGENT_CHAT_ATTENTION_INDEX",
+            str(codex_home / "tmp" / "agent_chat_attention_index.json"),
         )
     )
 
@@ -286,8 +286,8 @@ def _write_last_attention_state(
     try:
         state_path = Path(
             os.environ.get(
-                "CODEX_IMESSAGE_LAST_ATTENTION",
-                str(codex_home / "tmp" / "imessage_last_attention.json"),
+                "AGENT_CHAT_LAST_ATTENTION",
+                str(codex_home / "tmp" / "agent_chat_last_attention.json"),
             )
         )
         record = {
@@ -615,7 +615,7 @@ def _is_jwt_like(token: str) -> bool:
 
 
 def _redact(text: str) -> str:
-    if os.environ.get("CODEX_IMESSAGE_REDACT", "1").strip() in {"0", "false", "False"}:
+    if os.environ.get("AGENT_CHAT_REDACT", "1").strip() in {"0", "false", "False"}:
         return text
 
     out = text
@@ -704,8 +704,8 @@ def _enqueue_fallback(*, queue_path: Path, recipient: str, message: str) -> None
 def _cursor_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_OUTBOUND_CURSOR",
-            str(codex_home / "tmp" / "imessage_outbound_cursor.json"),
+            "AGENT_CHAT_OUTBOUND_CURSOR",
+            str(codex_home / "tmp" / "agent_chat_outbound_cursor.json"),
         )
     )
 
@@ -844,13 +844,13 @@ def _process_session_path(
     session_id = session_id_cache.get(cache_key)
     session_cwd = _read_session_cwd(session_path=session_path)
 
-    needs_input_only = os.environ.get("CODEX_IMESSAGE_ONLY_NEEDS_INPUT", "1").strip() not in {
+    needs_input_only = os.environ.get("AGENT_CHAT_ONLY_NEEDS_INPUT", "1").strip() not in {
         "0",
         "false",
         "False",
     }
 
-    mirror_tools = os.environ.get("CODEX_IMESSAGE_MIRROR_TOOLS", "1").strip() not in {"0", "false", "False"}
+    mirror_tools = os.environ.get("AGENT_CHAT_MIRROR_TOOLS", "1").strip() not in {"0", "false", "False"}
 
     try:
         with session_path.open("r", encoding="utf-8") as f:
@@ -997,12 +997,12 @@ def main(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
 
-    recipient_raw = os.environ.get("CODEX_IMESSAGE_TO")
+    recipient_raw = os.environ.get("AGENT_IMESSAGE_TO")
     if not recipient_raw:
         return 0
     recipient = _normalize_recipient(recipient_raw)
 
-    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     lock_handle = _acquire_single_instance_lock(codex_home=codex_home)
     if lock_handle is None:
         return 0
@@ -1011,7 +1011,7 @@ def main(argv: list[str]) -> int:
     cursor_session_path, offset, seen_needs_input_call_ids = _load_cursor(cursor_path=cursor)
 
     max_message_chars = _MAX_MESSAGE_CHARS_DEFAULT
-    env_max = os.environ.get("CODEX_IMESSAGE_MAX_LEN", "").strip()
+    env_max = os.environ.get("AGENT_IMESSAGE_MAX_LEN", "").strip()
     if env_max:
         try:
             max_message_chars = int(env_max)
@@ -1020,11 +1020,11 @@ def main(argv: list[str]) -> int:
 
     queue_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_QUEUE",
-            str(codex_home / "tmp" / "imessage_queue.jsonl"),
+            "AGENT_CHAT_QUEUE",
+            str(codex_home / "tmp" / "agent_chat_queue.jsonl"),
         )
     )
-    mirror_roles = _parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES"))
+    mirror_roles = _parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES"))
 
     session_id_cache: dict[str, str | None] = {}
     call_id_to_name: dict[str, str] = {}

@@ -10,16 +10,16 @@ Usage:
   python3 agent_chat_reply_lib.py once
 
 Config:
-  - CODEX_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
-  - CODEX_IMESSAGE_SEND_REPLY: set to 1/true to send CODEX_REPLY iMessages back (default: disabled)
-  - CODEX_HOME: defaults to ~/.codex
-  - CODEX_IMESSAGE_LAST_ATTENTION: path to last attention state JSON
-      (defaults to $CODEX_HOME/tmp/imessage_last_attention.json)
-  - CODEX_IMESSAGE_ATTENTION_INDEX: path to per-session attention index JSON
-      (defaults to $CODEX_HOME/tmp/imessage_attention_index.json)
-  - CODEX_IMESSAGE_REPLY_CURSOR: path to reply cursor JSON
-      (defaults to $CODEX_HOME/tmp/imessage_reply_cursor.json)
-  - CODEX_IMESSAGE_CHAT_DB: path to chat.db (defaults to ~/Library/Messages/chat.db)
+  - AGENT_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
+  - AGENT_IMESSAGE_SEND_REPLY: set to 1/true to send AGENT_REPLY iMessages back (default: disabled)
+  - AGENT_CHAT_HOME: defaults to ~/.codex
+  - AGENT_CHAT_LAST_ATTENTION: path to last attention state JSON
+      (defaults to $AGENT_CHAT_HOME/tmp/agent_chat_last_attention.json)
+  - AGENT_CHAT_ATTENTION_INDEX: path to per-session attention index JSON
+      (defaults to $AGENT_CHAT_HOME/tmp/agent_chat_attention_index.json)
+  - AGENT_IMESSAGE_REPLY_CURSOR: path to reply cursor JSON
+      (defaults to $AGENT_CHAT_HOME/tmp/agent_chat_reply_cursor.json)
+  - AGENT_IMESSAGE_CHAT_DB: path to chat.db (defaults to ~/Library/Messages/chat.db)
 
 Notes:
   - Accessing ~/Library/Messages/chat.db may require granting Full Disk Access to
@@ -48,7 +48,7 @@ _APPLE_EPOCH_UNIX = 978307200  # 2001-01-01T00:00:00Z in Unix epoch seconds
 _NSEC_PER_SEC = 1_000_000_000
 _ATTN_HEAD = "Codex needs your attention"
 _ATTN_TAIL = "Reply to this iMessage; Codex can apply your reply to the session."
-_BOT_PREFIX = "CODEX_REPLY:"
+_BOT_PREFIX = "AGENT_REPLY:"
 _DEFAULT_CODEX_TIMEOUT_S: float | None = None
 _DEFAULT_TMUX_REPLY_POLL_S = 0.5
 _DEFAULT_TMUX_USER_ACK_TIMEOUT_S = 2.0
@@ -82,7 +82,7 @@ def _tmux_socket_from_env() -> str | None:
 
 
 def _resolve_tmux_bin() -> str:
-    override = os.environ.get("CODEX_IMESSAGE_TMUX_BIN")
+    override = os.environ.get("AGENT_CHAT_TMUX_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
 
@@ -105,7 +105,7 @@ def _normalize_agent(*, agent: str | None) -> str:
 
 
 def _resolve_claude_bin() -> str:
-    override = os.environ.get("CODEX_IMESSAGE_CLAUDE_BIN")
+    override = os.environ.get("AGENT_CHAT_CLAUDE_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
 
@@ -139,8 +139,8 @@ def _acquire_single_instance_lock(*, codex_home: Path) -> object | None:
     """
     lock_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_REPLY_BRIDGE_LOCK",
-            str(codex_home / "tmp" / "imessage_reply_bridge.lock"),
+            "AGENT_IMESSAGE_REPLY_BRIDGE_LOCK",
+            str(codex_home / "tmp" / "agent_chat_reply_bridge.lock"),
         )
     )
     try:
@@ -286,7 +286,7 @@ def _format_bot_replies(*, response: str, session_id: str | None) -> list[str]:
 
     # Multi-part replies: keep every part recognizable to prevent self-looping.
     chunks: list[str] = []
-    # Leave space for "CODEX_REPLY: (i/n)\nSession: ...\n" header.
+    # Leave space for "AGENT_REPLY: (i/n)\nSession: ...\n" header.
     # We'll do a first pass chunking, then render with final n.
     provisional_header = f"{_BOT_PREFIX} (999/999)\n"
     if session_id and session_id.strip():
@@ -395,7 +395,7 @@ def _run_codex_resume(
         # Best-effort only; if this fails we'll still try to run Codex.
         pass
 
-    out_path = out_dir / f"imessage_last_response_{int(time.time())}_{os.getpid()}.txt"
+    out_path = out_dir / f"agent_chat_last_response_{int(time.time())}_{os.getpid()}.txt"
 
     cmd: list[str] = ["codex", "-a", "never", "-s", "workspace-write"]
     if cwd:
@@ -420,7 +420,7 @@ def _run_codex_resume(
             timeout = None if float(timeout_s) <= 0 else float(timeout_s)
         else:
             # Back-compat: allow env var to override when present.
-            timeout_raw = os.environ.get("CODEX_IMESSAGE_CODEX_TIMEOUT_SECS")
+            timeout_raw = os.environ.get("AGENT_CHAT_CODEX_TIMEOUT_SECS")
             if timeout_raw is not None:
                 try:
                     timeout = None if float(timeout_raw) <= 0 else float(timeout_raw)
@@ -434,7 +434,7 @@ def _run_codex_resume(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-            env={**os.environ, "CODEX_IMESSAGE_REPLY": "1"},
+            env={**os.environ, "AGENT_CHAT_REPLY": "1"},
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -482,7 +482,7 @@ def _run_agent_resume(
             text=True,
             cwd=cwd if isinstance(cwd, str) and cwd.strip() else None,
             timeout=timeout,
-            env={**os.environ, "CLAUDE_IMESSAGE_REPLY": "1"},
+            env={**os.environ, "CLAUDE_CHAT_REPLY": "1"},
         )
     except subprocess.TimeoutExpired:
         return "(claude --resume timed out)"
@@ -660,7 +660,7 @@ def _tmux_send_prompt(*, pane: str, prompt: str, tmux_socket: str | None = None)
         # Codex treats very fast text streams as paste bursts; Enter during that window
         # inserts a newline instead of submitting. Wait briefly before submit keys.
         delay_s = _DEFAULT_TMUX_SUBMIT_DELAY_S
-        raw_delay = os.environ.get("CODEX_IMESSAGE_TMUX_SUBMIT_DELAY_S", "").strip()
+        raw_delay = os.environ.get("AGENT_CHAT_TMUX_SUBMIT_DELAY_S", "").strip()
         if raw_delay:
             try:
                 delay_s = max(0.0, float(raw_delay))
@@ -790,7 +790,7 @@ def _handle_prompt(
                 "no background fallback run)"
             )
     else:
-        active_agent = _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
+        active_agent = _normalize_agent(agent=os.environ.get("AGENT_CHAT_AGENT"))
         if use_tmux and tmux_pane and echo:
             sys.stdout.write("tmux context mismatch; using CLI resume fallback\n")
         if active_agent == "claude":
@@ -821,7 +821,7 @@ def _handle_prompt(
         response = "(no response from CLI resume; check logs / timeout)"
 
     if echo:
-        max_chars_raw = os.environ.get("CODEX_IMESSAGE_ECHO_MAX_CHARS", "4000")
+        max_chars_raw = os.environ.get("AGENT_CHAT_ECHO_MAX_CHARS", "4000")
         try:
             max_chars = max(0, int(max_chars_raw))
         except Exception:
@@ -834,11 +834,11 @@ def _handle_prompt(
         sys.stdout.write(shown.rstrip() + "\n")
         sys.stdout.write("----- end reply -----\n")
 
-    send_reply_raw = os.environ.get("CODEX_IMESSAGE_SEND_REPLY", "").strip().lower()
+    send_reply_raw = os.environ.get("AGENT_IMESSAGE_SEND_REPLY", "").strip().lower()
     send_reply = send_reply_raw in {"1", "true", "yes", "y", "on"}
     if not send_reply:
         if echo:
-            sys.stdout.write("skipped iMessage reply (set CODEX_IMESSAGE_SEND_REPLY=1 to enable)\n")
+            sys.stdout.write("skipped iMessage reply (set AGENT_IMESSAGE_SEND_REPLY=1 to enable)\n")
         return
 
     parts = _format_bot_replies(response=response, session_id=session_id)
@@ -966,7 +966,7 @@ def _fetch_new_replies(
         return []
 
     placeholders = ",".join("?" for _ in handle_ids)
-    # Prefer only inbound messages (avoid looping on our own outbound "attention" or "CODEX_REPLY" messages).
+    # Prefer only inbound messages (avoid looping on our own outbound "attention" or "AGENT_REPLY" messages).
     # Messages DB schema is not perfectly stable across macOS releases, so we treat this as best-effort.
     try:
         cols_raw = conn.execute("PRAGMA table_info(message)").fetchall()
@@ -1068,7 +1068,7 @@ def _resume_session(*, session_id: str, cwd: str | None, prompt: str, dry_run: b
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env={**os.environ, "CODEX_IMESSAGE_REPLY": "1"},
+            env={**os.environ, "AGENT_CHAT_REPLY": "1"},
         )
     except Exception:
         return
@@ -1077,8 +1077,8 @@ def _resume_session(*, session_id: str, cwd: str | None, prompt: str, dry_run: b
 def _load_last_attention_state(codex_home: Path) -> dict[str, Any] | None:
     state_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_LAST_ATTENTION",
-            str(codex_home / "tmp" / "imessage_last_attention.json"),
+            "AGENT_CHAT_LAST_ATTENTION",
+            str(codex_home / "tmp" / "agent_chat_last_attention.json"),
         )
     )
     return _read_json(state_path)
@@ -1087,8 +1087,8 @@ def _load_last_attention_state(codex_home: Path) -> dict[str, Any] | None:
 def _attention_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_ATTENTION_INDEX",
-            str(codex_home / "tmp" / "imessage_attention_index.json"),
+            "AGENT_CHAT_ATTENTION_INDEX",
+            str(codex_home / "tmp" / "agent_chat_attention_index.json"),
         )
     )
 
@@ -1100,8 +1100,8 @@ def _load_attention_index(codex_home: Path) -> dict[str, Any] | None:
 def _session_registry_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_SESSION_REGISTRY",
-            str(codex_home / "tmp" / "imessage_session_registry.json"),
+            "AGENT_CHAT_SESSION_REGISTRY",
+            str(codex_home / "tmp" / "agent_chat_session_registry.json"),
         )
     )
 
@@ -1203,27 +1203,27 @@ def main(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
 
-    recipient_raw = os.environ.get("CODEX_IMESSAGE_TO")
+    recipient_raw = os.environ.get("AGENT_IMESSAGE_TO")
     if not recipient_raw:
         return 0
     recipient = _normalize_recipient(recipient_raw)
     handle_ids = _candidate_handle_ids(recipient)
 
-    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     # Prevent multiple concurrent bridge instances (notify hooks may try to start this repeatedly).
     _lock_handle = _acquire_single_instance_lock(codex_home=codex_home)
     if _lock_handle is None:
         return 0
     cursor_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_REPLY_CURSOR",
-            str(codex_home / "tmp" / "imessage_reply_cursor.json"),
+            "AGENT_IMESSAGE_REPLY_CURSOR",
+            str(codex_home / "tmp" / "agent_chat_reply_cursor.json"),
         )
     )
 
     chat_db = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_CHAT_DB",
+            "AGENT_IMESSAGE_CHAT_DB",
             str(Path.home() / "Library" / "Messages" / "chat.db"),
         )
     )

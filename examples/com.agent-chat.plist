@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.agent-chat-control-plane</string>
+  <string>com.agent-chat</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -14,17 +14,17 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CODEX_IMESSAGE_TO</key>
+    <key>AGENT_IMESSAGE_TO</key>
     <string>+15555550123</string>
 
-    <key>CODEX_HOME</key>
+    <key>AGENT_CHAT_HOME</key>
     <string>/Users/USERNAME/.codex</string>
 
-    <key>CODEX_IMESSAGE_NOTIFY_MODE</key>
+    <key>AGENT_CHAT_NOTIFY_MODE</key>
     <string>route</string>
 
-    <key>CODEX_IMESSAGE_LAUNCHD_LABEL</key>
-    <string>com.agent-chat-control-plane</string>
+    <key>AGENT_CHAT_LAUNCHD_LABEL</key>
+    <string>com.agent-chat</string>
 
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
@@ -37,9 +37,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/USERNAME/Library/Logs/agent-chat-control-plane.launchd.out.log</string>
+  <string>/Users/USERNAME/Library/Logs/agent-chat.launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/USERNAME/Library/Logs/agent-chat-control-plane.launchd.err.log</string>
+  <string>/Users/USERNAME/Library/Logs/agent-chat.launchd.err.log</string>
 </dict>
 </plist>

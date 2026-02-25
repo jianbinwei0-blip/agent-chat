@@ -6,7 +6,7 @@ This project runs locally on macOS and interacts with:
 - `Messages` via Apple Events (`osascript`)
 - local Messages database (`~/Library/Messages/chat.db`)
 - Telegram Bot API (when Telegram transport is enabled)
-- local Codex session/history files under `CODEX_HOME`
+- local agent runtime session/history files under `AGENT_CHAT_HOME`
 
 It is not a network service and is designed for single-user local operation.
 
@@ -25,7 +25,7 @@ Potentially sensitive local data:
 
 Recommendations:
 - avoid committing runtime state/log files
-- keep `CODEX_HOME` under a user-owned path
+- keep `AGENT_CHAT_HOME` under a user-owned path
 - restrict machine/user account access where this runtime executes
 
 ## Permission Hardening
@@ -38,10 +38,10 @@ Recommendations:
 ## Runtime Hardening Knobs
 
 Useful controls:
-- `CODEX_IMESSAGE_STRICT_TMUX=1`
-- `CODEX_IMESSAGE_REQUIRE_SESSION_REF=1`
-- `CODEX_IMESSAGE_NOTIFY_MODE=route`
-- `CODEX_IMESSAGE_ONLY_NEEDS_INPUT=1`
+- `AGENT_CHAT_STRICT_TMUX=1`
+- `AGENT_CHAT_REQUIRE_SESSION_REF=1`
+- `AGENT_CHAT_NOTIFY_MODE=route`
+- `AGENT_CHAT_ONLY_NEEDS_INPUT=1`
 
 These reduce accidental misrouting and unnecessary message fanout.
 

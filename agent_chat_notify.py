@@ -8,20 +8,20 @@ Usage:
   agent_chat_notify.py route [--cwd DIRNAME] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
 
 Config:
-  - CODEX_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
-  - CODEX_IMESSAGE_NOTIFY_MODE: send (default), state_only, or route
+  - AGENT_IMESSAGE_TO: recipient phone number (e.g. +13135551234) or Apple ID email
+  - AGENT_CHAT_NOTIFY_MODE: send (default), state_only, or route
     - state_only: update attention state/index for reply routing without sending iMessages
     - route: only send input-needed prompts and final completion status
-  - CODEX_IMESSAGE_NOTIFY_FALLBACK_INPUT: when route mode is enabled, allow generic
+  - AGENT_CHAT_NOTIFY_FALLBACK_INPUT: when route mode is enabled, allow generic
     input-needed fallback iMessage when exact question text is unavailable (default: 1)
-  - CODEX_IMESSAGE_FINAL_STATUS_ENABLED: when route mode is enabled, send final
+  - AGENT_CHAT_FINAL_STATUS_ENABLED: when route mode is enabled, send final
     completion status notifications (default: 1)
-  - CODEX_IMESSAGE_DEDUPE_INDEX: shared dedupe index path (JSON)
-  - CODEX_IMESSAGE_DEDUPE_TTL_S: dedupe TTL seconds (default: 86400)
-  - CODEX_IMESSAGE_QUEUE: fallback queue path (JSONL); defaults to $CODEX_HOME/tmp/imessage_queue.jsonl
-  - CODEX_IMESSAGE_ATTENTION_INDEX: path to per-session attention index JSON
-  - CODEX_HOME: defaults to ~/.codex
-  - CODEX_HISTORY_PATH: override history.jsonl path (defaults to $CODEX_HOME/history.jsonl)
+  - AGENT_CHAT_DEDUPE_INDEX: shared dedupe index path (JSON)
+  - AGENT_CHAT_DEDUPE_TTL_S: dedupe TTL seconds (default: 86400)
+  - AGENT_CHAT_QUEUE: fallback queue path (JSONL); defaults to $AGENT_CHAT_HOME/tmp/agent_chat_queue.jsonl
+  - AGENT_CHAT_ATTENTION_INDEX: path to per-session attention index JSON
+  - AGENT_CHAT_HOME: defaults to ~/.codex
+  - CODEX_HISTORY_PATH: override history.jsonl path (defaults to $AGENT_CHAT_HOME/history.jsonl)
 """
 
 from __future__ import annotations
@@ -526,8 +526,8 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 def _attention_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_ATTENTION_INDEX",
-            str(codex_home / "tmp" / "imessage_attention_index.json"),
+            "AGENT_CHAT_ATTENTION_INDEX",
+            str(codex_home / "tmp" / "agent_chat_attention_index.json"),
         )
     )
 
@@ -590,8 +590,8 @@ def _write_last_attention_state(
     try:
         state_path = Path(
             os.environ.get(
-                "CODEX_IMESSAGE_LAST_ATTENTION",
-                str(codex_home / "tmp" / "imessage_last_attention.json"),
+                "AGENT_CHAT_LAST_ATTENTION",
+                str(codex_home / "tmp" / "agent_chat_last_attention.json"),
             )
         )
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -618,12 +618,12 @@ def _write_last_attention_state(
 
 
 def _is_state_only_notify_mode() -> bool:
-    mode = os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "send").strip().lower()
+    mode = os.environ.get("AGENT_CHAT_NOTIFY_MODE", "send").strip().lower()
     return mode in {"state_only", "state-only", "metadata_only", "metadata-only", "meta"}
 
 
 def _is_route_notify_mode() -> bool:
-    return os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "send").strip().lower() == "route"
+    return os.environ.get("AGENT_CHAT_NOTIFY_MODE", "send").strip().lower() == "route"
 
 
 def _env_bool(name: str, *, default: bool) -> bool:
@@ -634,7 +634,7 @@ def _env_bool(name: str, *, default: bool) -> bool:
 
 
 def _max_message_chars() -> int:
-    value = os.environ.get("CODEX_IMESSAGE_MAX_LEN", "").strip()
+    value = os.environ.get("AGENT_IMESSAGE_MAX_LEN", "").strip()
     if not value:
         return 1800
     try:
@@ -914,12 +914,12 @@ def main(argv: list[str]) -> int:
     if args.kind not in {"attention", "route"}:
         return 0
 
-    recipient_raw = args.to or os.environ.get("CODEX_IMESSAGE_TO")
+    recipient_raw = args.to or os.environ.get("AGENT_IMESSAGE_TO")
     if not recipient_raw:
         return 0
     recipient = _normalize_recipient(recipient_raw)
 
-    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     history_path = Path(os.environ.get("CODEX_HISTORY_PATH", str(codex_home / "history.jsonl")))
     assistant_response = _read_last_assistant_text(codex_home=codex_home)
     request = assistant_response
@@ -996,8 +996,8 @@ def main(argv: list[str]) -> int:
     max_len = _max_message_chars()
     queue_path = Path(
         os.environ.get(
-            "CODEX_IMESSAGE_QUEUE",
-            str(codex_home / "tmp" / "imessage_queue.jsonl"),
+            "AGENT_CHAT_QUEUE",
+            str(codex_home / "tmp" / "agent_chat_queue.jsonl"),
         )
     )
 
@@ -1006,7 +1006,7 @@ def main(argv: list[str]) -> int:
         scope = session_id or cwd_full or "unknown"
         call_id = _extract_call_id(notify_payload)
 
-        if _env_bool("CODEX_IMESSAGE_FINAL_STATUS_ENABLED", default=True) and _is_completion_event(notify_payload):
+        if _env_bool("AGENT_CHAT_FINAL_STATUS_ENABLED", default=True) and _is_completion_event(notify_payload):
             _send_routed_final_status(
                 codex_home=codex_home,
                 recipient=recipient,
@@ -1030,7 +1030,7 @@ def main(argv: list[str]) -> int:
             if parsed_questions:
                 questions_text = _format_request_user_input_for_imessage(parsed_questions)
 
-        if not questions_text and not _env_bool("CODEX_IMESSAGE_NOTIFY_FALLBACK_INPUT", default=True):
+        if not questions_text and not _env_bool("AGENT_CHAT_NOTIFY_FALLBACK_INPUT", default=True):
             return 0
 
         prompt_text = questions_text or args.need

@@ -15,7 +15,7 @@ class TestCleanupDocs(unittest.TestCase):
             "python3 /ABSOLUTE/PATH/TO/agent-chat/agent_chat_control_plane.py doctor",
             text,
         )
-        self.assertIn("agent-chat-control-plane doctor", text)
+        self.assertIn("agent-chat doctor", text)
         self.assertIn("tccutil reset SystemPolicyAllFiles", text)
         self.assertIn("org.python.python", text)
         self.assertNotIn("com.mitchellh.", text)

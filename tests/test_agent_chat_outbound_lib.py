@@ -173,7 +173,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_ROLES": "assistant", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "0"},
+                {"AGENT_CHAT_MIRROR_ROLES": "assistant", "AGENT_CHAT_ONLY_NEEDS_INPUT": "0"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -182,7 +182,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -248,7 +248,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -257,7 +257,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -324,9 +324,9 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "CODEX_IMESSAGE_MIRROR_ROLES": "assistant",
-                    "CODEX_IMESSAGE_MIRROR_TOOLS": "1",
-                    "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "0",
+                    "AGENT_CHAT_MIRROR_ROLES": "assistant",
+                    "AGENT_CHAT_MIRROR_TOOLS": "1",
+                    "AGENT_CHAT_ONLY_NEEDS_INPUT": "0",
                 },
                 clear=False,
             ):
@@ -336,7 +336,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -393,7 +393,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
             seen = {f"{str(session_path)}:call_approve_1": 1}
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -402,7 +402,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -459,7 +459,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
             seen: dict[str, int] = {}
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -468,7 +468,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -536,7 +536,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -545,7 +545,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -610,7 +610,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", side_effect=_capture_send_structured):
@@ -619,7 +619,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -671,7 +671,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", return_value=None):
@@ -689,8 +689,8 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         seen_needs_input_call_ids={},
                     )
 
-            last_attention_path = codex_home / "tmp" / "imessage_last_attention.json"
-            attention_index_path = codex_home / "tmp" / "imessage_attention_index.json"
+            last_attention_path = codex_home / "tmp" / "agent_chat_last_attention.json"
+            attention_index_path = codex_home / "tmp" / "agent_chat_attention_index.json"
             self.assertTrue(last_attention_path.exists())
             self.assertTrue(attention_index_path.exists())
 
@@ -735,9 +735,9 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "CODEX_IMESSAGE_MIRROR_ROLES": "assistant",
-                    "CODEX_IMESSAGE_MIRROR_TOOLS": "1",
-                    "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "0",
+                    "AGENT_CHAT_MIRROR_ROLES": "assistant",
+                    "AGENT_CHAT_MIRROR_TOOLS": "1",
+                    "AGENT_CHAT_ONLY_NEEDS_INPUT": "0",
                 },
                 clear=False,
             ):
@@ -747,7 +747,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         session_path=session_path,
                         offset=0,
                         recipient="+15551234567",
-                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("CODEX_IMESSAGE_MIRROR_ROLES")),  # type: ignore[attr-defined]
+                        mirror_roles=bridge._parse_mirror_roles(os.environ.get("AGENT_CHAT_MIRROR_ROLES")),  # type: ignore[attr-defined]
                         max_message_chars=1800,
                         dry_run=True,
                         queue_path=queue_path,
@@ -756,8 +756,8 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         seen_needs_input_call_ids={},
                     )
 
-            self.assertFalse((codex_home / "tmp" / "imessage_last_attention.json").exists())
-            self.assertFalse((codex_home / "tmp" / "imessage_attention_index.json").exists())
+            self.assertFalse((codex_home / "tmp" / "agent_chat_last_attention.json").exists())
+            self.assertFalse((codex_home / "tmp" / "agent_chat_attention_index.json").exists())
 
     def test_process_session_path_missing_session_id_does_not_create_index_entry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -800,7 +800,7 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"CODEX_IMESSAGE_MIRROR_TOOLS": "1", "CODEX_IMESSAGE_ONLY_NEEDS_INPUT": "1"},
+                {"AGENT_CHAT_MIRROR_TOOLS": "1", "AGENT_CHAT_ONLY_NEEDS_INPUT": "1"},
                 clear=False,
             ):
                 with mock.patch.object(bridge, "_send_structured", return_value=None):
@@ -818,8 +818,8 @@ class TestAgentChatOutboundBridge(unittest.TestCase):
                         seen_needs_input_call_ids={},
                     )
 
-            last_attention_path = codex_home / "tmp" / "imessage_last_attention.json"
-            attention_index_path = codex_home / "tmp" / "imessage_attention_index.json"
+            last_attention_path = codex_home / "tmp" / "agent_chat_last_attention.json"
+            attention_index_path = codex_home / "tmp" / "agent_chat_attention_index.json"
             self.assertTrue(last_attention_path.exists())
             last_attention = json.loads(last_attention_path.read_text(encoding="utf-8"))
             self.assertIsNone(last_attention.get("session_id"))

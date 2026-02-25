@@ -116,9 +116,9 @@ _CLAUDE_BIN_CANDIDATES = (
     "/usr/local/bin/claude",
     "/usr/bin/claude",
 )
-_DEFAULT_LAUNCHD_LABEL = "com.agent-chat-control-plane"
-_INBOUND_DISABLED_LOG_MARKER = "[imessage-control-plane] inbound disabled:"
-_INBOUND_RESTORED_LOG_MARKER = "[imessage-control-plane] inbound chat.db access restored."
+_DEFAULT_LAUNCHD_LABEL = "com.agent-chat"
+_INBOUND_DISABLED_LOG_MARKER = "[agent-chat] inbound disabled:"
+_INBOUND_RESTORED_LOG_MARKER = "[agent-chat] inbound chat.db access restored."
 _TCC_FDA_SERVICE = "SystemPolicyAllFiles"
 _TCC_MISMATCH_SUBSTRING = "Failed to match existing code requirement for subject"
 _MAX_DOCTOR_PANE_SAMPLE = 8
@@ -174,7 +174,7 @@ def _warn_chat_db_once(*, detail: str) -> None:
     _chat_db_last_warning_ts = now
     _warn_stderr(
         (
-            "[imessage-control-plane] inbound disabled: "
+            "[agent-chat] inbound disabled: "
             f"{text}. Grant Full Disk Access for the launchd runtime app or Python binary "
             "or run control plane from a Terminal/tmux session."
         )
@@ -192,7 +192,7 @@ def _clear_chat_db_warning() -> None:
 
 
 def _resolve_resume_timeout_s() -> float | None:
-    raw = os.environ.get("CODEX_IMESSAGE_RESUME_TIMEOUT_S", "").strip()
+    raw = os.environ.get("AGENT_CHAT_RESUME_TIMEOUT_S", "").strip()
     if not raw:
         return _DEFAULT_RESUME_TIMEOUT_S
     try:
@@ -208,7 +208,7 @@ def _normalize_agent(*, agent: str | None) -> str:
 
 
 def _current_agent() -> str:
-    return _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
+    return _normalize_agent(agent=os.environ.get("AGENT_CHAT_AGENT"))
 
 
 def _agent_display_name(*, agent: str | None = None) -> str:
@@ -234,7 +234,7 @@ def _agent_home_path(*, agent: str | None = None) -> Path:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
     if normalized == "claude":
         return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
 
 
 def _normalize_fs_path(*, path: Path | str) -> str:
@@ -244,16 +244,16 @@ def _normalize_fs_path(*, path: Path | str) -> str:
 def _lookup_agent_home_path(*, agent: str, current_home: Path) -> Path:
     normalized = _normalize_agent(agent=agent)
     if normalized == "claude":
-        override = os.environ.get("CODEX_IMESSAGE_CLAUDE_HOME", "").strip()
+        override = os.environ.get("AGENT_CHAT_CLAUDE_HOME", "").strip()
         if override:
             return Path(override)
         return _agent_home_path(agent="claude")
 
-    override = os.environ.get("CODEX_IMESSAGE_CODEX_HOME", "").strip()
+    override = os.environ.get("AGENT_CHAT_CODEX_HOME", "").strip()
     if override:
         return Path(override)
 
-    codex_home_env = os.environ.get("CODEX_HOME", "").strip()
+    codex_home_env = os.environ.get("AGENT_CHAT_HOME", "").strip()
     if not codex_home_env:
         return Path.home() / ".codex"
 
@@ -289,11 +289,11 @@ def _session_path_env_keys(*, agent: str | None = None) -> tuple[str, ...]:
 
 
 def _shared_control_state_home(*, codex_home: Path) -> Path:
-    override = os.environ.get("CODEX_IMESSAGE_STATE_HOME", "").strip()
+    override = os.environ.get("AGENT_CHAT_STATE_HOME", "").strip()
     if override:
         return Path(override)
 
-    codex_home_env = os.environ.get("CODEX_HOME", "").strip()
+    codex_home_env = os.environ.get("AGENT_CHAT_HOME", "").strip()
     if not codex_home_env:
         if _current_agent() != "codex":
             try:
@@ -312,15 +312,15 @@ def _control_lock_path(*, codex_home: Path) -> Path:
     shared_home = _shared_control_state_home(codex_home=codex_home)
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_CONTROL_LOCK",
-            str(shared_home / "tmp" / "imessage_control_plane.lock"),
+            "AGENT_CHAT_CONTROL_LOCK",
+            str(shared_home / "tmp" / "agent_chat_control_plane.lock"),
         )
     )
 
 
 def _chat_db_path(*, codex_home: Path) -> Path:
     _ = codex_home
-    env_path = os.environ.get("CODEX_IMESSAGE_CHAT_DB", "").strip()
+    env_path = os.environ.get("AGENT_IMESSAGE_CHAT_DB", "").strip()
     if env_path:
         return Path(env_path)
 
@@ -501,24 +501,24 @@ def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
     items: list[str] = []
 
     if recipient_text:
-        items.append(f"CODEX_IMESSAGE_TO={shlex.quote(recipient_text)}")
-    items.append(f"CODEX_IMESSAGE_AGENT={shlex.quote(agent_text)}")
+        items.append(f"AGENT_IMESSAGE_TO={shlex.quote(recipient_text)}")
+    items.append(f"AGENT_CHAT_AGENT={shlex.quote(agent_text)}")
 
     transport_mode = _transport_mode()
     if transport_mode != "imessage":
-        items.append(f"CODEX_IMESSAGE_TRANSPORT={shlex.quote(transport_mode)}")
+        items.append(f"AGENT_CHAT_TRANSPORT={shlex.quote(transport_mode)}")
 
     if _transport_telegram_enabled(mode=transport_mode):
         token = _telegram_bot_token()
         chat_id = _telegram_chat_id()
         if token:
-            items.append(f"CODEX_TELEGRAM_BOT_TOKEN={shlex.quote(token)}")
+            items.append(f"AGENT_TELEGRAM_BOT_TOKEN={shlex.quote(token)}")
         if chat_id:
-            items.append(f"CODEX_TELEGRAM_CHAT_ID={shlex.quote(chat_id)}")
-        api_base_raw = os.environ.get("CODEX_TELEGRAM_API_BASE", "")
+            items.append(f"AGENT_TELEGRAM_CHAT_ID={shlex.quote(chat_id)}")
+        api_base_raw = os.environ.get("AGENT_TELEGRAM_API_BASE", "")
         api_base = api_base_raw.strip() if isinstance(api_base_raw, str) else ""
         if api_base:
-            items.append(f"CODEX_TELEGRAM_API_BASE={shlex.quote(api_base)}")
+            items.append(f"AGENT_TELEGRAM_API_BASE={shlex.quote(api_base)}")
 
     return " ".join(items)
 
@@ -671,7 +671,7 @@ def _run_setup_notify_hook(
 
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
     if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
-        sys.stdout.write("CODEX_IMESSAGE_TO is required. Provide --recipient or set CODEX_IMESSAGE_TO.\n")
+        sys.stdout.write("AGENT_IMESSAGE_TO is required. Provide --recipient or set AGENT_IMESSAGE_TO.\n")
         return 1
 
     python_text = _resolve_python_bin_for_notify_hook(python_bin=python_bin)
@@ -798,8 +798,8 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 def _registry_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_SESSION_REGISTRY",
-            str(codex_home / "tmp" / "imessage_session_registry.json"),
+            "AGENT_CHAT_SESSION_REGISTRY",
+            str(codex_home / "tmp" / "agent_chat_session_registry.json"),
         )
     )
 
@@ -807,8 +807,8 @@ def _registry_path(*, codex_home: Path) -> Path:
 def _message_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_MESSAGE_SESSION_INDEX",
-            str(codex_home / "tmp" / "imessage_message_session_index.json"),
+            "AGENT_CHAT_MESSAGE_SESSION_INDEX",
+            str(codex_home / "tmp" / "agent_chat_message_session_index.json"),
         )
     )
 
@@ -816,8 +816,8 @@ def _message_index_path(*, codex_home: Path) -> Path:
 def _outbound_cursor_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_CONTROL_OUTBOUND_CURSOR",
-            str(codex_home / "tmp" / "imessage_control_outbound_cursor.json"),
+            "AGENT_CHAT_CONTROL_OUTBOUND_CURSOR",
+            str(codex_home / "tmp" / "agent_chat_control_outbound_cursor.json"),
         )
     )
 
@@ -826,7 +826,7 @@ def _inbound_cursor_path(*, codex_home: Path) -> Path:
     shared_home = _shared_control_state_home(codex_home=codex_home)
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_INBOUND_CURSOR",
+            "AGENT_IMESSAGE_INBOUND_CURSOR",
             str(shared_home / "tmp" / "imessage_inbound_cursor.json"),
         )
     )
@@ -835,14 +835,14 @@ def _inbound_cursor_path(*, codex_home: Path) -> Path:
 def _queue_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_QUEUE",
-            str(codex_home / "tmp" / "imessage_queue.jsonl"),
+            "AGENT_CHAT_QUEUE",
+            str(codex_home / "tmp" / "agent_chat_queue.jsonl"),
         )
     )
 
 
 def _transport_mode() -> str:
-    raw = os.environ.get("CODEX_IMESSAGE_TRANSPORT", "imessage")
+    raw = os.environ.get("AGENT_CHAT_TRANSPORT", "imessage")
     mode = raw.strip().lower() if isinstance(raw, str) else "imessage"
     if mode in {"imessage", "telegram", "both"}:
         return mode
@@ -860,25 +860,25 @@ def _transport_telegram_enabled(*, mode: str | None = None) -> bool:
 
 
 def _telegram_bot_token() -> str | None:
-    raw = os.environ.get("CODEX_TELEGRAM_BOT_TOKEN", "")
+    raw = os.environ.get("AGENT_TELEGRAM_BOT_TOKEN", "")
     token = raw.strip() if isinstance(raw, str) else ""
     return token or None
 
 
 def _telegram_chat_id() -> str | None:
-    raw = os.environ.get("CODEX_TELEGRAM_CHAT_ID", "")
+    raw = os.environ.get("AGENT_TELEGRAM_CHAT_ID", "")
     chat_id = raw.strip() if isinstance(raw, str) else ""
     return chat_id or None
 
 
 def _telegram_bot_token_setup_instructions() -> str:
     return (
-        "CODEX_TELEGRAM_BOT_TOKEN is required when CODEX_IMESSAGE_TRANSPORT includes Telegram.\n"
+        "AGENT_TELEGRAM_BOT_TOKEN is required when AGENT_CHAT_TRANSPORT includes Telegram.\n"
         "How to get a bot token:\n"
         "  1. Open Telegram and chat with @BotFather.\n"
         "  2. Run /newbot to create a bot (or /token for an existing bot).\n"
         "  3. Copy the HTTP API token and export:\n"
-        "     CODEX_TELEGRAM_BOT_TOKEN=\"<bot token>\"\n"
+        "     AGENT_TELEGRAM_BOT_TOKEN=\"<bot token>\"\n"
     )
 
 
@@ -891,7 +891,7 @@ def _validate_telegram_setup_requirements(*, transport_mode: str) -> str | None:
 
 
 def _telegram_api_base() -> str:
-    raw = os.environ.get("CODEX_TELEGRAM_API_BASE", _DEFAULT_TELEGRAM_API_BASE)
+    raw = os.environ.get("AGENT_TELEGRAM_API_BASE", _DEFAULT_TELEGRAM_API_BASE)
     base = raw.strip() if isinstance(raw, str) else _DEFAULT_TELEGRAM_API_BASE
     if not base:
         base = _DEFAULT_TELEGRAM_API_BASE
@@ -902,7 +902,7 @@ def _telegram_inbound_cursor_path(*, codex_home: Path) -> Path:
     shared_home = _shared_control_state_home(codex_home=codex_home)
     return Path(
         os.environ.get(
-            "CODEX_TELEGRAM_INBOUND_CURSOR",
+            "AGENT_TELEGRAM_INBOUND_CURSOR",
             str(shared_home / "tmp" / "telegram_inbound_cursor.json"),
         )
     )
@@ -1015,8 +1015,8 @@ def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id:
 def _attention_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_ATTENTION_INDEX",
-            str(codex_home / "tmp" / "imessage_attention_index.json"),
+            "AGENT_CHAT_ATTENTION_INDEX",
+            str(codex_home / "tmp" / "agent_chat_attention_index.json"),
         )
     )
 
@@ -1024,8 +1024,8 @@ def _attention_index_path(*, codex_home: Path) -> Path:
 def _last_attention_state_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_LAST_ATTENTION",
-            str(codex_home / "tmp" / "imessage_last_attention.json"),
+            "AGENT_CHAT_LAST_ATTENTION",
+            str(codex_home / "tmp" / "agent_chat_last_attention.json"),
         )
     )
 
@@ -1353,7 +1353,7 @@ def _drain_fallback_queue(
         except Exception as exc:
             stats["error"] = f"requeue_failed:{type(exc).__name__}"
             _warn_stderr(
-                "[imessage-control-plane] fallback queue requeue failed: "
+                "[agent-chat] fallback queue requeue failed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -1385,8 +1385,8 @@ def _launchd_service_loaded(*, label: str) -> tuple[bool, str]:
 def _launchd_err_log_path() -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_LAUNCHD_ERR_LOG",
-            str(Path.home() / "Library" / "Logs" / "agent-chat-control-plane.launchd.err.log"),
+            "AGENT_CHAT_LAUNCHD_ERR_LOG",
+            str(Path.home() / "Library" / "Logs" / "agent-chat.launchd.err.log"),
         )
     )
 
@@ -1405,7 +1405,7 @@ def _recipient_from_launchagent_plist(*, label: str) -> str | None:
     env = data.get("EnvironmentVariables")
     if not isinstance(env, dict):
         return None
-    raw = env.get("CODEX_IMESSAGE_TO")
+    raw = env.get("AGENT_IMESSAGE_TO")
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -1683,8 +1683,8 @@ def _launchagent_plist_path(*, label: str) -> Path:
 def _launchd_log_paths() -> tuple[Path, Path]:
     logs_dir = Path.home() / "Library" / "Logs"
     return (
-        logs_dir / "agent-chat-control-plane.launchd.out.log",
-        logs_dir / "agent-chat-control-plane.launchd.err.log",
+        logs_dir / "agent-chat.launchd.out.log",
+        logs_dir / "agent-chat.launchd.err.log",
     )
 
 
@@ -1697,19 +1697,19 @@ def _build_launchagent_plist(
     recipient: str,
 ) -> dict[str, Any]:
     out_log, err_log = _launchd_log_paths()
-    notify_mode = os.environ.get("CODEX_IMESSAGE_NOTIFY_MODE", "route").strip() or "route"
+    notify_mode = os.environ.get("AGENT_CHAT_NOTIFY_MODE", "route").strip() or "route"
     agent = _current_agent()
     recipient_text = recipient.strip()
 
     env_vars: dict[str, str] = {
-        "CODEX_HOME": str(codex_home),
-        "CODEX_IMESSAGE_AGENT": agent,
-        "CODEX_IMESSAGE_NOTIFY_MODE": notify_mode,
-        "CODEX_IMESSAGE_LAUNCHD_LABEL": label,
+        "AGENT_CHAT_HOME": str(codex_home),
+        "AGENT_CHAT_AGENT": agent,
+        "AGENT_CHAT_NOTIFY_MODE": notify_mode,
+        "AGENT_CHAT_LAUNCHD_LABEL": label,
         "PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
     }
     if recipient_text:
-        env_vars["CODEX_IMESSAGE_TO"] = recipient_text
+        env_vars["AGENT_IMESSAGE_TO"] = recipient_text
 
     if agent == "claude":
         env_vars["CLAUDE_HOME"] = str(codex_home)
@@ -1719,26 +1719,26 @@ def _build_launchagent_plist(
         "CLAUDE_SETTINGS_PATH",
         "CLAUDE_CONFIG_PATH",
         "CLAUDE_PROJECTS_PATH",
-        "CODEX_IMESSAGE_CHAT_DB",
-        "CODEX_IMESSAGE_INBOUND_POLL_S",
-        "CODEX_IMESSAGE_INBOUND_RETRY_S",
-        "CODEX_IMESSAGE_MAX_LEN",
-        "CODEX_IMESSAGE_QUEUE_DRAIN_LIMIT",
-        "CODEX_IMESSAGE_RESUME_TIMEOUT_S",
-        "CODEX_IMESSAGE_TMUX_SOCKET",
-        "CODEX_IMESSAGE_STRICT_TMUX",
-        "CODEX_IMESSAGE_REQUIRE_SESSION_REF",
-        "CODEX_IMESSAGE_TMUX_NEW_SESSION_NAME",
-        "CODEX_IMESSAGE_TMUX_WINDOW_PREFIX",
-        "CODEX_IMESSAGE_CLAUDE_BIN",
-        "CODEX_IMESSAGE_CODEX_BIN",
-        "CODEX_IMESSAGE_SETUP_PERMISSIONS_TIMEOUT_S",
-        "CODEX_IMESSAGE_SETUP_PERMISSIONS_POLL_S",
-        "CODEX_IMESSAGE_TRANSPORT",
-        "CODEX_TELEGRAM_BOT_TOKEN",
-        "CODEX_TELEGRAM_CHAT_ID",
-        "CODEX_TELEGRAM_API_BASE",
-        "CODEX_TELEGRAM_INBOUND_CURSOR",
+        "AGENT_IMESSAGE_CHAT_DB",
+        "AGENT_CHAT_INBOUND_POLL_S",
+        "AGENT_CHAT_INBOUND_RETRY_S",
+        "AGENT_IMESSAGE_MAX_LEN",
+        "AGENT_CHAT_QUEUE_DRAIN_LIMIT",
+        "AGENT_CHAT_RESUME_TIMEOUT_S",
+        "AGENT_CHAT_TMUX_SOCKET",
+        "AGENT_CHAT_STRICT_TMUX",
+        "AGENT_CHAT_REQUIRE_SESSION_REF",
+        "AGENT_CHAT_TMUX_NEW_SESSION_NAME",
+        "AGENT_CHAT_TMUX_WINDOW_PREFIX",
+        "AGENT_CHAT_CLAUDE_BIN",
+        "AGENT_CHAT_CODEX_BIN",
+        "AGENT_IMESSAGE_SETUP_PERMISSIONS_TIMEOUT_S",
+        "AGENT_IMESSAGE_SETUP_PERMISSIONS_POLL_S",
+        "AGENT_CHAT_TRANSPORT",
+        "AGENT_TELEGRAM_BOT_TOKEN",
+        "AGENT_TELEGRAM_CHAT_ID",
+        "AGENT_TELEGRAM_API_BASE",
+        "AGENT_TELEGRAM_INBOUND_CURSOR",
     )
     for key in passthrough:
         raw = os.environ.get(key)
@@ -1927,7 +1927,7 @@ def _run_setup_launchd(
 
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
     if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
-        sys.stdout.write("CODEX_IMESSAGE_TO is required. Provide --recipient or set CODEX_IMESSAGE_TO.\n")
+        sys.stdout.write("AGENT_IMESSAGE_TO is required. Provide --recipient or set AGENT_IMESSAGE_TO.\n")
         return 1
 
     label_text = label.strip() or _DEFAULT_LAUNCHD_LABEL
@@ -2237,7 +2237,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     telegram_enabled = _transport_telegram_enabled(mode=transport_mode)
     telegram_chat_id = _telegram_chat_id()
     telegram_token_present = bool(_telegram_bot_token())
-    launchd_label = os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
+    launchd_label = os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
     launchd_err_log = _launchd_err_log_path()
     launchd_inbound_warning = _launchd_inbound_warning_active(path=launchd_err_log)
@@ -2283,7 +2283,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     strict_tmux = _strict_tmux_enabled()
     require_session_ref = _require_session_ref_enabled(strict_tmux=strict_tmux)
     preferred_tmux_socket = _normalize_tmux_socket(
-        tmux_socket=os.environ.get("CODEX_IMESSAGE_TMUX_SOCKET")
+        tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET")
     ) or _choose_registry_tmux_socket(registry=registry)
     active_codex_panes = _tmux_active_codex_panes(tmux_socket=preferred_tmux_socket)
     last_dispatch_error = registry.get("last_dispatch_error")
@@ -2296,8 +2296,8 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     reply_cursor_raw = _read_json(
         Path(
             os.environ.get(
-                "CODEX_IMESSAGE_REPLY_CURSOR",
-                str(codex_home / "tmp" / "imessage_reply_cursor.json"),
+                "AGENT_IMESSAGE_REPLY_CURSOR",
+                str(codex_home / "tmp" / "agent_chat_reply_cursor.json"),
             )
         )
     ) or {}
@@ -2315,11 +2315,11 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
             recipient_text = fallback_recipient
     health: list[str] = []
     if imessage_enabled and not recipient_text:
-        health.append("missing recipient (CODEX_IMESSAGE_TO)")
+        health.append("missing recipient (AGENT_IMESSAGE_TO)")
     if telegram_enabled and not telegram_token_present:
-        health.append("missing Telegram bot token (CODEX_TELEGRAM_BOT_TOKEN)")
+        health.append("missing Telegram bot token (AGENT_TELEGRAM_BOT_TOKEN)")
     if telegram_enabled and not (isinstance(telegram_chat_id, str) and telegram_chat_id.strip()):
-        health.append("missing Telegram chat id (CODEX_TELEGRAM_CHAT_ID)")
+        health.append("missing Telegram chat id (AGENT_TELEGRAM_CHAT_ID)")
     if not launchd_loaded:
         health.append("launchd service not loaded")
     if launchd_inbound_warning:
@@ -3491,16 +3491,16 @@ def _env_enabled(name: str, *, default: bool) -> bool:
 
 
 def _strict_tmux_enabled() -> bool:
-    return _env_enabled("CODEX_IMESSAGE_STRICT_TMUX", default=True)
+    return _env_enabled("AGENT_CHAT_STRICT_TMUX", default=True)
 
 
 def _require_session_ref_enabled(*, strict_tmux: bool) -> bool:
-    return _env_enabled("CODEX_IMESSAGE_REQUIRE_SESSION_REF", default=strict_tmux)
+    return _env_enabled("AGENT_CHAT_REQUIRE_SESSION_REF", default=strict_tmux)
 
 
 def _tmux_ack_timeout_s() -> float:
     fallback = getattr(reply, "_DEFAULT_TMUX_USER_ACK_TIMEOUT_S", _DEFAULT_TMUX_ACK_TIMEOUT_S)
-    raw = os.environ.get("CODEX_IMESSAGE_TMUX_ACK_TIMEOUT_S", "").strip()
+    raw = os.environ.get("AGENT_CHAT_TMUX_ACK_TIMEOUT_S", "").strip()
     if not raw:
         return float(fallback)
     try:
@@ -3591,7 +3591,7 @@ def _tmux_socket_from_env() -> str | None:
 
 
 def _resolve_tmux_bin() -> str:
-    override = os.environ.get("CODEX_IMESSAGE_TMUX_BIN")
+    override = os.environ.get("AGENT_CHAT_TMUX_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
 
@@ -3609,7 +3609,7 @@ def _resolve_tmux_bin() -> str:
 
 
 def _resolve_codex_bin() -> str:
-    override = os.environ.get("CODEX_IMESSAGE_CODEX_BIN")
+    override = os.environ.get("AGENT_CHAT_CODEX_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
 
@@ -3628,7 +3628,7 @@ def _resolve_codex_bin() -> str:
 
 
 def _resolve_claude_bin() -> str:
-    override = os.environ.get("CODEX_IMESSAGE_CLAUDE_BIN")
+    override = os.environ.get("AGENT_CHAT_CLAUDE_BIN")
     if isinstance(override, str) and override.strip():
         return override.strip()
 
@@ -3770,7 +3770,7 @@ def _tmux_session_exists(*, session_name: str, tmux_socket: str | None = None) -
 
 
 def _tmux_ensure_active_session(*, cwd: str | None, tmux_socket: str | None = None) -> tuple[str | None, str | None]:
-    raw_base = os.environ.get("CODEX_IMESSAGE_TMUX_NEW_SESSION_NAME", _DEFAULT_TMUX_NEW_SESSION_NAME)
+    raw_base = os.environ.get("AGENT_CHAT_TMUX_NEW_SESSION_NAME", _DEFAULT_TMUX_NEW_SESSION_NAME)
     base = raw_base.strip() if isinstance(raw_base, str) and raw_base.strip() else _DEFAULT_TMUX_NEW_SESSION_NAME
 
     # Keep all iMessage-driven tmux work in one canonical session.
@@ -3820,7 +3820,7 @@ def _tmux_start_codex_window(
     if not isinstance(session_name, str) or not session_name.strip():
         return None, None, "Invalid tmux session name."
 
-    raw_prefix = os.environ.get("CODEX_IMESSAGE_TMUX_WINDOW_PREFIX", _DEFAULT_TMUX_WINDOW_PREFIX)
+    raw_prefix = os.environ.get("AGENT_CHAT_TMUX_WINDOW_PREFIX", _DEFAULT_TMUX_WINDOW_PREFIX)
     prefix = raw_prefix.strip() if isinstance(raw_prefix, str) and raw_prefix.strip() else _DEFAULT_TMUX_WINDOW_PREFIX
     label_token = _sanitize_tmux_window_label(label=label)
     ts = time.strftime("%H%M%S")
@@ -3828,9 +3828,9 @@ def _tmux_start_codex_window(
     agent = _current_agent()
     agent_bin = _resolve_agent_bin(agent=agent)
     if agent == "claude":
-        launch_cmd = f"CLAUDE_IMESSAGE_REPLY=1 {shlex.quote(agent_bin)}"
+        launch_cmd = f"CLAUDE_CHAT_REPLY=1 {shlex.quote(agent_bin)}"
     else:
-        launch_cmd = f"CODEX_IMESSAGE_REPLY=1 {shlex.quote(agent_bin)} -a never -s danger-full-access"
+        launch_cmd = f"AGENT_CHAT_REPLY=1 {shlex.quote(agent_bin)} -a never -s danger-full-access"
 
     for i in range(0, 64):
         window_name = base_window_name if i == 0 else f"{base_window_name}-{i}"
@@ -4221,7 +4221,7 @@ def _tmux_discover_codex_pane_for_session(
 
 
 def _tmux_routing_enabled() -> bool:
-    raw = os.environ.get("CODEX_IMESSAGE_ROUTE_VIA_TMUX", "1").strip().lower()
+    raw = os.environ.get("AGENT_CHAT_ROUTE_VIA_TMUX", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
@@ -4558,7 +4558,7 @@ def _recover_session_record_from_disk(
     if isinstance(cwd, str) and cwd.strip():
         fields["cwd"] = cwd.strip()
 
-    preferred_socket = _normalize_tmux_socket(tmux_socket=os.environ.get("CODEX_IMESSAGE_TMUX_SOCKET"))
+    preferred_socket = _normalize_tmux_socket(tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET"))
     if preferred_socket is None and isinstance(registry, dict):
         preferred_socket = _choose_registry_tmux_socket(registry=registry)
     if isinstance(preferred_socket, str) and preferred_socket.strip():
@@ -4577,11 +4577,11 @@ def _session_agent_from_record(*, session_rec: dict[str, Any] | None) -> str | N
 
 
 def _session_registry_path_for_home(*, home: Path) -> Path:
-    return home / "tmp" / "imessage_session_registry.json"
+    return home / "tmp" / "agent_chat_session_registry.json"
 
 
 def _message_index_path_for_home(*, home: Path) -> Path:
-    return home / "tmp" / "imessage_message_session_index.json"
+    return home / "tmp" / "agent_chat_message_session_index.json"
 
 
 def _lookup_agent_by_session_id_across_homes(
@@ -4805,7 +4805,7 @@ def _create_new_session(
         out_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    out_path = out_dir / f"imessage_new_session_{int(time.time())}_{os.getpid()}.txt"
+    out_path = out_dir / f"agent_chat_new_session_{int(time.time())}_{os.getpid()}.txt"
 
     if agent == "claude":
         cmd = [_resolve_agent_bin(agent=agent), "-p", prompt]
@@ -4830,7 +4830,7 @@ def _create_new_session(
             stderr=subprocess.DEVNULL,
             check=False,
             text=True,
-            env={**os.environ, "CODEX_IMESSAGE_REPLY": "1", "CLAUDE_IMESSAGE_REPLY": "1"},
+            env={**os.environ, "AGENT_CHAT_REPLY": "1", "CLAUDE_CHAT_REPLY": "1"},
         )
     except Exception:
         return None, None, "Failed to start new session."
@@ -5041,14 +5041,14 @@ def _process_inbound_replies(
     message_index = _load_message_index(codex_home=codex_home)
     attention_index = _load_attention_index(codex_home=codex_home)
     last_attention_state = _load_last_attention_state(codex_home=codex_home)
-    auto_create_on_missing = _env_enabled("CODEX_IMESSAGE_AUTO_CREATE_ON_MISSING", default=True)
+    auto_create_on_missing = _env_enabled("AGENT_CHAT_AUTO_CREATE_ON_MISSING", default=True)
     strict_tmux = _strict_tmux_enabled()
     require_session_ref = _require_session_ref_enabled(strict_tmux=strict_tmux)
 
     def _trace(message: str) -> None:
         if not trace:
             return
-        _warn_stderr(f"[imessage-control-plane][trace] {message}")
+        _warn_stderr(f"[agent-chat][trace] {message}")
 
     last_rowid = after_rowid
 
@@ -5134,7 +5134,7 @@ def _process_inbound_replies(
             continue
 
         if action == "new":
-            allow_new = os.environ.get("CODEX_IMESSAGE_ENABLE_NEW_SESSION", "1").strip() not in {
+            allow_new = os.environ.get("AGENT_CHAT_ENABLE_NEW_SESSION", "1").strip() not in {
                 "0",
                 "false",
                 "False",
@@ -5235,7 +5235,7 @@ def _process_inbound_replies(
                 fallback_cwd = _default_new_session_cwd()
                 auto_create_label: str | None = None
                 preferred_tmux_socket = _normalize_tmux_socket(
-                    tmux_socket=os.environ.get("CODEX_IMESSAGE_TMUX_SOCKET")
+                    tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET")
                 ) or _choose_registry_tmux_socket(registry=registry)
                 if action == "resume":
                     raw_ref = cmd.get("session_ref", "")
@@ -5831,7 +5831,7 @@ def _ensure_inbound_cursor_seed(
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    default_agent = _normalize_agent(agent=os.environ.get("CODEX_IMESSAGE_AGENT") or os.environ.get("IMESSAGE_AGENT"))
+    default_agent = _normalize_agent(agent=os.environ.get("AGENT_CHAT_AGENT"))
 
     def _add_agent_arg(cmd_parser: argparse.ArgumentParser) -> None:
         cmd_parser.add_argument(
@@ -5843,7 +5843,7 @@ def main(argv: list[str]) -> int:
 
     run = sub.add_parser("run", help="Run control plane forever")
     _add_agent_arg(run)
-    run.add_argument("--poll", type=float, default=float(os.environ.get("CODEX_IMESSAGE_INBOUND_POLL_S", "0.5")))
+    run.add_argument("--poll", type=float, default=float(os.environ.get("AGENT_CHAT_INBOUND_POLL_S", "0.5")))
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--trace", action="store_true", help="Emit per-message routing trace logs")
 
@@ -5868,7 +5868,7 @@ def main(argv: list[str]) -> int:
     setup_notify.add_argument(
         "--recipient",
         default="",
-        help="Destination phone/email; falls back to CODEX_IMESSAGE_TO",
+        help="Destination phone/email; falls back to AGENT_IMESSAGE_TO",
     )
     setup_notify.add_argument(
         "--python-bin",
@@ -5904,13 +5904,13 @@ def main(argv: list[str]) -> int:
     _add_agent_arg(setup_launchd)
     setup_launchd.add_argument(
         "--label",
-        default=os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL),
+        default=os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL),
         help=f"Launchd label (default {_DEFAULT_LAUNCHD_LABEL})",
     )
     setup_launchd.add_argument(
         "--recipient",
         default="",
-        help="Destination phone/email; falls back to CODEX_IMESSAGE_TO",
+        help="Destination phone/email; falls back to AGENT_IMESSAGE_TO",
     )
     setup_launchd.add_argument(
         "--python-bin",
@@ -5951,13 +5951,13 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     agent = _normalize_agent(agent=getattr(args, "agent", None))
-    os.environ["CODEX_IMESSAGE_AGENT"] = agent
+    os.environ["AGENT_CHAT_AGENT"] = agent
 
-    recipient_raw = os.environ.get("CODEX_IMESSAGE_TO")
+    recipient_raw = os.environ.get("AGENT_IMESSAGE_TO")
     codex_home = _agent_home_path(agent=agent)
     recipient = _normalize_recipient(recipient_raw) if isinstance(recipient_raw, str) and recipient_raw.strip() else ""
     transport_mode = _transport_mode()
-    trace_enabled = bool(getattr(args, "trace", False)) or _env_enabled("CODEX_IMESSAGE_TRACE", default=False)
+    trace_enabled = bool(getattr(args, "trace", False)) or _env_enabled("AGENT_CHAT_TRACE", default=False)
 
     if args.cmd == "doctor":
         doctor_recipient: str | None = recipient if recipient else recipient_raw
@@ -5975,7 +5975,7 @@ def main(argv: list[str]) -> int:
         )
     if args.cmd == "setup-permissions":
         launchd_label = (
-            os.environ.get("CODEX_IMESSAGE_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip()
+            os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip()
             or _DEFAULT_LAUNCHD_LABEL
         )
         launchd_runtime_python, launchd_permission_app = _launchd_runtime_targets_from_plist(
@@ -6032,7 +6032,7 @@ def main(argv: list[str]) -> int:
 
     if args.cmd in {"run", "once"}:
         _warn_stderr(
-            "[imessage-control-plane] startup "
+            "[agent-chat] startup "
             f"script={Path(__file__).resolve()} "
             f"python={sys.executable} "
             f"agent={agent} "
@@ -6042,7 +6042,7 @@ def main(argv: list[str]) -> int:
         )
 
     max_message_chars = _DEFAULT_MAX_MESSAGE_CHARS
-    env_max = os.environ.get("CODEX_IMESSAGE_MAX_LEN", "").strip()
+    env_max = os.environ.get("AGENT_IMESSAGE_MAX_LEN", "").strip()
     if env_max:
         try:
             max_message_chars = int(env_max)
@@ -6050,7 +6050,7 @@ def main(argv: list[str]) -> int:
             max_message_chars = _DEFAULT_MAX_MESSAGE_CHARS
 
     min_prefix = _DEFAULT_MIN_PREFIX
-    env_min_prefix = os.environ.get("CODEX_IMESSAGE_SESSION_REF_MIN", "").strip()
+    env_min_prefix = os.environ.get("AGENT_CHAT_SESSION_REF_MIN", "").strip()
     if env_min_prefix:
         try:
             min_prefix = max(1, int(env_min_prefix))
@@ -6059,7 +6059,7 @@ def main(argv: list[str]) -> int:
 
     resume_timeout_s = _resolve_resume_timeout_s()
     queue_drain_limit = _DEFAULT_QUEUE_DRAIN_LIMIT
-    env_queue_limit = os.environ.get("CODEX_IMESSAGE_QUEUE_DRAIN_LIMIT", "").strip()
+    env_queue_limit = os.environ.get("AGENT_CHAT_QUEUE_DRAIN_LIMIT", "").strip()
     if env_queue_limit:
         try:
             queue_drain_limit = max(0, int(env_queue_limit))
@@ -6081,7 +6081,7 @@ def main(argv: list[str]) -> int:
     telegram_update_id = _load_telegram_inbound_cursor(codex_home=codex_home)
 
     inbound_retry_s = 30.0
-    env_retry = os.environ.get("CODEX_IMESSAGE_INBOUND_RETRY_S", "").strip()
+    env_retry = os.environ.get("AGENT_CHAT_INBOUND_RETRY_S", "").strip()
     if env_retry:
         try:
             inbound_retry_s = max(0.0, float(env_retry))
@@ -6196,7 +6196,7 @@ def main(argv: list[str]) -> int:
             return 0
         except Exception as exc:
             _warn_stderr(
-                "[imessage-control-plane] cycle error: "
+                "[agent-chat] cycle error: "
                 f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             )
             time.sleep(float(args.poll))

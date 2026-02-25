@@ -5,7 +5,7 @@
 Run:
 
 ```bash
-python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$(command -v python3)"
 python3 agent_chat_control_plane.py setup-launchd
 python3 agent_chat_control_plane.py setup-permissions
 python3 agent_chat_control_plane.py doctor
@@ -27,17 +27,17 @@ Fix:
 - resolve and pin a 3.11+ interpreter explicitly:
   - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
   - `"$PYTHON_BIN" --version`
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
+  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 ### No iMessage sent
 
 Symptoms:
 - no outbound message arrives
-- queue file grows (`imessage_queue.jsonl`)
+- queue file grows (`agent_chat_queue.jsonl`)
 
 Checks:
-- verify `CODEX_IMESSAGE_TO` is set and normalized correctly
+- verify `AGENT_IMESSAGE_TO` is set and normalized correctly
 - ensure Messages is signed in
 - confirm Automation permission for terminal/runner + `osascript`
 
@@ -48,10 +48,10 @@ Symptoms:
 - inbound Telegram replies are not routed back
 
 Checks:
-- verify `CODEX_IMESSAGE_TRANSPORT` is `telegram` or `both`
-- verify `CODEX_TELEGRAM_BOT_TOKEN` is set and valid
-- verify `CODEX_TELEGRAM_CHAT_ID` is set to the expected chat
-- verify network access to `https://api.telegram.org` (or your `CODEX_TELEGRAM_API_BASE`)
+- verify `AGENT_CHAT_TRANSPORT` is `telegram` or `both`
+- verify `AGENT_TELEGRAM_BOT_TOKEN` is set and valid
+- verify `AGENT_TELEGRAM_CHAT_ID` is set to the expected chat
+- verify network access to `https://api.telegram.org` (or your `AGENT_TELEGRAM_API_BASE`)
 - create/refresh token with `@BotFather` and re-run `setup-notify-hook` / `setup-launchd`
 
 ### Inbound replies are ignored
@@ -75,10 +75,10 @@ Checks:
 - do not grant Full Disk Access to terminal apps unless `doctor` explicitly shows that terminal binary as `runtime_python`
 - `setup-permissions` now prefers launchd runtime targets from the installed plist, so its guidance should match `doctor`
 - if output says "shell can read chat.db, but launchd cannot", grant Full Disk Access to the shown app/binary itself (not only Terminal), then rerun `setup-launchd`
-- verify `CODEX_IMESSAGE_CHAT_DB` (if overridden) points to a readable DB
+- verify `AGENT_IMESSAGE_CHAT_DB` (if overridden) points to a readable DB
 - ensure `chat.db` exists at `~/Library/Messages/chat.db` when not overridden
 - if recurring failures happen after Python upgrades, use:
-  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --repair-tcc`
   - this resets stale Full Disk Access approvals for the runtime bundle id and reruns permission setup
 
 If launchd still cannot read `chat.db` after FDA was granted:
@@ -89,10 +89,10 @@ If launchd still cannot read `chat.db` after FDA was granted:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
   - re-enable Full Disk Access for `~/Applications/Codex iMessage Python.app`
 - rerun:
-  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO"`
   - `python3 agent_chat_control_plane.py doctor`
 - shortcut:
-  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO" --repair-tcc`
+  - `python3 agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --repair-tcc`
 
 ### `doctor` reports notify hook missing/mis-scoped or config parse errors
 
@@ -103,7 +103,7 @@ Symptoms:
 
 Fix:
 - run:
-  - `python3 agent_chat_control_plane.py setup-notify-hook --recipient "$CODEX_IMESSAGE_TO" --python-bin "$(command -v python3)"`
+  - `python3 agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$(command -v python3)"`
 - then re-run:
   - `python3 agent_chat_control_plane.py doctor`
 
@@ -112,7 +112,7 @@ Fix:
 Run:
 
 ```bash
-python3 agent_chat_control_plane.py setup-launchd --recipient "$CODEX_IMESSAGE_TO"
+python3 agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO"
 python3 agent_chat_control_plane.py doctor
 ```
 
@@ -158,7 +158,7 @@ Recovery:
 Checks:
 - run `python3 agent_chat_control_plane.py setup-launchd` to regenerate + reload plist from current environment
 - verify `ProgramArguments` paths in plist are absolute and current
-- set `CODEX_IMESSAGE_LAUNCHD_LABEL` to match your LaunchAgent label
+- set `AGENT_CHAT_LAUNCHD_LABEL` to match your LaunchAgent label
 - inspect launchd stdout/stderr logs configured in the plist
 
 ### Tmux routing fails
@@ -168,24 +168,24 @@ Symptoms:
 
 Checks:
 - verify target pane/session is still live
-- set/verify `CODEX_IMESSAGE_TMUX_SOCKET` if non-default socket is used
+- set/verify `AGENT_CHAT_TMUX_SOCKET` if non-default socket is used
 - test with explicit routing message: `@<session_ref> <instruction>`
-- temporarily relax strict mode for debugging: `CODEX_IMESSAGE_STRICT_TMUX=0`
+- temporarily relax strict mode for debugging: `AGENT_CHAT_STRICT_TMUX=0`
 
 ### Ambiguous replies or wrong target session
 
 Checks:
 - use explicit `@<session_ref>` addressing
-- set `CODEX_IMESSAGE_REQUIRE_SESSION_REF=1`
-- inspect registry/index files in `$CODEX_HOME/tmp`
+- set `AGENT_CHAT_REQUIRE_SESSION_REF=1`
+- inspect registry/index files in `$AGENT_CHAT_HOME/tmp`
 
 ## Useful Environment Overrides
 
-- `CODEX_IMESSAGE_TRACE=1`
-- `CODEX_IMESSAGE_INBOUND_POLL_S`
-- `CODEX_IMESSAGE_INBOUND_RETRY_S`
-- `CODEX_IMESSAGE_QUEUE_DRAIN_LIMIT`
-- `CODEX_IMESSAGE_MAX_LEN`
+- `AGENT_CHAT_TRACE=1`
+- `AGENT_CHAT_INBOUND_POLL_S`
+- `AGENT_CHAT_INBOUND_RETRY_S`
+- `AGENT_CHAT_QUEUE_DRAIN_LIMIT`
+- `AGENT_IMESSAGE_MAX_LEN`
 
 ## If You Still Cannot Resolve It
 

@@ -35,14 +35,14 @@ def build_dedupe_key(*, category: str, scope: str, text: str) -> str:
 def _index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
-            "CODEX_IMESSAGE_DEDUPE_INDEX",
-            str(codex_home / "tmp" / "imessage_sent_index.json"),
+            "AGENT_CHAT_DEDUPE_INDEX",
+            str(codex_home / "tmp" / "agent_chat_dedupe_index.json"),
         )
     )
 
 
 def _lock_path(*, codex_home: Path, index_path: Path) -> Path:
-    raw = os.environ.get("CODEX_IMESSAGE_DEDUPE_LOCK")
+    raw = os.environ.get("AGENT_CHAT_DEDUPE_LOCK")
     if raw and raw.strip():
         return Path(raw.strip())
     return Path(str(index_path) + ".lock")
@@ -51,7 +51,7 @@ def _lock_path(*, codex_home: Path, index_path: Path) -> Path:
 def _dedupe_ttl_seconds(*, override: int | None = None) -> int:
     if isinstance(override, int) and override > 0:
         return override
-    raw = os.environ.get("CODEX_IMESSAGE_DEDUPE_TTL_S", "").strip()
+    raw = os.environ.get("AGENT_CHAT_DEDUPE_TTL_S", "").strip()
     if raw:
         try:
             parsed = int(raw)

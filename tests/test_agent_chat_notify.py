@@ -276,9 +276,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "state_only",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "state_only",
                 },
                 clear=False,
             ):
@@ -296,9 +296,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "send",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "send",
                 },
                 clear=False,
             ):
@@ -321,9 +321,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -345,9 +345,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -371,10 +371,10 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
+                    "AGENT_CHAT_HOME": str(codex_home),
                     "CODEX_HISTORY_PATH": str(history_path),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -395,10 +395,10 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
-                    "CODEX_IMESSAGE_NOTIFY_FALLBACK_INPUT": "1",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_NOTIFY_FALLBACK_INPUT": "1",
                 },
                 clear=False,
             ):
@@ -416,9 +416,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -436,9 +436,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -455,9 +455,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -474,9 +474,9 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
                 },
                 clear=False,
             ):
@@ -493,10 +493,10 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
-                    "CODEX_IMESSAGE_NOTIFY_FALLBACK_INPUT": "1",
+                    "AGENT_CHAT_HOME": str(codex_home),
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_NOTIFY_FALLBACK_INPUT": "1",
                 },
                 clear=False,
             ):
@@ -555,11 +555,11 @@ class TestAgentChatNotify(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "CODEX_HOME": str(codex_home),
+                    "AGENT_CHAT_HOME": str(codex_home),
                     "CODEX_SESSION_PATH": str(session_path),
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_IMESSAGE_NOTIFY_MODE": "route",
-                    "CODEX_IMESSAGE_NOTIFY_FALLBACK_INPUT": "1",
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_NOTIFY_MODE": "route",
+                    "AGENT_CHAT_NOTIFY_FALLBACK_INPUT": "1",
                 },
                 clear=False,
             ):
@@ -605,7 +605,7 @@ class TestAgentChatNotify(unittest.TestCase):
 
             with mock.patch.dict(
                 "os.environ",
-                {"CODEX_IMESSAGE_ATTENTION_INDEX": str(index_path)},
+                {"AGENT_CHAT_ATTENTION_INDEX": str(index_path)},
                 clear=False,
             ):
                 notify._upsert_attention_index(  # type: ignore[attr-defined]
@@ -625,7 +625,7 @@ class TestAgentChatNotify(unittest.TestCase):
 
             with mock.patch.dict(
                 "os.environ",
-                {"CODEX_IMESSAGE_ATTENTION_INDEX": str(index_path)},
+                {"AGENT_CHAT_ATTENTION_INDEX": str(index_path)},
                 clear=False,
             ):
                 notify._upsert_attention_index(  # type: ignore[attr-defined]

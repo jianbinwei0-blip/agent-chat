@@ -40,16 +40,16 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
-export CODEX_IMESSAGE_TO="+15555550123"   # replace
-export CODEX_HOME="$HOME/.codex"
-export CODEX_IMESSAGE_NOTIFY_MODE="route"
+export AGENT_IMESSAGE_TO="+15555550123"   # replace
+export AGENT_CHAT_HOME="$HOME/.codex"
+export AGENT_CHAT_NOTIFY_MODE="route"
 
 "$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
-  --recipient "$CODEX_IMESSAGE_TO" \
+  --recipient "$AGENT_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
 "$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
-  --recipient "$CODEX_IMESSAGE_TO" \
+  --recipient "$AGENT_IMESSAGE_TO" \
   --python-bin "$PYTHON_BIN"
 
 "$PYTHON_BIN" agent_chat_control_plane.py doctor

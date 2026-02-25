@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-chat-control-plane"
+name = "agent-chat"
 version = "0.1.0"
 description = "macOS control-plane runtime bridging Codex/Claude sessions with iMessage and Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-  { name = "agent-chat-control-plane contributors" }
+  { name = "agent-chat contributors" }
 ]
 keywords = ["agent-chat", "codex", "claude", "imessage", "telegram", "macos", "automation", "control-plane"]
 classifiers = [
@@ -41,7 +41,7 @@ py-modules = [
 ]
 
 [project.scripts]
-agent-chat-control-plane = "agent_chat_control_plane:main"
+agent-chat = "agent_chat_control_plane:main"
 agent-chat-notify = "agent_chat_notify:main"
 agent-chat-outbound = "agent_chat_outbound_lib:main"
 agent-chat-reply = "agent_chat_reply_lib:main"

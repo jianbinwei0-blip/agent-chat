@@ -85,8 +85,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "CODEX_IMESSAGE_AGENT": "claude",
-                "CODEX_HOME": "/tmp/claude-home",
+                "AGENT_CHAT_AGENT": "claude",
+                "AGENT_CHAT_HOME": "/tmp/claude-home",
                 "CLAUDE_HOME": "/tmp/claude-home",
             },
             clear=False,
@@ -101,10 +101,10 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "CODEX_IMESSAGE_AGENT": "claude",
-                "CODEX_HOME": "/tmp/claude-home",
+                "AGENT_CHAT_AGENT": "claude",
+                "AGENT_CHAT_HOME": "/tmp/claude-home",
                 "CLAUDE_HOME": "/tmp/claude-home",
-                "CODEX_IMESSAGE_CODEX_HOME": "/tmp/real-codex-home",
+                "AGENT_CHAT_CODEX_HOME": "/tmp/real-codex-home",
             },
             clear=False,
         ):
@@ -118,22 +118,22 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "CODEX_IMESSAGE_AGENT": "claude",
-                "CODEX_HOME": "/tmp/claude-home",
+                "AGENT_CHAT_AGENT": "claude",
+                "AGENT_CHAT_HOME": "/tmp/claude-home",
                 "CLAUDE_HOME": "/tmp/claude-home",
             },
             clear=False,
         ):
             lock_path = cp._control_lock_path(codex_home=Path("/tmp/claude-home"))  # type: ignore[attr-defined]
 
-        self.assertEqual(lock_path, Path.home() / ".codex" / "tmp" / "imessage_control_plane.lock")
+        self.assertEqual(lock_path, Path.home() / ".codex" / "tmp" / "agent_chat_control_plane.lock")
 
     def test_inbound_cursor_path_defaults_to_shared_codex_home_in_claude_runtime(self) -> None:
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "CODEX_IMESSAGE_AGENT": "claude",
-                "CODEX_HOME": "/tmp/claude-home",
+                "AGENT_CHAT_AGENT": "claude",
+                "AGENT_CHAT_HOME": "/tmp/claude-home",
                 "CLAUDE_HOME": "/tmp/claude-home",
             },
             clear=False,
@@ -146,8 +146,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
             {
-                "CODEX_IMESSAGE_AGENT": "claude",
-                "CODEX_HOME": "/tmp/claude-home",
+                "AGENT_CHAT_AGENT": "claude",
+                "AGENT_CHAT_HOME": "/tmp/claude-home",
                 "CLAUDE_HOME": "/tmp/claude-home",
             },
             clear=False,
@@ -286,7 +286,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
     def test_extract_notify_context_fields_prefers_payload_agent_over_runtime(self) -> None:
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
-            {"CODEX_IMESSAGE_AGENT": "claude"},
+            {"AGENT_CHAT_AGENT": "claude"},
             clear=False,
         ):
             fields = cp._extract_notify_context_fields(  # type: ignore[attr-defined]
@@ -869,7 +869,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 return_value=["%0"],
                 create=True,
             ),
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False),
         ):
             matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
                 pane="%0",
@@ -891,7 +891,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         with (
             mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=pane_listing)),
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False),
         ):
             pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
                 session_rec=rec,
@@ -922,7 +922,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
             mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
             mock.patch.object(cp.reply, "_run_agent_resume", return_value="fallback") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False),
         ):
             mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
                 target_sid=sid,
@@ -1126,7 +1126,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp.reply, "_session_path_matches_session_id", return_value=False),
             mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True),
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_STRICT_TMUX": "0"}, clear=False),
         ):
             mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
                 target_sid=sid,
@@ -1154,7 +1154,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp.reply, "_run_agent_resume", return_value="ok") as resume_mock,
             mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
-                {"CODEX_IMESSAGE_STRICT_TMUX": "0", "CODEX_IMESSAGE_AGENT": "claude"},
+                {"AGENT_CHAT_STRICT_TMUX": "0", "AGENT_CHAT_AGENT": "claude"},
                 clear=False,
             ),
         ):
@@ -1188,7 +1188,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 create=True,
             ),
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_STRICT_TMUX": "0"}, clear=False),
         ):
             mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
                 target_sid=sid,
@@ -1307,7 +1307,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="ok") as resume_mock,
             mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
-                {"CODEX_IMESSAGE_STRICT_TMUX": "1"},
+                {"AGENT_CHAT_STRICT_TMUX": "1"},
                 clear=False,
             ),
         ):
@@ -1373,7 +1373,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
             mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_stale", None)),
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_STRICT_TMUX": "0"}, clear=False),
             mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
             mock.patch.object(cp, "_save_registry"),
             mock.patch.object(cp, "_save_message_index"),
@@ -1463,8 +1463,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
             with mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
                 {
-                    "CODEX_IMESSAGE_AGENT": "claude",
-                    "CODEX_HOME": str(codex_home),
+                    "AGENT_CHAT_AGENT": "claude",
+                    "AGENT_CHAT_HOME": str(codex_home),
                     "CLAUDE_HOME": str(claude_home),
                 },
                 clear=False,
@@ -1495,7 +1495,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             claude_home = root / "claude-home"
             (codex_home / "tmp").mkdir(parents=True, exist_ok=True)
             (claude_home / "tmp").mkdir(parents=True, exist_ok=True)
-            (codex_home / "tmp" / "imessage_session_registry.json").write_text(
+            (codex_home / "tmp" / "agent_chat_session_registry.json").write_text(
                 json.dumps(
                     {
                         "sessions": {
@@ -1536,9 +1536,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
-                        "CODEX_IMESSAGE_STRICT_TMUX": "0",
-                        "CODEX_IMESSAGE_AGENT": "claude",
-                        "CODEX_HOME": str(codex_home),
+                        "AGENT_CHAT_STRICT_TMUX": "0",
+                        "AGENT_CHAT_AGENT": "claude",
+                        "AGENT_CHAT_HOME": str(codex_home),
                         "CLAUDE_HOME": str(claude_home),
                     },
                     clear=False,
@@ -1591,7 +1591,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
             mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux_failed", None)),
             mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_STRICT_TMUX": "0"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_STRICT_TMUX": "0"}, clear=False),
             mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
             mock.patch.object(cp, "_save_registry"),
             mock.patch.object(cp, "_save_message_index"),
@@ -1648,7 +1648,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp.reply, "_run_agent_resume", return_value=None) as resume_mock,
             mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
-                {"CODEX_IMESSAGE_STRICT_TMUX": "0", "CODEX_IMESSAGE_AGENT": "claude"},
+                {"AGENT_CHAT_STRICT_TMUX": "0", "AGENT_CHAT_AGENT": "claude"},
                 clear=False,
             ),
             mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
@@ -1944,7 +1944,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with (
             mock.patch.dict(
                 cp.os.environ,
-                {"CODEX_IMESSAGE_TO": "+15551234567", "CODEX_HOME": "/tmp/codex-home"},
+                {"AGENT_IMESSAGE_TO": "+15551234567", "AGENT_CHAT_HOME": "/tmp/codex-home"},
                 clear=False,
             ),
             mock.patch.object(cp, "_acquire_single_instance_lock", return_value=object()),
@@ -1971,9 +1971,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.dict(
                 cp.os.environ,
                 {
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_HOME": "/tmp/codex-home",
-                    "CODEX_IMESSAGE_INBOUND_RETRY_S": "0",
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_HOME": "/tmp/codex-home",
+                    "AGENT_CHAT_INBOUND_RETRY_S": "0",
                 },
                 clear=False,
             ),
@@ -2002,8 +2002,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.dict(
                 cp.os.environ,
                 {
-                    "CODEX_IMESSAGE_TO": "+15551234567",
-                    "CODEX_HOME": "/tmp/codex-home",
+                    "AGENT_IMESSAGE_TO": "+15551234567",
+                    "AGENT_CHAT_HOME": "/tmp/codex-home",
                 },
                 clear=False,
             ),
@@ -2116,7 +2116,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with (
             mock.patch.dict(
                 cp.os.environ,
-                {"CODEX_IMESSAGE_CODEX_BIN": "/custom/bin/codex"},
+                {"AGENT_CHAT_CODEX_BIN": "/custom/bin/codex"},
                 clear=False,
             ),
             mock.patch("subprocess.run", side_effect=_run),
@@ -2201,13 +2201,13 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 / "MacOS"
                 / "Python"
             )
-            plist_path = launchagents / "com.agent-chat-control-plane.plist"
+            plist_path = launchagents / "com.agent-chat.plist"
             plist_path.write_bytes(
                 plistlib.dumps(
                     {
-                        "Label": "com.agent-chat-control-plane",
+                        "Label": "com.agent-chat",
                         "ProgramArguments": [str(runtime_python), "/tmp/agent_chat_control_plane.py", "run"],
-                        "EnvironmentVariables": {"CODEX_IMESSAGE_TO": "+15551234567"},
+                        "EnvironmentVariables": {"AGENT_IMESSAGE_TO": "+15551234567"},
                     },
                     sort_keys=False,
                 )
@@ -2219,7 +2219,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),
-                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.dict(cp.os.environ, {"AGENT_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
                 mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
                 mock.patch.object(cp, "_read_lock_pid", return_value=12345),
                 mock.patch.object(cp, "_is_pid_alive", return_value=True),
@@ -2239,7 +2239,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
     def test_drain_fallback_queue_requeues_unsent_entries(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             codex_home = Path(td)
-            queue_path = codex_home / "tmp" / "imessage_queue.jsonl"
+            queue_path = codex_home / "tmp" / "agent_chat_queue.jsonl"
             queue_path.parent.mkdir(parents=True, exist_ok=True)
             queue_path.write_text(
                 "\n".join(
@@ -2278,8 +2278,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
             err_log.write_text(
                 "\n".join(
                     [
-                        "[imessage-control-plane] inbound disabled: cannot open chat.db",
-                        "[imessage-control-plane] inbound chat.db access restored.",
+                        "[agent-chat] inbound disabled: cannot open chat.db",
+                        "[agent-chat] inbound chat.db access restored.",
                     ]
                 )
                 + "\n",
@@ -2293,8 +2293,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,
                     {
-                        "CODEX_IMESSAGE_LAUNCHD_ERR_LOG": str(err_log),
-                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
+                        "AGENT_CHAT_LAUNCHD_ERR_LOG": str(err_log),
+                        "AGENT_IMESSAGE_CHAT_DB": str(chat_db),
                     },
                     clear=False,
                 ),
@@ -2322,8 +2322,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
             err_log.write_text(
                 "\n".join(
                     [
-                        "[imessage-control-plane] inbound chat.db access restored.",
-                        "[imessage-control-plane] inbound disabled: cannot open chat.db",
+                        "[agent-chat] inbound chat.db access restored.",
+                        "[agent-chat] inbound disabled: cannot open chat.db",
                     ]
                 )
                 + "\n",
@@ -2337,8 +2337,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,
                     {
-                        "CODEX_IMESSAGE_LAUNCHD_ERR_LOG": str(err_log),
-                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
+                        "AGENT_CHAT_LAUNCHD_ERR_LOG": str(err_log),
+                        "AGENT_IMESSAGE_CHAT_DB": str(chat_db),
                     },
                     clear=False,
                 ),
@@ -2380,7 +2380,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     cp,
                     "_queue_stats",
                     return_value={
-                        "path": "/tmp/imessage_queue.jsonl",
+                        "path": "/tmp/agent_chat_queue.jsonl",
                         "exists": False,
                         "size_bytes": 0,
                         "lines": 0,
@@ -2425,7 +2425,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     cp,
                     "_queue_stats",
                     return_value={
-                        "path": "/tmp/imessage_queue.jsonl",
+                        "path": "/tmp/agent_chat_queue.jsonl",
                         "exists": False,
                         "size_bytes": 0,
                         "lines": 0,
@@ -2471,7 +2471,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),
-                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.dict(cp.os.environ, {"AGENT_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
                 mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
                 mock.patch.object(cp, "_read_lock_pid", return_value=12345),
                 mock.patch.object(cp, "_is_pid_alive", return_value=True),
@@ -2514,7 +2514,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),
-                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
+                mock.patch.dict(cp.os.environ, {"AGENT_IMESSAGE_CHAT_DB": str(chat_db)}, clear=False),
                 mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
                 mock.patch.object(cp, "_read_lock_pid", return_value=12345),
                 mock.patch.object(cp, "_is_pid_alive", return_value=True),
@@ -2580,7 +2580,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             notify_val = parsed.get("notify")
             self.assertIsInstance(notify_val, list)
             joined = " ".join(notify_val) if isinstance(notify_val, list) else ""
-            self.assertIn("CODEX_IMESSAGE_TO=+15555550123", joined)
+            self.assertIn("AGENT_IMESSAGE_TO=+15555550123", joined)
             self.assertIn(str(script_path.resolve()), joined)
 
             notice = parsed.get("notice")
@@ -2603,9 +2603,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
-                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                        "CODEX_TELEGRAM_BOT_TOKEN": "telegram-token",
-                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                        "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_BOT_TOKEN": "telegram-token",
+                        "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
                 ),
@@ -2624,9 +2624,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
             notify_val = parsed.get("notify")
             self.assertIsInstance(notify_val, list)
             joined = " ".join(notify_val) if isinstance(notify_val, list) else ""
-            self.assertIn("CODEX_IMESSAGE_TRANSPORT=telegram", joined)
-            self.assertIn("CODEX_TELEGRAM_CHAT_ID=123456", joined)
-            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN=telegram-token", joined)
+            self.assertIn("AGENT_CHAT_TRANSPORT=telegram", joined)
+            self.assertIn("AGENT_TELEGRAM_CHAT_ID=123456", joined)
+            self.assertIn("AGENT_TELEGRAM_BOT_TOKEN=telegram-token", joined)
 
     def test_run_setup_notify_hook_requires_telegram_bot_token_with_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2641,8 +2641,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
-                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                        "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
                 ),
@@ -2657,7 +2657,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             self.assertEqual(rc, 1)
             text = out.getvalue()
-            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN is required", text)
+            self.assertIn("AGENT_TELEGRAM_BOT_TOKEN is required", text)
             self.assertIn("@BotFather", text)
             self.assertIn("/newbot", text)
             self.assertIn("/token", text)
@@ -2674,7 +2674,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
             with (
-                mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+                mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False),
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out,
             ):
                 rc = cp._run_setup_notify_hook(  # type: ignore[attr-defined]
@@ -2714,7 +2714,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     if isinstance(command, str):
                         command_values.append(command)
                 self.assertTrue(any("notify" in cmd for cmd in command_values))
-                self.assertTrue(any("CODEX_IMESSAGE_AGENT=claude" in cmd for cmd in command_values))
+                self.assertTrue(any("AGENT_CHAT_AGENT=claude" in cmd for cmd in command_values))
 
     def test_find_all_session_files_supports_claude_projects_layout(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2726,7 +2726,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             session_a.write_text("{}", encoding="utf-8")
             session_b.write_text("{}", encoding="utf-8")
 
-            with mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False):
+            with mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False):
                 found = cp._find_all_session_files(codex_home=claude_home)  # type: ignore[attr-defined]
 
         found_set = {str(path) for path in found}
@@ -2748,7 +2748,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as td,
-            mock.patch.dict(cp.os.environ, {"CODEX_IMESSAGE_AGENT": "claude"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_AGENT": "claude"}, clear=False),
             mock.patch.object(cp.outbound, "_send_imessage", side_effect=_capture_send),
         ):
             cp._send_structured(  # type: ignore[attr-defined]
@@ -2778,9 +2778,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
                 {
-                    "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                    "CODEX_TELEGRAM_BOT_TOKEN": "test-bot-token",
-                    "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    "AGENT_CHAT_TRANSPORT": "telegram",
+                    "AGENT_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "AGENT_TELEGRAM_CHAT_ID": "123456",
                 },
                 clear=False,
             ),
@@ -2934,10 +2934,10 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.dict(
                 cp.os.environ,  # type: ignore[attr-defined]
                 {
-                    "CODEX_HOME": "/tmp/codex-home",
-                    "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                    "CODEX_TELEGRAM_BOT_TOKEN": "test-bot-token",
-                    "CODEX_TELEGRAM_CHAT_ID": "123456",
+                    "AGENT_CHAT_HOME": "/tmp/codex-home",
+                    "AGENT_CHAT_TRANSPORT": "telegram",
+                    "AGENT_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "AGENT_TELEGRAM_CHAT_ID": "123456",
                 },
                 clear=False,
             ),
@@ -2953,7 +2953,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             codex_home = Path(td)
             tmp_dir = codex_home / "tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            registry_path = tmp_dir / "imessage_session_registry.json"
+            registry_path = tmp_dir / "agent_chat_session_registry.json"
             registry_path.write_text(
                 json.dumps(
                     {
@@ -2977,8 +2977,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,
                     {
-                        "CODEX_IMESSAGE_CHAT_DB": str(chat_db),
-                        "CODEX_IMESSAGE_TMUX_SOCKET": "/tmp/tmux-501/default",
+                        "AGENT_IMESSAGE_CHAT_DB": str(chat_db),
+                        "AGENT_CHAT_TMUX_SOCKET": "/tmp/tmux-501/default",
                     },
                     clear=False,
                 ),
@@ -3012,15 +3012,15 @@ class TestAgentChatControlPlane(unittest.TestCase):
             "ok": False,
             "codex_home": "/tmp/codex-home",
             "recipient": None,
-            "launchd": {"loaded": False, "label": "com.agent-chat-control-plane", "detail": "missing"},
-            "lock": {"pid": None, "pid_alive": False, "path": "/tmp/codex-home/tmp/imessage_control_plane.lock"},
+            "launchd": {"loaded": False, "label": "com.agent-chat", "detail": "missing"},
+            "lock": {"pid": None, "pid_alive": False, "path": "/tmp/codex-home/tmp/agent_chat_control_plane.lock"},
             "chat_db": {"readable": False, "path": "/tmp/chat.db", "error": "permission denied"},
             "queue": {"lines": 3, "size_bytes": 120, "path": "/tmp/queue.jsonl"},
-            "issues": ["missing recipient (CODEX_IMESSAGE_TO)"],
+            "issues": ["missing recipient (AGENT_IMESSAGE_TO)"],
         }
 
         with (
-            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_HOME": "/tmp/codex-home"}, clear=False),
             mock.patch.object(cp, "_doctor_report", return_value=report),
             mock.patch("sys.stdout", new_callable=io.StringIO) as out,
         ):
@@ -3038,7 +3038,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             "recipient": "+15551234567",
             "launchd": {
                 "loaded": True,
-                "label": "com.agent-chat-control-plane",
+                "label": "com.agent-chat",
                 "detail": "loaded",
                 "runtime_python": "/Users/test/Applications/Codex iMessage Python.app/Contents/MacOS/Python",
                 "permission_app": "/Users/test/Applications/Codex iMessage Python.app",
@@ -3055,7 +3055,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             "issues": [],
         }
         with (
-            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_HOME": "/tmp/codex-home"}, clear=False),
             mock.patch.object(cp, "_doctor_report", return_value=report),
             mock.patch("sys.stdout", new_callable=io.StringIO) as out,
         ):
@@ -3071,7 +3071,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with (
             mock.patch.dict(
                 cp.os.environ,
-                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
                 clear=False,
             ),
             mock.patch.object(cp, "_doctor_report", return_value=report),
@@ -3297,7 +3297,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
     def test_main_setup_permissions_runs_without_recipient(self) -> None:
         with (
-            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_HOME": "/tmp/codex-home"}, clear=False),
             mock.patch.object(
                 cp,
                 "_launchd_runtime_targets_from_plist",
@@ -3328,7 +3328,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with (
             mock.patch.dict(
                 cp.os.environ,
-                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
                 clear=False,
             ),
             mock.patch.object(cp, "_run_setup_notify_hook", return_value=0) as setup_mock,
@@ -3351,7 +3351,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
     def test_main_setup_permissions_prefers_launchd_runtime_targets(self) -> None:
         with (
-            mock.patch.dict(cp.os.environ, {"CODEX_HOME": "/tmp/codex-home"}, clear=False),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_HOME": "/tmp/codex-home"}, clear=False),
             mock.patch.object(
                 cp,
                 "_launchd_runtime_targets_from_plist",
@@ -3405,7 +3405,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="+15551234567",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3424,11 +3424,11 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 permission_app_path=None,
             )
 
-            plist_path = home / "Library" / "LaunchAgents" / "com.agent-chat-control-plane.plist"
+            plist_path = home / "Library" / "LaunchAgents" / "com.agent-chat.plist"
             self.assertTrue(plist_path.exists())
             with plist_path.open("rb") as f:
                 payload = plistlib.load(f)
-            self.assertEqual(payload.get("Label"), "com.agent-chat-control-plane")
+            self.assertEqual(payload.get("Label"), "com.agent-chat")
             self.assertEqual(payload.get("ProgramArguments", [None])[0], "/opt/homebrew/bin/python3")
             program_args = payload.get("ProgramArguments", [None, None])
             self.assertEqual(Path(program_args[1]).resolve(), script_path.resolve())  # type: ignore[index]
@@ -3439,7 +3439,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 commands,
             )
             self.assertIn(
-                ["launchctl", "kickstart", "-k", f"gui/{cp.os.getuid()}/com.agent-chat-control-plane"],  # type: ignore[attr-defined]
+                ["launchctl", "kickstart", "-k", f"gui/{cp.os.getuid()}/com.agent-chat"],  # type: ignore[attr-defined]
                 commands,
             )
 
@@ -3451,7 +3451,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                 codex_home=Path("/tmp/codex-home"),
                 recipient="",
-                label="com.agent-chat-control-plane",
+                label="com.agent-chat",
                 python_bin="/usr/bin/python3",
                 script_path=Path("/tmp/agent_chat_control_plane.py"),
                 setup_permissions=False,
@@ -3460,7 +3460,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 open_settings=False,
             )
         self.assertEqual(rc, 1)
-        self.assertIn("CODEX_IMESSAGE_TO is required", out.getvalue())
+        self.assertIn("AGENT_IMESSAGE_TO is required", out.getvalue())
 
     def test_run_setup_launchd_allows_missing_recipient_for_telegram_transport(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3474,9 +3474,9 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
-                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                        "CODEX_TELEGRAM_BOT_TOKEN": "telegram-token",
-                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                        "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_BOT_TOKEN": "telegram-token",
+                        "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
                 ),
@@ -3493,7 +3493,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3503,15 +3503,15 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 )
 
             self.assertEqual(rc, 0)
-            plist_path = home / "Library" / "LaunchAgents" / "com.agent-chat-control-plane.plist"
+            plist_path = home / "Library" / "LaunchAgents" / "com.agent-chat.plist"
             with plist_path.open("rb") as f:
                 payload = plistlib.load(f)
             env_vars = payload.get("EnvironmentVariables")
             self.assertIsInstance(env_vars, dict)
-            self.assertEqual((env_vars or {}).get("CODEX_IMESSAGE_TRANSPORT"), "telegram")
-            self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_CHAT_ID"), "123456")
-            self.assertEqual((env_vars or {}).get("CODEX_TELEGRAM_BOT_TOKEN"), "telegram-token")
-            self.assertNotIn("CODEX_IMESSAGE_TO", env_vars or {})
+            self.assertEqual((env_vars or {}).get("AGENT_CHAT_TRANSPORT"), "telegram")
+            self.assertEqual((env_vars or {}).get("AGENT_TELEGRAM_CHAT_ID"), "123456")
+            self.assertEqual((env_vars or {}).get("AGENT_TELEGRAM_BOT_TOKEN"), "telegram-token")
+            self.assertNotIn("AGENT_IMESSAGE_TO", env_vars or {})
 
     def test_run_setup_launchd_requires_telegram_bot_token_with_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3525,8 +3525,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.dict(
                     cp.os.environ,  # type: ignore[attr-defined]
                     {
-                        "CODEX_IMESSAGE_TRANSPORT": "telegram",
-                        "CODEX_TELEGRAM_CHAT_ID": "123456",
+                        "AGENT_CHAT_TRANSPORT": "telegram",
+                        "AGENT_TELEGRAM_CHAT_ID": "123456",
                     },
                     clear=False,
                 ),
@@ -3535,7 +3535,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=False,
@@ -3546,7 +3546,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             self.assertEqual(rc, 1)
             text = out.getvalue()
-            self.assertIn("CODEX_TELEGRAM_BOT_TOKEN is required", text)
+            self.assertIn("AGENT_TELEGRAM_BOT_TOKEN is required", text)
             self.assertIn("@BotFather", text)
             self.assertIn("/newbot", text)
             self.assertIn("/token", text)
@@ -3573,7 +3573,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="+15551234567",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3584,7 +3584,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         commands = [call.args[0] for call in run_mock.call_args_list]
-        enable_cmd = ["launchctl", "enable", f"gui/{cp.os.getuid()}/com.agent-chat-control-plane"]  # type: ignore[attr-defined]
+        enable_cmd = ["launchctl", "enable", f"gui/{cp.os.getuid()}/com.agent-chat"]  # type: ignore[attr-defined]
         bootstrap_cmd_prefix = ["launchctl", "bootstrap", f"gui/{cp.os.getuid()}"]  # type: ignore[attr-defined]
 
         enable_index = next(i for i, cmd in enumerate(commands) if cmd == enable_cmd)
@@ -3615,7 +3615,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="+15551234567",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3658,7 +3658,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="+15551234567",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3700,7 +3700,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 rc = cp._run_setup_launchd(  # type: ignore[attr-defined]
                     codex_home=codex_home,
                     recipient="+15551234567",
-                    label="com.agent-chat-control-plane",
+                    label="com.agent-chat",
                     python_bin="/opt/homebrew/bin/python3",
                     script_path=script_path,
                     setup_permissions=True,
@@ -3719,7 +3719,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         with (
             mock.patch.dict(
                 cp.os.environ,
-                {"CODEX_HOME": "/tmp/codex-home", "CODEX_IMESSAGE_TO": "+15551234567"},
+                {"AGENT_CHAT_HOME": "/tmp/codex-home", "AGENT_IMESSAGE_TO": "+15551234567"},
                 clear=False,
             ),
             mock.patch.object(cp, "_run_setup_launchd", return_value=0) as setup_mock,
@@ -3728,7 +3728,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 [
                     "setup-launchd",
                     "--label",
-                    "com.agent-chat-control-plane",
+                    "com.agent-chat",
                     "--python-bin",
                     "/usr/bin/python3",
                     "--timeout",
@@ -3744,7 +3744,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         setup_mock.assert_called_once_with(
             codex_home=Path("/tmp/codex-home"),
             recipient="+15551234567",
-            label="com.agent-chat-control-plane",
+            label="com.agent-chat",
             python_bin="/usr/bin/python3",
             script_path=Path(cp.__file__).resolve(),  # type: ignore[attr-defined]
             setup_permissions=False,
