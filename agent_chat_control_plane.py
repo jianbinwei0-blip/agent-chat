@@ -100,7 +100,7 @@ _DEFAULT_SETUP_PERMISSIONS_TIMEOUT_S = 180.0
 _DEFAULT_SETUP_PERMISSIONS_POLL_S = 1.0
 _LAUNCHD_POST_START_VERIFY_DELAY_S = 0.8
 _FULL_DISK_ACCESS_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-_DEFAULT_FRIENDLY_PYTHON_APP_NAME = "Codex iMessage Python.app"
+_DEFAULT_FRIENDLY_PYTHON_APP_NAME = "AgentChatPython.app"
 _TMUX_BIN_CANDIDATES = (
     "/opt/homebrew/bin/tmux",
     "/usr/local/bin/tmux",
@@ -1657,23 +1657,16 @@ def _chat_db_access_status_for_runtime(
 
 
 def _open_full_disk_access_settings() -> bool:
-    commands: tuple[list[str], ...] = (
-        ["open", _FULL_DISK_ACCESS_SETTINGS_URL],
-        ["open", "-b", "com.apple.systempreferences"],
-    )
-    for cmd in commands:
-        try:
-            proc = subprocess.run(
-                cmd,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            continue
-        if proc.returncode == 0:
-            return True
-    return False
+    try:
+        proc = subprocess.run(
+            ["open", _FULL_DISK_ACCESS_SETTINGS_URL],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
 
 
 def _launchagent_plist_path(*, label: str) -> Path:
@@ -2182,6 +2175,7 @@ def _run_setup_permissions(
         if permission_app_path is not None:
             sys.stdout.write(f"Full Disk Access app: {permission_app_path}\n")
         sys.stdout.write(f"chat.db: readable ({chat_db})\n")
+        sys.stdout.flush()
         return 0
 
     sys.stdout.write("Full Disk Access setup is required for inbound iMessage replies.\n")
@@ -2193,10 +2187,29 @@ def _run_setup_permissions(
     if permission_app_path is not None:
         sys.stdout.write(f"Grant Full Disk Access to this app: {permission_app_path}\n")
     sys.stdout.write(f"Grant access to this Python binary: {python_bin}\n")
+    if permission_app_path is not None:
+        wait_target = f"app: {permission_app_path}"
+        sys.stdout.write("Detailed steps before the Settings window opens:\n")
+        sys.stdout.write(f"1) In Full Disk Access, add and enable this app: {permission_app_path}\n")
+        sys.stdout.write(
+            f"2) If the app is unavailable, add and enable this Python binary: {python_bin}\n"
+        )
+    else:
+        wait_target = f"Python binary: {python_bin}"
+        sys.stdout.write("Detailed steps before the Settings window opens:\n")
+        sys.stdout.write(f"1) In Full Disk Access, add and enable this Python binary: {python_bin}\n")
+    sys.stdout.write("3) Keep this command running until it confirms chat.db is readable.\n")
+    sys.stdout.write(
+        "Action required now: in System Settings > Privacy & Security > Full Disk Access, "
+        f"enable access for {wait_target}.\n"
+    )
     sys.stdout.write(f"chat.db path: {chat_db}\n")
     if isinstance(chat_db_error, str) and chat_db_error.strip():
         sys.stdout.write(f"Current chat.db error: {chat_db_error.strip()}\n")
-    sys.stdout.write("Waiting for permission grant: polling chat.db until readable.\n")
+    sys.stdout.write(
+        f"Waiting for Full Disk Access grant for {wait_target}; polling chat.db until readable.\n"
+    )
+    sys.stdout.flush()
 
     timeout_s = max(0.0, float(timeout_s))
     poll_s = max(0.1, float(poll_s))
@@ -2212,6 +2225,7 @@ def _run_setup_permissions(
         )
         if chat_db_readable:
             sys.stdout.write("Full Disk Access confirmed: chat.db is now readable.\n")
+            sys.stdout.flush()
             return 0
         if open_settings and not settings_opened:
             if _open_full_disk_access_settings():
@@ -2220,6 +2234,7 @@ def _run_setup_permissions(
                 sys.stdout.write(
                     "Could not auto-open System Settings; open Privacy > Full Disk Access manually.\n"
                 )
+            sys.stdout.flush()
             settings_opened = True
         time.sleep(poll_s)
 
@@ -2227,6 +2242,7 @@ def _run_setup_permissions(
         sys.stdout.write(f"Timed out waiting for chat.db access: {chat_db_error.strip()}\n")
     else:
         sys.stdout.write("Timed out waiting for chat.db access.\n")
+    sys.stdout.flush()
     return 1
 
 def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]:

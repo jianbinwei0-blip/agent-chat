@@ -70,7 +70,10 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
     - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
     - `Grant Full Disk Access to this app: ...` (preferred when shown)
     - `Grant access to this Python binary: ...`
-  - setup starts polling `chat.db` before opening System Settings and keeps polling until readable or timeout.
+    - `Detailed steps before the Settings window opens:`
+    - `1) In Full Disk Access, add and enable this app: ...` (or binary line when no app is available)
+    - `Action required now: ... enable access for app: ...`
+  - setup flushes this guidance before opening System Settings, then polls `chat.db` until readable or timeout.
 - Apple Events automation denied (`-1743`):
   - Grant Automation permission for the launchd runtime app/Python and `osascript` to control Messages.
 - Queue backlog grows:
@@ -83,7 +86,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 ## Launchd Runtime Notes
 
 - `setup-launchd` uses the current Python interpreter by default and writes a LaunchAgent plist automatically.
-- when possible, `setup-launchd` prepares `~/Applications/Codex iMessage Python.app` and uses its embedded runtime path in LaunchAgent `ProgramArguments`.
+- when possible, `setup-launchd` prepares `~/Applications/AgentChatPython.app` and uses its embedded runtime path in LaunchAgent `ProgramArguments`.
 - Verify the launchd `ProgramArguments` path points to `agent_chat_control_plane.py`.
 - Avoid protected-path mismatches (for example stale script paths under denied folders).
 - Grant Full Disk Access to the app or exact Python binary used by launchd (check via `launchctl print ...` and `ps`).

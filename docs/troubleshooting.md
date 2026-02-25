@@ -67,11 +67,15 @@ Checks:
 - setup prints the exact FDA targets to add:
   - `Grant Full Disk Access to this app: ...` (preferred when present)
   - `Grant access to this Python binary: ...`
+- setup also prints step-by-step guidance before opening System Settings:
+  - `Detailed steps before the Settings window opens:`
+  - `1) In Full Disk Access, add and enable this app: ...` (or Python binary line when no app is available)
+  - `Action required now: ... enable access for app: ...`
 - do not guess the target app from terminal name; use the printed path
-- setup starts polling `chat.db` before opening System Settings, then keeps polling until access is detected
+- setup flushes this guidance before opening System Settings, then keeps polling `chat.db` until access is detected
 - wait for `Full Disk Access confirmed: chat.db is now readable.` before leaving setup
 - run `python3 agent_chat_control_plane.py doctor` and use `Launchd.runtime_python` / `Launchd.permission_app` as the authoritative FDA targets
-- prefer granting Full Disk Access to the shown app (usually `~/Applications/Codex iMessage Python.app`), or to the shown runtime Python binary if no app is shown
+- prefer granting Full Disk Access to the shown app (usually `~/Applications/AgentChatPython.app`), or to the shown runtime Python binary if no app is shown
 - do not grant Full Disk Access to terminal apps unless `doctor` explicitly shows that terminal binary as `runtime_python`
 - `setup-permissions` now prefers launchd runtime targets from the installed plist, so its guidance should match `doctor`
 - if output says "shell can read chat.db, but launchd cannot", grant Full Disk Access to the shown app/binary itself (not only Terminal), then rerun `setup-launchd`
@@ -87,7 +91,7 @@ If launchd still cannot read `chat.db` after FDA was granted:
   - look for: `Failed to match existing code requirement for subject org.python.python`
 - reset stale TCC approvals and re-grant:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
-  - re-enable Full Disk Access for `~/Applications/Codex iMessage Python.app`
+  - re-enable Full Disk Access for `~/Applications/AgentChatPython.app`
 - rerun:
   - `python3 agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO"`
   - `python3 agent_chat_control_plane.py doctor`

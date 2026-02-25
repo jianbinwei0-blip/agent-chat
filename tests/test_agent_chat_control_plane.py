@@ -2196,7 +2196,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             runtime_python = (
                 home
                 / "Applications"
-                / "Codex iMessage Python.app"
+                / "AgentChatPython.app"
                 / "Contents"
                 / "MacOS"
                 / "Python"
@@ -2233,7 +2233,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual((launchd or {}).get("runtime_python"), str(runtime_python))
         self.assertEqual(
             (launchd or {}).get("permission_app"),
-            str(home / "Applications" / "Codex iMessage Python.app"),
+            str(home / "Applications" / "AgentChatPython.app"),
         )
 
     def test_drain_fallback_queue_requeues_unsent_entries(self) -> None:
@@ -2409,6 +2409,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 mock.patch.object(cp, "_launchd_service_loaded", return_value=(True, "loaded")),
                 mock.patch.object(cp, "_launchd_inbound_warning_active", return_value=False),
                 mock.patch.object(cp, "_launchd_inbound_restored_active", return_value=False),
+                mock.patch.object(cp, "_launchd_runtime_targets_from_plist", return_value=(None, None)),
                 mock.patch.object(cp, "_read_lock_pid", return_value=12345),
                 mock.patch.object(cp, "_is_pid_alive", return_value=True),
                 mock.patch.object(
@@ -3040,8 +3041,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 "loaded": True,
                 "label": "com.agent-chat",
                 "detail": "loaded",
-                "runtime_python": "/Users/test/Applications/Codex iMessage Python.app/Contents/MacOS/Python",
-                "permission_app": "/Users/test/Applications/Codex iMessage Python.app",
+                "runtime_python": "/Users/test/Applications/AgentChatPython.app/Contents/MacOS/Python",
+                "permission_app": "/Users/test/Applications/AgentChatPython.app",
             },
             "lock": {"pid": 123, "pid_alive": True, "path": "/tmp/lock"},
             "chat_db": {"readable": True, "path": "/tmp/chat.db", "error": None},
@@ -3127,7 +3128,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                     python_bin=str(python_bin)
                 )
 
-            expected_app = home / "Applications" / "Codex iMessage Python.app"
+            expected_app = home / "Applications" / "AgentChatPython.app"
             self.assertEqual(
                 runtime_python,
                 str(expected_app / "Contents" / "MacOS" / "Python"),
@@ -3149,7 +3150,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             source_exec.parent.mkdir(parents=True, exist_ok=True)
             source_exec.write_text("source", encoding="utf-8")
 
-            target_app = home / "Applications" / "Codex iMessage Python.app"
+            target_app = home / "Applications" / "AgentChatPython.app"
             target_exec = target_app / "Contents" / "MacOS" / "Python"
             target_exec.parent.mkdir(parents=True, exist_ok=True)
             target_exec.write_text("stale-copy", encoding="utf-8")
@@ -3161,13 +3162,16 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
             self.assertEqual(
                 target_app,
-                home / "Applications" / "Codex iMessage Python.app",
+                home / "Applications" / "AgentChatPython.app",
             )
             self.assertIsNone(detail)
             if target_app is None:
                 self.fail("expected target app path")
             self.assertTrue(target_app.is_symlink())
             self.assertEqual(target_app.resolve(), source_app.resolve())
+
+    def test_default_friendly_python_app_name_is_agent_chat_python(self) -> None:
+        self.assertEqual(cp._DEFAULT_FRIENDLY_PYTHON_APP_NAME, "AgentChatPython.app")  # type: ignore[attr-defined]
 
     def test_run_setup_permissions_opens_settings_and_waits_until_readable(self) -> None:
         with (
@@ -3198,8 +3202,22 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertIn("Opened System Settings", out.getvalue())
         self.assertIn("Full Disk Access confirmed", out.getvalue())
 
+    def test_open_full_disk_access_settings_does_not_fallback_to_generic_window(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> mock.Mock:
+            del kwargs
+            commands.append(cmd)
+            return mock.Mock(returncode=1)
+
+        with mock.patch.object(cp.subprocess, "run", side_effect=fake_run):
+            ok = cp._open_full_disk_access_settings()  # type: ignore[attr-defined]
+
+        self.assertFalse(ok)
+        self.assertEqual(commands, [["open", cp._FULL_DISK_ACCESS_SETTINGS_URL]])  # type: ignore[attr-defined]
+
     def test_run_setup_permissions_prefers_app_target_message_when_provided(self) -> None:
-        app_path = Path("/Users/test/Applications/Codex iMessage Python.app")
+        app_path = Path("/Users/test/Applications/AgentChatPython.app")
         with (
             mock.patch.object(
                 cp,
@@ -3229,6 +3247,95 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertIn(str(app_path), text)
         self.assertIn("System Settings > Privacy & Security > Full Disk Access", text)
         self.assertIn("Add one of these targets", text)
+
+    def test_run_setup_permissions_prints_explicit_action_and_wait_target(self) -> None:
+        app_path = Path("/Users/test/Applications/AgentChatPython.app")
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status_for_runtime",
+                side_effect=[
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                ],
+            ),
+            mock.patch.object(cp.time, "sleep"),
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 1.2]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=False,
+                probe_python_bin="/tmp/friendly-python",
+                permission_app_path=app_path,
+            )
+
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("Detailed steps before the Settings window opens:", text)
+        self.assertIn(f"1) In Full Disk Access, add and enable this app: {app_path}", text)
+        self.assertIn("Action required now:", text)
+        self.assertIn(f"Waiting for Full Disk Access grant for app: {app_path}", text)
+
+    def test_run_setup_permissions_flushes_guidance_before_opening_settings(self) -> None:
+        app_path = Path("/Users/test/Applications/AgentChatPython.app")
+        observed: dict[str, str] = {"text_at_open": ""}
+
+        class _BufferedStdout:
+            def __init__(self) -> None:
+                self._pending: list[str] = []
+                self._visible: list[str] = []
+
+            def write(self, text: str) -> int:
+                self._pending.append(text)
+                return len(text)
+
+            def flush(self) -> None:
+                self._visible.extend(self._pending)
+                self._pending = []
+
+            def getvalue(self) -> str:
+                return "".join(self._visible)
+
+        buffered_stdout = _BufferedStdout()
+
+        def fake_open_settings() -> bool:
+            observed["text_at_open"] = buffered_stdout.getvalue()
+            return True
+
+        with (
+            mock.patch.object(
+                cp,
+                "_chat_db_access_status_for_runtime",
+                side_effect=[
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), False, "PermissionError: denied"),
+                    (Path("/tmp/chat.db"), True, None),
+                ],
+            ),
+            mock.patch.object(cp, "_open_full_disk_access_settings", side_effect=fake_open_settings),
+            mock.patch.object(cp.time, "sleep"),
+            mock.patch.object(cp.time, "monotonic", side_effect=[0.0, 0.0, 0.2, 0.4]),
+            mock.patch("sys.stdout", new=buffered_stdout),
+        ):
+            rc = cp._run_setup_permissions(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                timeout_s=1.0,
+                poll_s=0.1,
+                open_settings=True,
+                probe_python_bin="/tmp/friendly-python",
+                permission_app_path=app_path,
+            )
+
+        self.assertEqual(rc, 0)
+        text_at_open = observed["text_at_open"]
+        self.assertIn("Permission to grant: Full Disk Access", text_at_open)
+        self.assertIn(f"Grant Full Disk Access to this app: {app_path}", text_at_open)
+        self.assertIn("Detailed steps before the Settings window opens:", text_at_open)
+        self.assertIn(f"1) In Full Disk Access, add and enable this app: {app_path}", text_at_open)
+        self.assertIn("Action required now:", text_at_open)
 
     def test_run_setup_permissions_opens_settings_after_first_poll_cycle(self) -> None:
         events: list[str] = []
@@ -3357,7 +3464,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 "_launchd_runtime_targets_from_plist",
                 return_value=(
                     "/tmp/runtime-python",
-                    "/Users/test/Applications/Codex iMessage Python.app",
+                    "/Users/test/Applications/AgentChatPython.app",
                 ),
             ),
             mock.patch.object(cp, "_run_setup_permissions", return_value=0) as setup_mock,
@@ -3380,7 +3487,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             poll_s=0.2,
             open_settings=False,
             probe_python_bin="/tmp/runtime-python",
-            permission_app_path=Path("/Users/test/Applications/Codex iMessage Python.app"),
+            permission_app_path=Path("/Users/test/Applications/AgentChatPython.app"),
         )
 
     def test_run_setup_launchd_writes_plist_and_bootstraps(self) -> None:
@@ -3637,7 +3744,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             script_path = home / "repo" / "agent_chat_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            permission_app = home / "Applications" / "Codex iMessage Python.app"
+            permission_app = home / "Applications" / "AgentChatPython.app"
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),
@@ -3679,7 +3786,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             script_path = home / "repo" / "agent_chat_control_plane.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            permission_app = home / "Applications" / "Codex iMessage Python.app"
+            permission_app = home / "Applications" / "AgentChatPython.app"
 
             with (
                 mock.patch.object(cp.Path, "home", return_value=home),

@@ -118,17 +118,20 @@ Compatibility note:
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
 When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 
-`setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
+`setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/AgentChatPython.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
 During permission setup, follow the command output exactly. It prints:
 - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
 - `Grant Full Disk Access to this app: ...` (when available)
 - `Grant access to this Python binary: ...`
+- `Detailed steps before the Settings window opens:`
+- `1) In Full Disk Access, add and enable this app: ...` (or the Python binary line when no app is provided)
+- `Action required now: ... enable access for app: ...`
 
 Grant Full Disk Access to one of those printed targets (prefer the app path when shown), keep the command running, and wait for:
 - `Full Disk Access confirmed: chat.db is now readable.`
 
-`setup-permissions` starts polling `chat.db` before opening System Settings, then keeps polling until readable or timeout.
+`setup-permissions` now flushes and prints the detailed grant target instructions before opening System Settings. It then starts polling `chat.db` and keeps polling until readable or timeout.
 
 6. Optional: run in foreground instead of launchd.
 
@@ -156,7 +159,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
 
 `setup-launchd` says shell can read `chat.db` but launchd cannot:
-- Grant Full Disk Access to `permission_app` shown by `doctor` (usually `~/Applications/Codex iMessage Python.app`).
+- Grant Full Disk Access to `permission_app` shown by `doctor` (usually `~/Applications/AgentChatPython.app`).
 - Re-run:
   - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
   - `"$PYTHON_BIN" agent_chat_control_plane.py doctor`
@@ -171,7 +174,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
   - look for: `Failed to match existing code requirement for subject org.python.python`
 - Reset stale approvals, then grant again in System Settings:
   - `tccutil reset SystemPolicyAllFiles org.python.python`
-  - re-enable FDA for `~/Applications/Codex iMessage Python.app`
+  - re-enable FDA for `~/Applications/AgentChatPython.app`
   - re-run `setup-launchd` and `doctor`
 - Shortcut:
   - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
@@ -246,8 +249,8 @@ python3 agent_chat_control_plane.py setup-launchd
 This command:
 - writes `~/Library/LaunchAgents/<label>.plist`
 - uses the current Python interpreter by default (`--python-bin` to override)
-- attempts to provision a visible FDA target app at `~/Applications/Codex iMessage Python.app` (symlink-first, copy fallback)
-- reuses an existing healthy `~/Applications/Codex iMessage Python.app` when present to preserve Full Disk Access grants
+- attempts to provision a visible FDA target app at `~/Applications/AgentChatPython.app` (symlink-first, copy fallback)
+- reuses an existing healthy `~/Applications/AgentChatPython.app` when present to preserve Full Disk Access grants
 - bootstraps + kickstarts the agent via `launchctl`
 - runs `setup-permissions` by default so launchd can read `chat.db`
 
@@ -257,7 +260,7 @@ If `setup-launchd` reports that the shell can read `chat.db` but launchd cannot,
 
 Tip: `python3 agent_chat_control_plane.py doctor` now shows both `runtime_python` and `permission_app` under Launchd so you can grant FDA to the exact runtime target.
 
-When `permission_app` is present (usually `~/Applications/Codex iMessage Python.app`), grant FDA there first; do not grant FDA to terminal apps unless that terminal binary is the runtime target shown by `doctor`.
+When `permission_app` is present (usually `~/Applications/AgentChatPython.app`), grant FDA there first; do not grant FDA to terminal apps unless that terminal binary is the runtime target shown by `doctor`.
 
 If you are unsure which app to grant, use `doctor` as source of truth:
 - `Launchd.permission_app` (preferred target)
