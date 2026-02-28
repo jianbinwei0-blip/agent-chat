@@ -175,6 +175,20 @@ Checks:
 - set/verify `AGENT_CHAT_TMUX_SOCKET` if non-default socket is used
 - test with explicit routing message: `@<session_ref> <instruction>`
 - temporarily relax strict mode for debugging: `AGENT_CHAT_STRICT_TMUX=0`
+- if the target session exists but pane mapping is stale/missing, control plane now auto-falls back to `resume` for that case; strict-mode errors should now indicate non-no-pane failures.
+
+### Missing session when replying (`@ref` or implicit)
+
+Symptoms:
+- `@<session_ref> ...` with an unknown target returns a runtime choice prompt instead of immediate session creation.
+- an implicit reply with no resolvable target session (for example, no session currently awaiting input) returns the same runtime choice prompt.
+
+Expected behavior:
+- reply `1`/`codex` or `2`/`claude` to pick runtime for new background session.
+- reply `cancel` to abort.
+- if tmux launch fails after runtime choice, control plane falls back to non-tmux session creation.
+- only one pending runtime-choice request is retained at a time (newest unresolved request wins).
+- strict mode still requires explicit `@<session_ref>` for ambiguous implicit routing contexts.
 
 ### Ambiguous replies or wrong target session
 

@@ -1720,6 +1720,65 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertFalse(any(m.get("kind") == "responded" for m in sent))
         resume_mock.assert_not_called()
 
+    def test_process_inbound_replies_tmux_stale_no_pane_strict_falls_back_to_resume(self) -> None:
+        sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
+        registry = {
+            "sessions": {
+                sid: {
+                    "cwd": "/tmp/project",
+                    "session_path": f"/tmp/sessions/{sid}.jsonl",
+                }
+            }
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _dispatch_no_pane(**kwargs: object):
+            rec = kwargs.get("session_rec")
+            if isinstance(rec, dict):
+                rec["last_dispatch_reason"] = "pane_missing"
+            return "tmux_stale", None
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(sid, None)),
+            mock.patch.object(cp, "_rewrite_numeric_choice_prompt", return_value=("continue", None)),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", side_effect=_dispatch_no_pane),
+            mock.patch.object(cp.reply, "_run_codex_resume", return_value="fallback response") as resume_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        self.assertTrue(any(m.get("kind") == "responded" and m.get("text") == "fallback response" for m in sent))
+        self.assertFalse(any(m.get("kind") == "error" and "strict tmux routing" in str(m.get("text", "")).lower() for m in sent))
+        resume_mock.assert_called_once_with(
+            session_id=sid,
+            cwd="/tmp/project",
+            prompt="continue",
+            codex_home=Path("/tmp/codex-home"),
+            timeout_s=None,
+        )
+
     def test_process_inbound_replies_tmux_failed_strict_reports_error_without_fallback(self) -> None:
         sid = "019c33b4-e0ed-7021-940a-02b1e8147a82"
         registry = {
@@ -1836,17 +1895,17 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(session_path, str(created))
         self.assertEqual(pane, "%4")
         self.assertIsNone(err)
-        window_mock.assert_called_once_with(session_name="agent", cwd="/tmp/project", label="bugfix")
+        window_mock.assert_called_once_with(
+            session_name="agent",
+            cwd="/tmp/project",
+            label="bugfix",
+            agent="codex",
+        )
 
-    def test_process_inbound_replies_auto_create_uses_resume_ref_as_window_label(self) -> None:
-        registry: dict[str, object] = {"sessions": {}}
+    def test_process_inbound_replies_missing_session_requests_agent_choice(self) -> None:
+        registry: dict[str, object] = {"sessions": {}, "pending_new_session_choice": None}
         message_index: dict[str, object] = {}
-        captured: dict[str, object] = {}
         sent: list[dict[str, object]] = []
-
-        def _fake_create_new_session_in_tmux(**kwargs: object):
-            captured.update(kwargs)
-            return "sid-123", "/tmp/sessions/sid-123.jsonl", "%9", None
 
         def _capture_send(**kwargs: object) -> None:
             sent.append(dict(kwargs))
@@ -1860,6 +1919,114 @@ class TestAgentChatControlPlane(unittest.TestCase):
             mock.patch.object(cp, "_load_message_index", return_value=message_index),
             mock.patch.object(cp, "_resolve_session_ref", return_value=(None, "Session not found.")),
             mock.patch.object(cp, "_default_new_session_cwd", return_value="/tmp/project"),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        pending = registry.get("pending_new_session_choice")
+        self.assertIsInstance(pending, dict)
+        if not isinstance(pending, dict):
+            self.fail("expected pending choice payload")
+        self.assertEqual(pending.get("label"), "bugfix")
+        self.assertEqual(pending.get("cwd"), "/tmp/project")
+        self.assertEqual(pending.get("prompt"), "continue")
+        self.assertTrue(any(msg.get("kind") == "needs_input" for msg in sent))
+
+    def test_process_inbound_replies_implicit_no_waiting_strict_requests_agent_choice(self) -> None:
+        registry: dict[str, object] = {"sessions": {}, "pending_new_session_choice": None}
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(101, "continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(
+                cp,
+                "_resolve_session_from_reply_context",
+                return_value=(
+                    None,
+                    "No session is currently awaiting input. Use @<ref> ... or new <label>: ... "
+                    "Strict tmux routing requires explicit @<ref> when context is ambiguous.",
+                ),
+            ),
+            mock.patch.object(cp, "_default_new_session_cwd", return_value="/tmp/project"),
+            mock.patch.dict(cp.os.environ, {"AGENT_CHAT_STRICT_TMUX": "1"}, clear=False),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 101)
+        pending = registry.get("pending_new_session_choice")
+        self.assertIsInstance(pending, dict)
+        if not isinstance(pending, dict):
+            self.fail("expected pending choice payload")
+        self.assertEqual(pending.get("action"), "implicit")
+        self.assertEqual(pending.get("cwd"), "/tmp/project")
+        self.assertEqual(pending.get("prompt"), "continue")
+        self.assertTrue(any(msg.get("kind") == "needs_input" for msg in sent))
+        self.assertFalse(any(msg.get("kind") == "error" for msg in sent))
+
+    def test_process_inbound_replies_pending_choice_creates_selected_agent_session(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {},
+            "pending_new_session_choice": {
+                "prompt": "continue",
+                "action": "resume",
+                "label": "bugfix",
+                "cwd": "/tmp/project",
+                "created_ts": 1,
+                "source_text": "@bugfix continue",
+                "source_ref": "bugfix",
+            },
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+        captured: dict[str, object] = {}
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _fake_create_new_session_in_tmux(**kwargs: object):
+            captured.update(kwargs)
+            return "sid-123", "/tmp/sessions/sid-123.jsonl", "%9", None
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(102, "2", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
             mock.patch.object(cp, "_create_new_session_in_tmux", side_effect=_fake_create_new_session_in_tmux),
             mock.patch.object(cp.outbound, "_read_session_cwd", return_value="/tmp/project"),
             mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
@@ -1877,15 +2044,84 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 dry_run=False,
             )
 
-        self.assertEqual(rowid, 101)
+        self.assertEqual(rowid, 102)
+        self.assertEqual(captured.get("agent"), "claude")
         self.assertEqual(captured.get("label"), "bugfix")
         self.assertEqual(captured.get("cwd"), "/tmp/project")
+        self.assertIsNone(registry.get("pending_new_session_choice"))
         sessions = registry.get("sessions")
         self.assertIsInstance(sessions, dict)
         if not isinstance(sessions, dict):
-            self.fail("expected sessions map in registry")
-        self.assertIn("sid-123", sessions)
-        self.assertTrue(any(msg.get("kind") == "accepted" for msg in sent))
+            self.fail("expected sessions map")
+        session_rec = sessions.get("sid-123")
+        self.assertIsInstance(session_rec, dict)
+        if not isinstance(session_rec, dict):
+            self.fail("expected session record")
+        self.assertEqual(session_rec.get("agent"), "claude")
+        self.assertTrue(any(m.get("kind") == "accepted" for m in sent))
+
+    def test_process_inbound_replies_pending_choice_tmux_failure_falls_back_to_non_tmux_create(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {},
+            "pending_new_session_choice": {
+                "prompt": "continue",
+                "action": "implicit",
+                "label": None,
+                "cwd": "/tmp/project",
+                "created_ts": 1,
+                "source_text": "continue",
+                "source_ref": None,
+            },
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(103, "codex", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_create_new_session_in_tmux", return_value=(None, None, None, "tmux failed")),
+            mock.patch.object(
+                cp,
+                "_create_new_session",
+                return_value=("sid-456", "/tmp/sessions/sid-456.jsonl", "ok"),
+            ) as fallback_mock,
+            mock.patch.object(cp.outbound, "_read_session_cwd", return_value="/tmp/project"),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 103)
+        fallback_mock.assert_called_once()
+        self.assertEqual(fallback_mock.call_args.kwargs.get("agent"), "codex")
+        self.assertIsNone(registry.get("pending_new_session_choice"))
+        sessions = registry.get("sessions")
+        self.assertIsInstance(sessions, dict)
+        if not isinstance(sessions, dict):
+            self.fail("expected sessions map")
+        rec = sessions.get("sid-456")
+        self.assertIsInstance(rec, dict)
+        if not isinstance(rec, dict):
+            self.fail("expected session record")
+        self.assertEqual(rec.get("agent"), "codex")
+        self.assertTrue(any("without tmux" in str(m.get("text", "")).lower() for m in sent))
 
     def test_rewrite_numeric_choice_prompt_single_question(self) -> None:
         rec = {

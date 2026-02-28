@@ -1,72 +1,38 @@
 # AGENTS.md
 
 This file is intentionally short.
+Treat it as a map, not the manual.
 
-## Canonical Setup Instructions
+## System Of Record
 
-Use `README.md` as the single source of truth for setup and recovery:
-- `Quickstart`
-- `Codex / Claude Assisted Setup`
-- `First-Run Failure Modes`
-- `Launchd`
-- `Cleanup / Uninstall`
+Repository knowledge is the source of truth.
 
-If `AGENTS.md` and `README.md` diverge, `README.md` is authoritative. Keep this file as a pointer and update `README.md` first.
+- Setup and operations: `README.md`
+- Knowledge map and doc routing: `docs/index.md`
+- Runtime entrypoint: `agent_chat_control_plane.py`
 
-Canonical runtime entrypoint is `agent_chat_control_plane.py`.
+If this file conflicts with docs, docs are authoritative.
 
-## Agent Execution Contract
+## Progressive Disclosure
 
-- Prefer the built-in idempotent setup commands over ad-hoc file edits:
+1. Start with `README.md` for setup and runtime contracts.
+2. Use `docs/index.md` to locate the right domain docs.
+3. Open only the linked docs needed for the current task.
+4. When behavior changes, update the relevant docs in the same PR.
+
+## Doc Routing
+
+- Runtime architecture and flow: `docs/architecture.md`, `docs/control-plane.md`
+- Setup and recovery: `README.md`, `docs/troubleshooting.md`, `docs/cleanup.md`
+- Security and privacy: `SECURITY.md`, `docs/security.md`
+- Execution history and debt: `docs/exec-plans/`
+
+## Execution Constraints
+
+- Prefer idempotent control-plane commands over ad-hoc edits:
   - `setup-notify-hook`
   - `setup-launchd`
   - `doctor`
-- Require Homebrew + `tmux` in setup flows; auto-install both when missing (otherwise fail with actionable guidance).
-- Do not default to `/usr/bin/python3`; resolve Python from `PATH` and require `3.11+`.
-- Do not point messaging send paths to external files outside this repo.
-- Do not remove launchd setup/doctor flows.
-- Keep setup instructions idempotent and safe for repeated execution.
-
-## One-Shot (Reference)
-
-Run from repo root:
-
-```bash
-PYTHON_BIN="$(command -v python3 || true)"
-if [ -z "$PYTHON_BIN" ]; then
-  echo "python3 not found in PATH."
-  exit 1
-fi
-if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
-  echo "Require Python 3.11+."
-  exit 1
-fi
-
-if ! command -v brew >/dev/null 2>&1; then
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-fi
-
-if ! command -v tmux >/dev/null 2>&1; then
-  brew install tmux
-fi
-
-export AGENT_CHAT_AGENT="${AGENT_CHAT_AGENT:-codex}"
-export AGENT_CHAT_HOME="$HOME/.codex"
-export AGENT_CHAT_NOTIFY_MODE="route"
-# export AGENT_CHAT_TRANSPORT="telegram"   # imessage|telegram|both
-# export AGENT_TELEGRAM_BOT_TOKEN="<bot token>"
-# export AGENT_TELEGRAM_CHAT_ID="<chat id>"
-# export AGENT_IMESSAGE_TO="+15555550123"  # required for imessage|both
-
-"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
-  --agent "$AGENT_CHAT_AGENT" \
-  --recipient "${AGENT_IMESSAGE_TO:-}" \
-  --python-bin "$PYTHON_BIN"
-
-"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
-  --agent "$AGENT_CHAT_AGENT" \
-  --recipient "${AGENT_IMESSAGE_TO:-}" \
-  --python-bin "$PYTHON_BIN"
-
-"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent "$AGENT_CHAT_AGENT"
-```
+- Require Python `3.11+` resolved from `PATH`; do not hardcode `/usr/bin/python3`.
+- Keep setup flows idempotent and safe for repeated runs.
+- Keep message sender paths in-repo (`scripts/send-imessage.applescript`).

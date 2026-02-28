@@ -16,7 +16,8 @@
 1. Codex or Claude emits notify payload to `agent_chat_control_plane.py notify`.
 2. Control plane updates session registry and sends routed messages for active transport mode.
 3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
-4. Replies are routed by `@ref`, reply context, or auto-create logic.
+4. Replies are routed by `@ref`, reply context, or missing-session choice flow.
+   - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`) before creating a background session.
 5. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
 
 ## Key State Files
@@ -53,7 +54,8 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 ## Routing Controls
 
 - `AGENT_CHAT_STRICT_TMUX` (default `1`)
-  - `1`: never run non-tmux resume fallback when pane dispatch fails.
+  - `1`: keep strict tmux errors for general pane dispatch failures.
+  - exception: if a target session exists but has no usable pane mapping (`tmux_stale` no-pane class), control plane falls back to `resume` so replies still append to that session.
   - `0`: allow agent resume fallback for `tmux_failed`/`tmux_stale`.
 - `AGENT_CHAT_REQUIRE_SESSION_REF` (default follows strict mode)
   - when enabled, ambiguous implicit replies require `@<ref> <instruction>`.
@@ -61,6 +63,22 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - controls user-message ack wait window after tmux send.
 - `AGENT_CHAT_TRACE` or `run/once --trace`
   - emits per-message routing traces to stderr logs.
+
+## Missing-Session Choice Flow
+
+When an inbound reply targets a missing session (`@ref ...` or implicit resolution miss), control plane records a pending create request and sends:
+
+- `1) Codex`
+- `2) Claude`
+- `cancel`
+
+Follow-up behavior:
+- `1`/`codex`: create Codex session in background.
+- `2`/`claude`: create Claude session in background.
+- `cancel`: clear the pending request.
+
+If tmux creation fails after runtime choice, control plane falls back to direct (non-tmux) session creation.
+Only one pending choice is tracked at a time; newest unresolved request replaces older pending state.
 
 ## Failure Modes
 
@@ -82,6 +100,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 - Strict tmux routing failures:
   - Symptoms: iMessage receives strict routing error with no fallback response.
   - Fix: ensure target session has a live agent tmux pane and resend with `@<ref> ...`.
+  - note: if session metadata exists but pane mapping is missing/stale, control plane now resumes directly (no strict-mode error for this specific case).
 
 ## Launchd Runtime Notes
 

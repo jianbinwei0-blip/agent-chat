@@ -2531,6 +2531,7 @@ def _default_registry() -> dict[str, Any]:
         "sessions": {},
         "aliases": {},
         "last_dispatch_error": None,
+        "pending_new_session_choice": None,
         "ts": int(time.time()),
     }
 
@@ -2543,12 +2544,16 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     sessions = raw.get("sessions")
     aliases = raw.get("aliases")
     last_dispatch_error = raw.get("last_dispatch_error")
+    pending_new_session_choice = raw.get("pending_new_session_choice")
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
+    if not isinstance(pending_new_session_choice, dict):
+        pending_new_session_choice = None
     out: dict[str, Any] = {
         "sessions": sessions if isinstance(sessions, dict) else {},
         "aliases": aliases if isinstance(aliases, dict) else {},
         "last_dispatch_error": last_dispatch_error,
+        "pending_new_session_choice": pending_new_session_choice,
         "ts": int(time.time()),
     }
     return out
@@ -2564,6 +2569,9 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     last_dispatch_error = registry.get("last_dispatch_error")
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
+    pending_new_session_choice = registry.get("pending_new_session_choice")
+    if not isinstance(pending_new_session_choice, dict):
+        pending_new_session_choice = None
 
     # Keep only newest sessions by recency keys.
     if len(sessions) > _MAX_REGISTRY_ENTRIES:
@@ -2593,6 +2601,7 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             "sessions": sessions,
             "aliases": aliases,
             "last_dispatch_error": last_dispatch_error,
+            "pending_new_session_choice": pending_new_session_choice,
             "ts": int(time.time()),
         },
     )
@@ -2665,6 +2674,66 @@ def _set_alias(*, registry: dict[str, Any], session_id: str, label: str) -> None
     aliases[alias] = sid
 
 
+def _get_pending_new_session_choice(*, registry: dict[str, Any]) -> dict[str, Any] | None:
+    raw = registry.get("pending_new_session_choice")
+    if not isinstance(raw, dict):
+        return None
+
+    prompt = raw.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+
+    action_raw = raw.get("action")
+    action = action_raw.strip().lower() if isinstance(action_raw, str) else "implicit"
+    if action not in {"resume", "implicit"}:
+        action = "implicit"
+
+    source_text = raw.get("source_text") if isinstance(raw.get("source_text"), str) else ""
+    source_ref = raw.get("source_ref") if isinstance(raw.get("source_ref"), str) else None
+    label = raw.get("label") if isinstance(raw.get("label"), str) else None
+    cwd = raw.get("cwd") if isinstance(raw.get("cwd"), str) else None
+    created_ts = raw.get("created_ts") if isinstance(raw.get("created_ts"), int) else int(time.time())
+
+    return {
+        "prompt": prompt.strip(),
+        "action": action,
+        "source_text": source_text.strip() if isinstance(source_text, str) else "",
+        "source_ref": source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None,
+        "label": label.strip() if isinstance(label, str) and label.strip() else None,
+        "cwd": cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
+        "created_ts": created_ts,
+    }
+
+
+def _set_pending_new_session_choice(
+    *,
+    registry: dict[str, Any],
+    prompt: str,
+    action: str,
+    source_text: str,
+    source_ref: str | None = None,
+    label: str | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "prompt": prompt.strip(),
+        "action": action.strip().lower() if isinstance(action, str) else "implicit",
+        "source_text": source_text.strip() if isinstance(source_text, str) else "",
+        "source_ref": source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None,
+        "label": label.strip() if isinstance(label, str) and label.strip() else None,
+        "cwd": cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
+        "created_ts": int(time.time()),
+    }
+    registry["pending_new_session_choice"] = payload
+    return payload
+
+
+def _clear_pending_new_session_choice(*, registry: dict[str, Any]) -> None:
+    if registry.get("pending_new_session_choice") is None:
+        return
+    registry["pending_new_session_choice"] = None
+
+
 def _parse_inbound_command(text: str) -> dict[str, str]:
     raw = text.strip()
     if not raw:
@@ -2697,6 +2766,19 @@ def _parse_inbound_command(text: str) -> dict[str, str]:
         }
 
     return {"action": "implicit", "prompt": raw}
+
+
+def _parse_agent_choice_response(*, text: str) -> str | None:
+    raw = text.strip().lower()
+    if not raw:
+        return None
+    if raw in {"cancel", "abort", "stop", "none"}:
+        return "cancel"
+    if raw in {"1", "codex", "codex code", "use codex", "codexcode"}:
+        return "codex"
+    if raw in {"2", "claude", "claude code", "use claude", "claudecode"}:
+        return "claude"
+    return None
 
 
 def _rewrite_numeric_choice_prompt(
@@ -3574,6 +3656,19 @@ def _dispatch_failure_text(*, session_id: str, mode: str, reason: str | None) ->
     )
 
 
+def _should_resume_fallback_for_tmux_dispatch(*, mode: str, reason: str | None) -> bool:
+    if mode != "tmux_stale":
+        return False
+    reason_key = reason.strip().lower() if isinstance(reason, str) and reason.strip() else ""
+    return reason_key in {
+        "pane_missing",
+        "pane_stale",
+        "pane_discovery_ambiguous",
+        "session_path_missing",
+        "session_path_mismatch",
+    }
+
+
 def _render_notify_input_text(*, session_path: str | None) -> tuple[str, dict[str, Any] | None]:
     if not (isinstance(session_path, str) and session_path.strip()):
         return _DEFAULT_INPUT_NEEDED_TEXT, None
@@ -3969,6 +4064,7 @@ def _tmux_start_codex_window(
     session_name: str,
     cwd: str | None,
     label: str | None = None,
+    agent: str | None = None,
     tmux_socket: str | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     if not isinstance(session_name, str) or not session_name.strip():
@@ -3979,9 +4075,9 @@ def _tmux_start_codex_window(
     label_token = _sanitize_tmux_window_label(label=label)
     ts = time.strftime("%H%M%S")
     base_window_name = f"{prefix}-{label_token}-{ts}"
-    agent = _current_agent()
-    agent_bin = _resolve_agent_bin(agent=agent)
-    if agent == "claude":
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    agent_bin = _resolve_agent_bin(agent=normalized_agent)
+    if normalized_agent == "claude":
         launch_cmd = f"CLAUDE_CHAT_REPLY=1 {shlex.quote(agent_bin)}"
     else:
         launch_cmd = f"AGENT_CHAT_REPLY=1 {shlex.quote(agent_bin)} -a never -s danger-full-access"
@@ -4022,7 +4118,7 @@ def _tmux_start_codex_window(
             return None, None, "tmux created a window but did not return pane ID."
         return pane, window_name, None
 
-    return None, None, f"Failed to create tmux window for {_agent_display_name(agent=agent)}."
+    return None, None, f"Failed to create tmux window for {_agent_display_name(agent=normalized_agent)}."
 
 
 def _tmux_wait_for_pane_command(*, pane: str, expected: str, timeout_s: float, tmux_socket: str | None = None) -> bool:
@@ -4853,10 +4949,10 @@ def _resolve_session_agent(
     return _current_agent()
 
 
-def _find_new_session_since(*, codex_home: Path, before: set[str]) -> Path | None:
+def _find_new_session_since(*, codex_home: Path, before: set[str], agent: str | None = None) -> Path | None:
     newest: Path | None = None
     newest_mtime = -1.0
-    for path in _find_all_session_files(codex_home=codex_home):
+    for path in _find_all_session_files(codex_home=codex_home, agent=agent):
         p = str(path)
         if p in before:
             continue
@@ -4870,10 +4966,16 @@ def _find_new_session_since(*, codex_home: Path, before: set[str]) -> Path | Non
     return newest
 
 
-def _wait_for_new_session_file(*, codex_home: Path, before: set[str], timeout_s: float) -> Path | None:
+def _wait_for_new_session_file(
+    *,
+    codex_home: Path,
+    before: set[str],
+    timeout_s: float,
+    agent: str | None = None,
+) -> Path | None:
     deadline = time.monotonic() + max(0.0, float(timeout_s))
     while time.monotonic() < deadline:
-        created = _find_new_session_since(codex_home=codex_home, before=before)
+        created = _find_new_session_since(codex_home=codex_home, before=before, agent=agent)
         if created:
             return created
         time.sleep(0.25)
@@ -4886,15 +4988,27 @@ def _create_new_session_in_tmux(
     prompt: str,
     cwd: str | None,
     label: str | None = None,
+    agent: str | None = None,
     tmux_socket: str | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    agent = _current_agent()
-    agent_name = _agent_display_name(agent=agent)
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    current_agent = _current_agent()
+    if normalized_agent == current_agent:
+        agent_home = codex_home
+    else:
+        agent_home = _lookup_agent_home_path(agent=normalized_agent, current_home=codex_home)
+    agent_name = _agent_display_name(agent=normalized_agent)
     text = " ".join(prompt.splitlines()).strip()
     if not text:
         return None, None, None, "No instruction text was provided."
 
-    before = {str(path) for path in _find_all_session_files(codex_home=codex_home)}
+    before = {
+        str(path)
+        for path in _find_all_session_files(
+            codex_home=agent_home,
+            agent=normalized_agent,
+        )
+    }
 
     tmux_socket_norm = _normalize_tmux_socket(tmux_socket=tmux_socket)
     ensure_kwargs: dict[str, Any] = {"cwd": cwd}
@@ -4908,6 +5022,7 @@ def _create_new_session_in_tmux(
         "session_name": tmux_session,
         "cwd": cwd,
         "label": label,
+        "agent": normalized_agent,
     }
     if tmux_socket_norm:
         window_kwargs["tmux_socket"] = tmux_socket_norm
@@ -4917,7 +5032,11 @@ def _create_new_session_in_tmux(
 
     # Best-effort warmup only. Do not fail solely on command-name mismatch because
     # packaged/wrapped Codex binaries may appear as different pane commands.
-    wait_kwargs: dict[str, Any] = {"pane": pane, "expected": _agent_command_keyword(agent=agent), "timeout_s": 8.0}
+    wait_kwargs: dict[str, Any] = {
+        "pane": pane,
+        "expected": _agent_command_keyword(agent=normalized_agent),
+        "timeout_s": 8.0,
+    }
     if tmux_socket_norm:
         wait_kwargs["tmux_socket"] = tmux_socket_norm
     _tmux_wait_for_pane_command(**wait_kwargs)
@@ -4928,9 +5047,14 @@ def _create_new_session_in_tmux(
     if not reply._tmux_send_prompt(**send_kwargs):
         return None, None, pane, f"Started {agent_name} in tmux but failed to submit initial prompt."
 
-    created = _wait_for_new_session_file(codex_home=codex_home, before=before, timeout_s=12.0)
+    created = _wait_for_new_session_file(
+        codex_home=agent_home,
+        before=before,
+        timeout_s=12.0,
+        agent=normalized_agent,
+    )
     if not created:
-        newest = _find_all_session_files(codex_home=codex_home)
+        newest = _find_all_session_files(codex_home=agent_home, agent=normalized_agent)
         if newest:
             newest.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
             created = newest[0]
@@ -4950,32 +5074,52 @@ def _create_new_session(
     codex_home: Path,
     label: str,
     prompt: str,
+    agent: str | None = None,
+    cwd: str | None = None,
 ) -> tuple[str | None, str | None, str | None]:
-    agent = _current_agent()
-    before = {str(path) for path in _find_all_session_files(codex_home=codex_home)}
+    del label
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
+    current_agent = _current_agent()
+    if normalized_agent == current_agent:
+        agent_home = codex_home
+    else:
+        agent_home = _lookup_agent_home_path(agent=normalized_agent, current_home=codex_home)
+    before = {
+        str(path)
+        for path in _find_all_session_files(
+            codex_home=agent_home,
+            agent=normalized_agent,
+        )
+    }
 
-    out_dir = codex_home / "tmp"
+    out_dir = agent_home / "tmp"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
     out_path = out_dir / f"agent_chat_new_session_{int(time.time())}_{os.getpid()}.txt"
 
-    if agent == "claude":
-        cmd = [_resolve_agent_bin(agent=agent), "-p", prompt]
+    if normalized_agent == "claude":
+        cmd = [_resolve_agent_bin(agent=normalized_agent), "-p", prompt]
     else:
         cmd = [
-            _resolve_agent_bin(agent=agent),
+            _resolve_agent_bin(agent=normalized_agent),
             "-a",
             "never",
             "-s",
             "danger-full-access",
-            "exec",
-            "--skip-git-repo-check",
-            "--output-last-message",
-            str(out_path),
-            prompt,
         ]
+        if isinstance(cwd, str) and cwd.strip():
+            cmd.extend(["-C", cwd.strip()])
+        cmd.extend(
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--output-last-message",
+                str(out_path),
+                prompt,
+            ]
+        )
 
     try:
         proc = subprocess.run(
@@ -4985,6 +5129,7 @@ def _create_new_session(
             check=False,
             text=True,
             env={**os.environ, "AGENT_CHAT_REPLY": "1", "CLAUDE_CHAT_REPLY": "1"},
+            cwd=cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
         )
     except Exception:
         return None, None, "Failed to start new session."
@@ -4992,10 +5137,14 @@ def _create_new_session(
     if proc.returncode != 0:
         return None, None, "New session command failed."
 
-    created = _find_new_session_since(codex_home=codex_home, before=before)
+    created = _find_new_session_since(
+        codex_home=agent_home,
+        before=before,
+        agent=normalized_agent,
+    )
     if not created:
         # Best-effort fallback: newest file.
-        newest = _find_all_session_files(codex_home=codex_home)
+        newest = _find_all_session_files(codex_home=agent_home, agent=normalized_agent)
         if newest:
             newest.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
             created = newest[0]
@@ -5008,7 +5157,7 @@ def _create_new_session(
         return None, None, "Session created but session ID was not found."
 
     response: str | None = None
-    if agent == "claude":
+    if normalized_agent == "claude":
         response = proc.stdout.strip() if isinstance(proc.stdout, str) and proc.stdout.strip() else None
     else:
         try:
@@ -5227,6 +5376,145 @@ def _process_inbound_replies(
         if reply._is_bot_message(text):
             continue
 
+        pending_choice = _get_pending_new_session_choice(registry=registry)
+        if isinstance(pending_choice, dict):
+            choice = _parse_agent_choice_response(text=text)
+            if choice == "cancel":
+                _clear_pending_new_session_choice(registry=registry)
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=None,
+                    kind="status",
+                    text="Canceled pending new-session creation request.",
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                )
+                continue
+            if choice in _SUPPORTED_AGENTS:
+                requested_prompt = pending_choice.get("prompt")
+                if not isinstance(requested_prompt, str) or not requested_prompt.strip():
+                    _clear_pending_new_session_choice(registry=registry)
+                    _send_structured(
+                        codex_home=codex_home,
+                        recipient=recipient,
+                        session_id=None,
+                        kind="error",
+                        text="Pending new-session request was invalid and has been cleared.",
+                        max_message_chars=max_message_chars,
+                        dry_run=dry_run,
+                        message_index=message_index,
+                    )
+                    continue
+
+                pending_label = pending_choice.get("label")
+                selected_label = pending_label if isinstance(pending_label, str) else None
+                pending_cwd = pending_choice.get("cwd")
+                selected_cwd = pending_cwd if isinstance(pending_cwd, str) else None
+
+                preferred_tmux_socket = _normalize_tmux_socket(
+                    tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET")
+                ) or _choose_registry_tmux_socket(registry=registry)
+
+                sid, session_path, pane, create_err = _create_new_session_in_tmux(
+                    codex_home=codex_home,
+                    prompt=requested_prompt.strip(),
+                    cwd=selected_cwd,
+                    label=selected_label,
+                    agent=choice,
+                    tmux_socket=preferred_tmux_socket,
+                )
+                created_via_tmux = bool(sid)
+                create_response: str | None = None
+                fallback_err: str | None = None
+                if not sid:
+                    sid, session_path, create_response = _create_new_session(
+                        codex_home=codex_home,
+                        label=selected_label or "session",
+                        prompt=requested_prompt.strip(),
+                        agent=choice,
+                        cwd=selected_cwd,
+                    )
+                    if not sid:
+                        fallback_err = create_response
+
+                if not sid:
+                    err_text = (
+                        "Failed to create new session after agent selection."
+                        f" tmux: {create_err or 'unknown'}; fallback: {fallback_err or 'unknown'}"
+                    )
+                    _send_structured(
+                        codex_home=codex_home,
+                        recipient=recipient,
+                        session_id=None,
+                        kind="error",
+                        text=err_text,
+                        max_message_chars=max_message_chars,
+                        dry_run=dry_run,
+                        message_index=message_index,
+                        agent=choice,
+                    )
+                    continue
+
+                session_cwd = selected_cwd
+                if session_path:
+                    extracted_cwd = outbound._read_session_cwd(session_path=Path(session_path))
+                    if isinstance(extracted_cwd, str) and extracted_cwd.strip():
+                        session_cwd = extracted_cwd.strip()
+
+                fields: dict[str, Any] = {
+                    "agent": choice,
+                    "awaiting_input": False,
+                    "pending_request_user_input": None,
+                }
+                if session_path:
+                    fields["session_path"] = session_path
+                if isinstance(session_cwd, str) and session_cwd.strip():
+                    fields["cwd"] = session_cwd.strip()
+
+                if created_via_tmux:
+                    fields["pending_completion"] = True
+                    fields["last_resume_ts"] = int(time.time())
+                    if isinstance(pane, str) and pane.strip():
+                        fields["tmux_pane"] = pane.strip()
+                    if isinstance(preferred_tmux_socket, str) and preferred_tmux_socket.strip():
+                        fields["tmux_socket"] = preferred_tmux_socket.strip()
+                else:
+                    fields["pending_completion"] = False
+                    fields["last_response_ts"] = int(time.time())
+
+                _upsert_session(registry=registry, session_id=sid, fields=fields)
+                if isinstance(selected_label, str):
+                    alias = selected_label.strip().lower()
+                    if re.match(r"^[A-Za-z0-9._-]+$", alias):
+                        _set_alias(registry=registry, session_id=sid, label=alias)
+
+                _clear_pending_new_session_choice(registry=registry)
+
+                if created_via_tmux:
+                    text_out = (
+                        f"Started new {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
+                        f"in tmux pane {pane or '-'}."
+                    )
+                else:
+                    text_out = (
+                        f"Started new {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
+                        "without tmux."
+                    )
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=sid,
+                    kind="accepted",
+                    text=text_out,
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    agent=choice,
+                )
+                continue
+
         cmd = _parse_inbound_command(text)
         action = cmd.get("action")
         if action == "noop":
@@ -5384,78 +5672,51 @@ def _process_inbound_replies(
         _trace(f"resolved target_sid={target_sid or '-'} err={err or '-'}")
 
         if not target_sid:
-            allow_auto_create = auto_create_on_missing and not (strict_tmux and action == "implicit")
+            # Keep strict mode for ambiguous implicit routing, but still allow the
+            # runtime-choice flow when there is no active implicit target at all.
+            implicit_missing_without_ambiguity = (
+                action == "implicit"
+                and strict_tmux
+                and isinstance(err, str)
+                and err.startswith(
+                    (
+                        "No session is currently awaiting input.",
+                        "No tracked sessions.",
+                    )
+                )
+            )
+            allow_auto_create = auto_create_on_missing and (
+                not (strict_tmux and action == "implicit") or implicit_missing_without_ambiguity
+            )
             if allow_auto_create:
                 fallback_cwd = _default_new_session_cwd()
                 auto_create_label: str | None = None
-                preferred_tmux_socket = _normalize_tmux_socket(
-                    tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET")
-                ) or _choose_registry_tmux_socket(registry=registry)
                 if action == "resume":
                     raw_ref = cmd.get("session_ref", "")
                     if isinstance(raw_ref, str) and raw_ref.strip():
                         auto_create_label = raw_ref.strip()
-
-                sid, session_path, pane, create_err = _create_new_session_in_tmux(
-                    codex_home=codex_home,
+                source_ref = cmd.get("session_ref", "") if action == "resume" else None
+                _set_pending_new_session_choice(
+                    registry=registry,
                     prompt=prompt,
-                    cwd=fallback_cwd,
+                    action=action,
+                    source_text=text,
+                    source_ref=source_ref if isinstance(source_ref, str) and source_ref.strip() else None,
                     label=auto_create_label,
-                    tmux_socket=preferred_tmux_socket,
+                    cwd=fallback_cwd,
                 )
-                if sid:
-                    session_cwd = fallback_cwd
-                    if session_path:
-                        extracted_cwd = outbound._read_session_cwd(session_path=Path(session_path))
-                        if isinstance(extracted_cwd, str) and extracted_cwd.strip():
-                            session_cwd = extracted_cwd.strip()
-
-                    fields: dict[str, Any] = {
-                        "agent": _current_agent(),
-                        "awaiting_input": False,
-                        "pending_completion": True,
-                        "last_resume_ts": int(time.time()),
-                        "pending_request_user_input": None,
-                    }
-                    if session_path:
-                        fields["session_path"] = session_path
-                    if isinstance(session_cwd, str) and session_cwd.strip():
-                        fields["cwd"] = session_cwd.strip()
-                    if isinstance(pane, str) and pane.strip():
-                        fields["tmux_pane"] = pane.strip()
-                    if isinstance(preferred_tmux_socket, str) and preferred_tmux_socket.strip():
-                        fields["tmux_socket"] = preferred_tmux_socket.strip()
-
-                    _upsert_session(registry=registry, session_id=sid, fields=fields)
-
-                    if action == "resume":
-                        raw_ref = cmd.get("session_ref", "")
-                        if isinstance(raw_ref, str):
-                            alias = raw_ref.strip().lower()
-                            if re.match(r"^[A-Za-z0-9._-]+$", alias):
-                                _set_alias(registry=registry, session_id=sid, label=alias)
-
-                    _send_structured(
-                        codex_home=codex_home,
-                        recipient=recipient,
-                        session_id=sid,
-                        kind="accepted",
-                        text=(
-                            f"No matching session found; started new session @{_session_ref(sid)} "
-                            f"in tmux pane {pane or '-'}."
-                        ),
-                        max_message_chars=max_message_chars,
-                        dry_run=dry_run,
-                        message_index=message_index,
-                    )
-                    continue
-
+                pending_prompt = (
+                    "No matching session found. Choose runtime for a new background session:\n"
+                    "1) Codex\n"
+                    "2) Claude\n"
+                    "Reply with 1 or 2 (or codex/claude). Reply 'cancel' to abort."
+                )
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
                     session_id=None,
-                    kind="error",
-                    text=create_err or err or "Could not resolve target session.",
+                    kind="needs_input",
+                    text=pending_prompt,
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
@@ -5623,7 +5884,11 @@ def _process_inbound_replies(
                 mode=dispatch_mode,
                 reason=dispatch_reason,
             )
-            if strict_tmux:
+            allow_resume_override = _should_resume_fallback_for_tmux_dispatch(
+                mode=dispatch_mode,
+                reason=dispatch_reason,
+            )
+            if strict_tmux and not allow_resume_override:
                 preserved_pane = ""
                 if isinstance(rec, dict):
                     rec_pane = rec.get("tmux_pane")

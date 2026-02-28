@@ -273,6 +273,13 @@ When inbound routing is enabled (from iMessage and/or Telegram), reply messages 
 - `@<session_ref> <instruction>`
 - `new <label>: <instruction>`
 
+If a target session cannot be resolved, control plane asks which runtime to use before creating a background session:
+- `1` / `codex`
+- `2` / `claude`
+- `cancel`
+
+Only one pending runtime-choice request is tracked at a time (newest unresolved request replaces older pending state).
+
 ### Important environment variables
 
 - `AGENT_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
@@ -288,11 +295,12 @@ When inbound routing is enabled (from iMessage and/or Telegram), reply messages 
 - `AGENT_IMESSAGE_MAX_LEN`: max outgoing message chunk size
 - `AGENT_CHAT_INBOUND_POLL_S`: control-plane polling interval for `run`
 - `AGENT_CHAT_STRICT_TMUX`: strict tmux routing mode (`1` default)
+  - strict mode still applies, except for existing sessions with no usable tmux pane mapping (`tmux_stale` no-pane class), which now fall back to `resume`.
 - `AGENT_CHAT_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
 - `AGENT_CHAT_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
 - `AGENT_CHAT_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
 - `AGENT_CHAT_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
-- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`: auto-create when no session matches (`1` default)
+- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`: prompt for runtime choice and then create when no session matches (`1` default)
 - `AGENT_CHAT_LAUNCHD_LABEL`: launchd service label used by `doctor`
 
 ## Launchd
@@ -337,10 +345,13 @@ To remove integration from a host machine (launchd + app bundle + hook wiring + 
 
 ## Documentation
 
-- `AGENTS.md`
+- `AGENTS.md` (table of contents for agents)
+- `docs/index.md` (knowledge-system entrypoint)
 - `docs/architecture.md`
 - `docs/cleanup.md`
 - `docs/control-plane.md`
+- `docs/exec-plans/README.md`
+- `docs/exec-plans/tech-debt-tracker.md`
 - `docs/security.md`
 - `docs/troubleshooting.md`
 
