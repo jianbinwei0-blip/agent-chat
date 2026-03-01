@@ -187,8 +187,13 @@ Expected behavior:
 - reply `1`/`codex` or `2`/`claude` to pick runtime for new background session.
 - reply `cancel` to abort.
 - if tmux launch fails after runtime choice, control plane falls back to non-tmux session creation.
-- only one pending runtime-choice request is retained at a time (newest unresolved request wins).
+- iMessage/non-threaded inbound keeps one global pending runtime-choice request (newest unresolved request wins).
+- Telegram topic inbound keeps pending runtime choice per `chat_id:message_thread_id`.
 - strict mode still requires explicit `@<session_ref>` for ambiguous implicit routing contexts.
+
+Telegram topic specifics:
+- once a topic is bound to a session, implicit replies in that topic target the bound session first.
+- if a reply comes from a bound topic but outbound messages are not staying in-thread, inspect `~/.codex/tmp/agent_chat_session_registry.json` for `telegram_thread_bindings` and the session's `telegram_message_thread_id`.
 
 ### Ambiguous replies or wrong target session
 

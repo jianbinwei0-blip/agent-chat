@@ -18,6 +18,7 @@
 3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
 4. Replies are routed by `@ref`, reply context, or missing-session choice flow.
    - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`) before creating a background session.
+   - for Telegram topics, thread binding (`chat_id:message_thread_id -> session_id`) is checked first for implicit replies.
 5. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
 
 ## Key State Files
@@ -78,7 +79,11 @@ Follow-up behavior:
 - `cancel`: clear the pending request.
 
 If tmux creation fails after runtime choice, control plane falls back to direct (non-tmux) session creation.
-Only one pending choice is tracked at a time; newest unresolved request replaces older pending state.
+Pending choice scope:
+- iMessage / non-threaded: one global pending request; newest unresolved request replaces older state.
+- Telegram topics: one pending request per `chat_id:message_thread_id`.
+
+When a runtime choice creates a session from Telegram topic input, the topic is bound to that session. Outbound session messages then include `message_thread_id` so updates stay in the same topic.
 
 ## Failure Modes
 

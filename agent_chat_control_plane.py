@@ -876,6 +876,39 @@ def _telegram_chat_id() -> str | None:
     return chat_id or None
 
 
+def _normalize_telegram_thread_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = int(raw)
+        except Exception:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _telegram_thread_key(*, chat_id: str | None, thread_id: int | None) -> str | None:
+    chat = chat_id.strip() if isinstance(chat_id, str) else ""
+    normalized_thread_id = _normalize_telegram_thread_id(thread_id)
+    if not chat or normalized_thread_id is None:
+        return None
+    return f"{chat}:{normalized_thread_id}"
+
+
+def _telegram_thread_id_from_key(*, thread_key: str | None) -> int | None:
+    key = thread_key.strip() if isinstance(thread_key, str) else ""
+    if ":" not in key:
+        return None
+    thread_raw = key.rsplit(":", 1)[-1]
+    return _normalize_telegram_thread_id(thread_raw)
+
+
 def _telegram_bot_token_setup_instructions() -> str:
     return (
         "AGENT_TELEGRAM_BOT_TOKEN is required when AGENT_CHAT_TRANSPORT includes Telegram.\n"
@@ -929,14 +962,25 @@ def _save_telegram_inbound_cursor(*, codex_home: Path, last_update_id: int) -> N
     _write_json(_telegram_inbound_cursor_path(codex_home=codex_home), payload)
 
 
-def _send_telegram_message(*, token: str, chat_id: str, message: str, timeout_s: float = _DEFAULT_TELEGRAM_SEND_TIMEOUT_S) -> bool:
+def _send_telegram_message(
+    *,
+    token: str,
+    chat_id: str,
+    message: str,
+    message_thread_id: int | None = None,
+    timeout_s: float = _DEFAULT_TELEGRAM_SEND_TIMEOUT_S,
+) -> bool:
     token_text = token.strip()
     chat_id_text = chat_id.strip()
     if not token_text or not chat_id_text:
         return False
 
     url = f"{_telegram_api_base()}/bot{token_text}/sendMessage"
-    payload = urllib_parse.urlencode({"chat_id": chat_id_text, "text": message}).encode("utf-8")
+    payload_fields: dict[str, str] = {"chat_id": chat_id_text, "text": message}
+    normalized_thread_id = _normalize_telegram_thread_id(message_thread_id)
+    if normalized_thread_id is not None:
+        payload_fields["message_thread_id"] = str(normalized_thread_id)
+    payload = urllib_parse.urlencode(payload_fields).encode("utf-8")
     request = urllib_request.Request(
         url,
         data=payload,
@@ -955,7 +999,12 @@ def _send_telegram_message(*, token: str, chat_id: str, message: str, timeout_s:
     return isinstance(parsed, dict) and bool(parsed.get("ok"))
 
 
-def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id: int) -> list[tuple[int, str, str | None]]:
+def _fetch_telegram_updates(
+    *,
+    token: str,
+    chat_id: str | None,
+    after_update_id: int,
+) -> list[tuple[int, str, str | None, int | None]]:
     token_text = token.strip()
     if not token_text:
         return []
@@ -984,7 +1033,7 @@ def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id:
         return []
 
     target_chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
-    out: list[tuple[int, str, str | None]] = []
+    out: list[tuple[int, str, str | None, int | None]] = []
     for update in result:
         if not isinstance(update, dict):
             continue
@@ -1004,6 +1053,7 @@ def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id:
         text = message.get("text")
         if not isinstance(text, str) or not text.strip():
             continue
+        message_thread_id = _normalize_telegram_thread_id(message.get("message_thread_id"))
         reply_reference_text: str | None = None
         reply_to_message = message.get("reply_to_message")
         if isinstance(reply_to_message, dict):
@@ -1013,7 +1063,7 @@ def _fetch_telegram_updates(*, token: str, chat_id: str | None, after_update_id:
                 if trimmed_reply_text:
                     reply_reference_text = trimmed_reply_text
 
-        out.append((update_id, text.strip(), reply_reference_text))
+        out.append((update_id, text.strip(), reply_reference_text, message_thread_id))
     return out
 
 
@@ -1187,6 +1237,7 @@ def _enqueue_fallback_event(
     transport: str,
     recipient: str,
     message: str,
+    telegram_message_thread_id: int | None = None,
 ) -> None:
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1195,12 +1246,21 @@ def _enqueue_fallback_event(
         "to": recipient,
         "text": message,
     }
+    normalized_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
+    if normalized_thread_id is not None:
+        record["telegram_message_thread_id"] = normalized_thread_id
     with queue_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False))
         f.write("\n")
 
 
-def _send_message_with_transport(*, transport: str, recipient: str, message: str) -> bool:
+def _send_message_with_transport(
+    *,
+    transport: str,
+    recipient: str,
+    message: str,
+    telegram_message_thread_id: int | None = None,
+) -> bool:
     if transport == "imessage":
         recipient_text = recipient.strip()
         if not recipient_text:
@@ -1213,7 +1273,12 @@ def _send_message_with_transport(*, transport: str, recipient: str, message: str
         chat_id = recipient.strip()
         if not chat_id:
             return False
-        return _send_telegram_message(token=token, chat_id=chat_id, message=message)
+        return _send_telegram_message(
+            token=token,
+            chat_id=chat_id,
+            message=message,
+            message_thread_id=telegram_message_thread_id,
+        )
     return False
 
 
@@ -1222,6 +1287,7 @@ def _deliver_message_across_transports(
     codex_home: Path,
     imessage_recipient: str,
     message: str,
+    telegram_message_thread_id: int | None = None,
 ) -> bool:
     queue_path = _queue_path(codex_home=codex_home)
     mode = _transport_mode()
@@ -1247,7 +1313,12 @@ def _deliver_message_across_transports(
         if isinstance(chat_id, str) and chat_id.strip():
             attempted = True
             chat_id_text = chat_id.strip()
-            if _send_message_with_transport(transport="telegram", recipient=chat_id_text, message=message):
+            if _send_message_with_transport(
+                transport="telegram",
+                recipient=chat_id_text,
+                message=message,
+                telegram_message_thread_id=telegram_message_thread_id,
+            ):
                 sent_any = True
             else:
                 _enqueue_fallback_event(
@@ -1255,6 +1326,7 @@ def _deliver_message_across_transports(
                     transport="telegram",
                     recipient=chat_id_text,
                     message=message,
+                    telegram_message_thread_id=telegram_message_thread_id,
                 )
 
     return sent_any if attempted else False
@@ -1327,6 +1399,8 @@ def _drain_fallback_queue(
                     stats["parse_errors"] = int(stats["parse_errors"]) + 1
                     continue
 
+                telegram_message_thread_id = _normalize_telegram_thread_id(event.get("telegram_message_thread_id"))
+
                 if dry_run:
                     retained_lines.append(line)
                     stats["retained"] = int(stats["retained"]) + 1
@@ -1336,6 +1410,7 @@ def _drain_fallback_queue(
                     transport=transport_text,
                     recipient=recipient,
                     message=message,
+                    telegram_message_thread_id=telegram_message_thread_id,
                 )
                 if ok:
                     stats["sent"] = int(stats["sent"]) + 1
@@ -2532,8 +2607,69 @@ def _default_registry() -> dict[str, Any]:
         "aliases": {},
         "last_dispatch_error": None,
         "pending_new_session_choice": None,
+        "pending_new_session_choice_by_thread": {},
+        "telegram_thread_bindings": {},
         "ts": int(time.time()),
     }
+
+
+def _normalize_pending_new_session_choice_payload(*, raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    prompt = raw.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+
+    action_raw = raw.get("action")
+    action = action_raw.strip().lower() if isinstance(action_raw, str) else "implicit"
+    if action not in {"resume", "implicit"}:
+        action = "implicit"
+
+    source_text = raw.get("source_text") if isinstance(raw.get("source_text"), str) else ""
+    source_ref = raw.get("source_ref") if isinstance(raw.get("source_ref"), str) else None
+    label = raw.get("label") if isinstance(raw.get("label"), str) else None
+    cwd = raw.get("cwd") if isinstance(raw.get("cwd"), str) else None
+    created_ts = raw.get("created_ts") if isinstance(raw.get("created_ts"), int) else int(time.time())
+
+    return {
+        "prompt": prompt.strip(),
+        "action": action,
+        "source_text": source_text.strip() if isinstance(source_text, str) else "",
+        "source_ref": source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None,
+        "label": label.strip() if isinstance(label, str) and label.strip() else None,
+        "cwd": cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
+        "created_ts": created_ts,
+    }
+
+
+def _normalize_pending_new_session_choice_by_thread(*, raw: object) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        thread_key = key.strip() if isinstance(key, str) else ""
+        if not thread_key:
+            continue
+        payload = _normalize_pending_new_session_choice_payload(raw=value)
+        if isinstance(payload, dict):
+            out[thread_key] = payload
+    return out
+
+
+def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        thread_key = key.strip() if isinstance(key, str) else ""
+        sid = value.strip() if isinstance(value, str) else ""
+        if not thread_key or not sid:
+            continue
+        if sid not in sessions:
+            continue
+        out[thread_key] = sid
+    return out
 
 
 def _load_registry(*, codex_home: Path) -> dict[str, Any]:
@@ -2544,16 +2680,26 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     sessions = raw.get("sessions")
     aliases = raw.get("aliases")
     last_dispatch_error = raw.get("last_dispatch_error")
-    pending_new_session_choice = raw.get("pending_new_session_choice")
+    sessions_map = sessions if isinstance(sessions, dict) else {}
+    pending_new_session_choice = _normalize_pending_new_session_choice_payload(
+        raw=raw.get("pending_new_session_choice")
+    )
+    pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
+        raw=raw.get("pending_new_session_choice_by_thread")
+    )
+    telegram_thread_bindings = _normalize_telegram_thread_bindings(
+        raw=raw.get("telegram_thread_bindings"),
+        sessions=sessions_map,
+    )
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
-    if not isinstance(pending_new_session_choice, dict):
-        pending_new_session_choice = None
     out: dict[str, Any] = {
-        "sessions": sessions if isinstance(sessions, dict) else {},
+        "sessions": sessions_map,
         "aliases": aliases if isinstance(aliases, dict) else {},
         "last_dispatch_error": last_dispatch_error,
         "pending_new_session_choice": pending_new_session_choice,
+        "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
+        "telegram_thread_bindings": telegram_thread_bindings,
         "ts": int(time.time()),
     }
     return out
@@ -2569,9 +2715,16 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     last_dispatch_error = registry.get("last_dispatch_error")
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
-    pending_new_session_choice = registry.get("pending_new_session_choice")
-    if not isinstance(pending_new_session_choice, dict):
-        pending_new_session_choice = None
+    pending_new_session_choice = _normalize_pending_new_session_choice_payload(
+        raw=registry.get("pending_new_session_choice")
+    )
+    pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
+        raw=registry.get("pending_new_session_choice_by_thread")
+    )
+    telegram_thread_bindings = _normalize_telegram_thread_bindings(
+        raw=registry.get("telegram_thread_bindings"),
+        sessions=sessions,
+    )
 
     # Keep only newest sessions by recency keys.
     if len(sessions) > _MAX_REGISTRY_ENTRIES:
@@ -2594,6 +2747,11 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             for alias, sid in aliases.items()
             if isinstance(alias, str) and isinstance(sid, str) and sid in sessions
         }
+        telegram_thread_bindings = {
+            thread_key: sid
+            for thread_key, sid in telegram_thread_bindings.items()
+            if isinstance(thread_key, str) and isinstance(sid, str) and sid in sessions
+        }
 
     _write_json(
         _registry_path(codex_home=codex_home),
@@ -2602,6 +2760,8 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             "aliases": aliases,
             "last_dispatch_error": last_dispatch_error,
             "pending_new_session_choice": pending_new_session_choice,
+            "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
+            "telegram_thread_bindings": telegram_thread_bindings,
             "ts": int(time.time()),
         },
     )
@@ -2675,34 +2835,7 @@ def _set_alias(*, registry: dict[str, Any], session_id: str, label: str) -> None
 
 
 def _get_pending_new_session_choice(*, registry: dict[str, Any]) -> dict[str, Any] | None:
-    raw = registry.get("pending_new_session_choice")
-    if not isinstance(raw, dict):
-        return None
-
-    prompt = raw.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        return None
-
-    action_raw = raw.get("action")
-    action = action_raw.strip().lower() if isinstance(action_raw, str) else "implicit"
-    if action not in {"resume", "implicit"}:
-        action = "implicit"
-
-    source_text = raw.get("source_text") if isinstance(raw.get("source_text"), str) else ""
-    source_ref = raw.get("source_ref") if isinstance(raw.get("source_ref"), str) else None
-    label = raw.get("label") if isinstance(raw.get("label"), str) else None
-    cwd = raw.get("cwd") if isinstance(raw.get("cwd"), str) else None
-    created_ts = raw.get("created_ts") if isinstance(raw.get("created_ts"), int) else int(time.time())
-
-    return {
-        "prompt": prompt.strip(),
-        "action": action,
-        "source_text": source_text.strip() if isinstance(source_text, str) else "",
-        "source_ref": source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None,
-        "label": label.strip() if isinstance(label, str) and label.strip() else None,
-        "cwd": cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
-        "created_ts": created_ts,
-    }
+    return _normalize_pending_new_session_choice_payload(raw=registry.get("pending_new_session_choice"))
 
 
 def _set_pending_new_session_choice(
@@ -2732,6 +2865,129 @@ def _clear_pending_new_session_choice(*, registry: dict[str, Any]) -> None:
     if registry.get("pending_new_session_choice") is None:
         return
     registry["pending_new_session_choice"] = None
+
+
+def _get_pending_new_session_choice_by_thread(
+    *,
+    registry: dict[str, Any],
+    thread_key: str | None,
+) -> dict[str, Any] | None:
+    key = thread_key.strip() if isinstance(thread_key, str) else ""
+    if not key:
+        return None
+    mapping = registry.get("pending_new_session_choice_by_thread")
+    if not isinstance(mapping, dict):
+        return None
+    return _normalize_pending_new_session_choice_payload(raw=mapping.get(key))
+
+
+def _set_pending_new_session_choice_by_thread(
+    *,
+    registry: dict[str, Any],
+    thread_key: str,
+    prompt: str,
+    action: str,
+    source_text: str,
+    source_ref: str | None = None,
+    label: str | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    key = thread_key.strip()
+    payload = _set_pending_new_session_choice(
+        registry={"pending_new_session_choice": None},
+        prompt=prompt,
+        action=action,
+        source_text=source_text,
+        source_ref=source_ref,
+        label=label,
+        cwd=cwd,
+    )
+    mapping = registry.setdefault("pending_new_session_choice_by_thread", {})
+    if not isinstance(mapping, dict):
+        mapping = {}
+        registry["pending_new_session_choice_by_thread"] = mapping
+    mapping[key] = payload
+    return payload
+
+
+def _clear_pending_new_session_choice_by_thread(*, registry: dict[str, Any], thread_key: str | None) -> None:
+    key = thread_key.strip() if isinstance(thread_key, str) else ""
+    if not key:
+        return
+    mapping = registry.get("pending_new_session_choice_by_thread")
+    if not isinstance(mapping, dict):
+        return
+    mapping.pop(key, None)
+
+
+def _bind_telegram_thread_to_session(
+    *,
+    registry: dict[str, Any],
+    chat_id: str | None,
+    message_thread_id: int | None,
+    session_id: str,
+) -> None:
+    thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=message_thread_id)
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not thread_key or not sid:
+        return
+    bindings = registry.setdefault("telegram_thread_bindings", {})
+    if not isinstance(bindings, dict):
+        bindings = {}
+        registry["telegram_thread_bindings"] = bindings
+    bindings[thread_key] = sid
+    _upsert_session(
+        registry=registry,
+        session_id=sid,
+        fields={
+            "telegram_chat_id": chat_id.strip() if isinstance(chat_id, str) and chat_id.strip() else None,
+            "telegram_message_thread_id": _normalize_telegram_thread_id(message_thread_id),
+        },
+    )
+
+
+def _lookup_session_by_telegram_thread(
+    *,
+    registry: dict[str, Any],
+    chat_id: str | None,
+    message_thread_id: int | None,
+) -> str | None:
+    thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=message_thread_id)
+    if not thread_key:
+        return None
+    bindings = registry.get("telegram_thread_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    sid = bindings.get(thread_key)
+    if not isinstance(sid, str) or not sid.strip():
+        return None
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict) and sid in sessions:
+        return sid
+    bindings.pop(thread_key, None)
+    return None
+
+
+def _telegram_thread_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> int | None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return None
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict):
+        rec = sessions.get(sid)
+        if isinstance(rec, dict):
+            from_rec = _normalize_telegram_thread_id(rec.get("telegram_message_thread_id"))
+            if from_rec is not None:
+                return from_rec
+    bindings = registry.get("telegram_thread_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    for thread_key, bound_sid in bindings.items():
+        if isinstance(bound_sid, str) and bound_sid == sid:
+            from_key = _telegram_thread_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+            if from_key is not None:
+                return from_key
+    return None
 
 
 def _parse_inbound_command(text: str) -> dict[str, str]:
@@ -3174,11 +3430,17 @@ def _send_structured(
     dry_run: bool,
     message_index: dict[str, Any],
     agent: str | None = None,
+    telegram_message_thread_id: int | None = None,
 ) -> None:
     normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
     sid = session_id or "unknown"
     header = f"[{_agent_display_name(agent=normalized_agent)}] {sid} — {kind} — {outbound._now_local_iso()}"
     body = outbound._redact(text.rstrip()) + "\n"
+
+    resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
+    if resolved_thread_id is None and isinstance(session_id, str) and session_id.strip():
+        registry = _load_registry(codex_home=codex_home)
+        resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -3202,6 +3464,7 @@ def _send_structured(
             codex_home=codex_home,
             imessage_recipient=recipient,
             message=msg,
+            telegram_message_thread_id=resolved_thread_id,
         )
 
 
@@ -5332,6 +5595,7 @@ def _process_inbound_replies(
     fetch_replies_fn: Callable[..., list[tuple[int, str, str | None]]] | None = None,
     reference_guids_fn: Callable[..., list[str]] | None = None,
     reference_texts_fn: Callable[..., list[str] | None] | None = None,
+    row_contexts_fn: Callable[..., dict[int, dict[str, Any]]] | None = None,
 ) -> int:
     if fetch_replies_fn is not None:
         replies = fetch_replies_fn(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
@@ -5339,6 +5603,13 @@ def _process_inbound_replies(
         replies = reply._fetch_new_replies(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
     if not replies:
         return after_rowid
+    row_contexts = (
+        row_contexts_fn(conn=conn, after_rowid=after_rowid, handle_ids=handle_ids)
+        if row_contexts_fn is not None
+        else {}
+    )
+    if not isinstance(row_contexts, dict):
+        row_contexts = {}
 
     registry = _load_registry(codex_home=codex_home)
     message_index = _load_message_index(codex_home=codex_home)
@@ -5357,6 +5628,15 @@ def _process_inbound_replies(
 
     for rowid, text, reply_to_guid in replies:
         last_rowid = rowid
+        row_context_raw = row_contexts.get(int(rowid))
+        row_context = row_context_raw if isinstance(row_context_raw, dict) else {}
+        row_transport_raw = row_context.get("transport")
+        row_transport = row_transport_raw.strip().lower() if isinstance(row_transport_raw, str) else ""
+        row_telegram_chat_id = (
+            row_context.get("telegram_chat_id") if isinstance(row_context.get("telegram_chat_id"), str) else None
+        )
+        row_telegram_thread_id = _normalize_telegram_thread_id(row_context.get("telegram_message_thread_id"))
+        row_thread_key = _telegram_thread_key(chat_id=row_telegram_chat_id, thread_id=row_telegram_thread_id)
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
         if reference_guids_fn is not None:
             reference_guids = reference_guids_fn(conn=conn, rowid=rowid, fallback_guid=reply_to_guid)
@@ -5376,11 +5656,23 @@ def _process_inbound_replies(
         if reply._is_bot_message(text):
             continue
 
+        pending_choice_scope = "global"
         pending_choice = _get_pending_new_session_choice(registry=registry)
+        if row_thread_key:
+            pending_choice_for_thread = _get_pending_new_session_choice_by_thread(
+                registry=registry,
+                thread_key=row_thread_key,
+            )
+            if isinstance(pending_choice_for_thread, dict):
+                pending_choice = pending_choice_for_thread
+                pending_choice_scope = "thread"
         if isinstance(pending_choice, dict):
             choice = _parse_agent_choice_response(text=text)
             if choice == "cancel":
-                _clear_pending_new_session_choice(registry=registry)
+                if pending_choice_scope == "thread":
+                    _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
+                else:
+                    _clear_pending_new_session_choice(registry=registry)
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
@@ -5390,12 +5682,16 @@ def _process_inbound_replies(
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
             if choice in _SUPPORTED_AGENTS:
                 requested_prompt = pending_choice.get("prompt")
                 if not isinstance(requested_prompt, str) or not requested_prompt.strip():
-                    _clear_pending_new_session_choice(registry=registry)
+                    if pending_choice_scope == "thread":
+                        _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
+                    else:
+                        _clear_pending_new_session_choice(registry=registry)
                     _send_structured(
                         codex_home=codex_home,
                         recipient=recipient,
@@ -5405,6 +5701,7 @@ def _process_inbound_replies(
                         max_message_chars=max_message_chars,
                         dry_run=dry_run,
                         message_index=message_index,
+                        telegram_message_thread_id=row_telegram_thread_id,
                     )
                     continue
 
@@ -5454,6 +5751,7 @@ def _process_inbound_replies(
                         dry_run=dry_run,
                         message_index=message_index,
                         agent=choice,
+                        telegram_message_thread_id=row_telegram_thread_id,
                     )
                     continue
 
@@ -5490,7 +5788,17 @@ def _process_inbound_replies(
                     if re.match(r"^[A-Za-z0-9._-]+$", alias):
                         _set_alias(registry=registry, session_id=sid, label=alias)
 
-                _clear_pending_new_session_choice(registry=registry)
+                if row_thread_key and row_transport == "telegram":
+                    _bind_telegram_thread_to_session(
+                        registry=registry,
+                        chat_id=row_telegram_chat_id,
+                        message_thread_id=row_telegram_thread_id,
+                        session_id=sid,
+                    )
+                if pending_choice_scope == "thread":
+                    _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
+                else:
+                    _clear_pending_new_session_choice(registry=registry)
 
                 if created_via_tmux:
                     text_out = (
@@ -5512,6 +5820,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     agent=choice,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
 
@@ -5531,6 +5840,7 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5544,6 +5854,7 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5560,6 +5871,7 @@ def _process_inbound_replies(
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
 
@@ -5572,6 +5884,7 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5591,6 +5904,7 @@ def _process_inbound_replies(
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
 
@@ -5607,6 +5921,7 @@ def _process_inbound_replies(
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
 
@@ -5633,6 +5948,7 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5649,6 +5965,7 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5659,16 +5976,23 @@ def _process_inbound_replies(
                 min_prefix=min_prefix,
             )
         else:
-            target_sid, err = _resolve_session_from_reply_context(
-                conn=conn,
-                reply_text=text,
-                reply_to_guid=reply_to_guid,
-                reply_reference_guids=reference_guids,
-                reply_reference_texts=reference_texts,
-                registry=registry,
-                message_index=message_index,
-                require_explicit_ref=(action == "implicit" and require_session_ref),
-            )
+            if action == "implicit" and row_transport == "telegram":
+                target_sid = _lookup_session_by_telegram_thread(
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                )
+            if not target_sid:
+                target_sid, err = _resolve_session_from_reply_context(
+                    conn=conn,
+                    reply_text=text,
+                    reply_to_guid=reply_to_guid,
+                    reply_reference_guids=reference_guids,
+                    reply_reference_texts=reference_texts,
+                    registry=registry,
+                    message_index=message_index,
+                    require_explicit_ref=(action == "implicit" and require_session_ref),
+                )
         _trace(f"resolved target_sid={target_sid or '-'} err={err or '-'}")
 
         if not target_sid:
@@ -5696,15 +6020,27 @@ def _process_inbound_replies(
                     if isinstance(raw_ref, str) and raw_ref.strip():
                         auto_create_label = raw_ref.strip()
                 source_ref = cmd.get("session_ref", "") if action == "resume" else None
-                _set_pending_new_session_choice(
-                    registry=registry,
-                    prompt=prompt,
-                    action=action,
-                    source_text=text,
-                    source_ref=source_ref if isinstance(source_ref, str) and source_ref.strip() else None,
-                    label=auto_create_label,
-                    cwd=fallback_cwd,
-                )
+                if row_thread_key and row_transport == "telegram":
+                    _set_pending_new_session_choice_by_thread(
+                        registry=registry,
+                        thread_key=row_thread_key,
+                        prompt=prompt,
+                        action=action,
+                        source_text=text,
+                        source_ref=source_ref if isinstance(source_ref, str) and source_ref.strip() else None,
+                        label=auto_create_label,
+                        cwd=fallback_cwd,
+                    )
+                else:
+                    _set_pending_new_session_choice(
+                        registry=registry,
+                        prompt=prompt,
+                        action=action,
+                        source_text=text,
+                        source_ref=source_ref if isinstance(source_ref, str) and source_ref.strip() else None,
+                        label=auto_create_label,
+                        cwd=fallback_cwd,
+                    )
                 pending_prompt = (
                     "No matching session found. Choose runtime for a new background session:\n"
                     "1) Codex\n"
@@ -5720,6 +6056,7 @@ def _process_inbound_replies(
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 continue
 
@@ -5732,8 +6069,17 @@ def _process_inbound_replies(
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
+
+        if row_thread_key and row_transport == "telegram":
+            _bind_telegram_thread_to_session(
+                registry=registry,
+                chat_id=row_telegram_chat_id,
+                message_thread_id=row_telegram_thread_id,
+                session_id=target_sid,
+            )
 
         sessions = registry.get("sessions")
         rec = sessions.get(target_sid) if isinstance(sessions, dict) else None
@@ -5790,6 +6136,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
         if not prompt_for_dispatch:
@@ -5803,6 +6150,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -5832,6 +6180,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             _upsert_session(
                 registry=registry,
@@ -5862,6 +6211,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             _upsert_session(
                 registry=registry,
@@ -5910,6 +6260,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     agent=session_agent,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -5950,6 +6301,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     agent=session_agent,
+                    telegram_message_thread_id=row_telegram_thread_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -5975,6 +6327,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             _upsert_session(
                 registry=registry,
@@ -6003,6 +6356,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
             )
             continue
 
@@ -6016,6 +6370,7 @@ def _process_inbound_replies(
             dry_run=dry_run,
             message_index=message_index,
             agent=session_agent,
+            telegram_message_thread_id=row_telegram_thread_id,
         )
 
         _upsert_session(
@@ -6061,11 +6416,23 @@ def _process_inbound_telegram_replies(
     )
     if not updates:
         return after_update_id
-    update_reply_text_map = {int(update_id): reply_text for update_id, _text, reply_text in updates}
+    update_reply_text_map = {int(update_id): reply_text for update_id, _text, reply_text, _thread_id in updates}
+    update_context_map: dict[int, dict[str, Any]] = {
+        int(update_id): {
+            "transport": "telegram",
+            "telegram_chat_id": chat_id.strip(),
+            "telegram_message_thread_id": _normalize_telegram_thread_id(thread_id),
+        }
+        for update_id, _text, _reply_text, thread_id in updates
+    }
 
     def _fetch_virtual_replies(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> list[tuple[int, str, str | None]]:
         del conn, handle_ids
-        return [(update_id, text, None) for update_id, text, _reply_text in updates if int(update_id) > int(after_rowid)]
+        return [
+            (update_id, text, None)
+            for update_id, text, _reply_text, _thread_id in updates
+            if int(update_id) > int(after_rowid)
+        ]
 
     def _empty_reference_guids(*, conn: sqlite3.Connection, rowid: int, fallback_guid: str | None) -> list[str]:
         del conn, rowid, fallback_guid
@@ -6077,6 +6444,14 @@ def _process_inbound_telegram_replies(
         if isinstance(reply_text, str) and reply_text.strip():
             return [reply_text.strip()]
         return []
+
+    def _virtual_row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, Any]]:
+        del conn, handle_ids
+        return {
+            int(update_id): context
+            for update_id, context in update_context_map.items()
+            if int(update_id) > int(after_rowid)
+        }
 
     temp_conn = sqlite3.connect(":memory:")
     try:
@@ -6094,6 +6469,7 @@ def _process_inbound_telegram_replies(
             fetch_replies_fn=_fetch_virtual_replies,
             reference_guids_fn=_empty_reference_guids,
             reference_texts_fn=_virtual_reference_texts,
+            row_contexts_fn=_virtual_row_contexts,
         )
     finally:
         try:

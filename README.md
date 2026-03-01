@@ -278,7 +278,13 @@ If a target session cannot be resolved, control plane asks which runtime to use 
 - `2` / `claude`
 - `cancel`
 
-Only one pending runtime-choice request is tracked at a time (newest unresolved request replaces older pending state).
+Pending runtime-choice state is scoped as follows:
+- iMessage / non-threaded inbound: one global pending request (newest unresolved request replaces older state).
+- Telegram topic/thread inbound: one pending request per `chat_id:message_thread_id`.
+
+Telegram topic/thread routing behavior:
+- implicit replies in a bound Telegram topic resolve to the bound session before generic reply-context heuristics.
+- when a session is bound to a Telegram topic, outbound session updates are sent with `message_thread_id` so messages stay in that topic.
 
 ### Important environment variables
 
