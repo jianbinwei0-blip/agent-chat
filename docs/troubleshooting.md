@@ -13,6 +13,27 @@ python3 agent_chat_control_plane.py doctor --json
 python3 agent_chat_control_plane.py once --trace
 ```
 
+For a guided Telegram-first setup with prompts, run:
+
+```bash
+bash scripts/setup-telegram-easy.sh
+```
+
+## 60-Second Decision Tree
+
+1. Setup command fails immediately:
+   - check Python first (`python3 --version`)
+   - if below 3.11, pin `PYTHON_BIN` to a 3.11+ install and rerun setup
+2. Setup succeeds but Telegram send/receive is missing:
+   - run `scripts/telegram-diagnose.sh`
+   - confirm token, transport mode, chat ID bootstrap, and no `HTTP 409 Conflict`
+3. Telegram receives message but routing does nothing:
+   - in topic, send `@<session_ref> hello` once to bind topic/session
+   - rerun `scripts/telegram-diagnose.sh --pause-launchd` for deterministic upstream probe
+4. Inbound remains disabled after setup:
+   - rerun `setup-launchd`/`setup-permissions`
+   - grant Full Disk Access to exact `doctor` targets (`permission_app` / `runtime_python`)
+
 ## Common Issues
 
 ### Setup fails with `Require Python 3.11+`
@@ -48,11 +69,37 @@ Symptoms:
 - inbound Telegram replies are not routed back
 
 Checks:
+- run `scripts/telegram-diagnose.sh` first for a single-pass config/cursor/log/getUpdates check
 - verify `AGENT_CHAT_TRANSPORT` is `telegram` or `both`
 - verify `AGENT_TELEGRAM_BOT_TOKEN` is set and valid
-- verify `AGENT_TELEGRAM_CHAT_ID` is set to the expected chat
+- verify `AGENT_TELEGRAM_CHAT_ID` is set to the expected chat, or bootstrap it via:
+  - `python3 agent_chat_control_plane.py setup-launchd`
+  - then send one plain-text message in the target topic/group while setup is waiting
+- verify bot privacy is disabled in `@BotFather` (`/setprivacy -> Disable`)
+- verify the bot is still in the target group and has admin role (especially after privacy changes)
 - verify network access to `https://api.telegram.org` (or your `AGENT_TELEGRAM_API_BASE`)
 - create/refresh token with `@BotFather` and re-run `setup-notify-hook` / `setup-launchd`
+- if using long polling, verify no competing consumer is polling the same token (`HTTP 409 Conflict` from `getUpdates`)
+- if topic messages still do not arrive, remove/re-add the bot in the group and promote to admin again
+- Telegram Bot API cannot auto-create groups; group creation must be done in Telegram client UI.
+
+### Telegram group upgraded to supergroup (topic messages missing)
+
+Symptoms:
+- topic messages are visible in Telegram but not routed by agent-chat
+- direct send/checks return `Bad Request: group chat was upgraded to a supergroup`
+
+Cause:
+- `AGENT_TELEGRAM_CHAT_ID` points to an old basic-group id after Telegram migration.
+- topic routing happens in the migrated supergroup id (typically begins with `-100`).
+
+Fix:
+- capture `migrate_to_chat_id` from the Telegram API error response
+- update `AGENT_TELEGRAM_CHAT_ID` to that migrated id
+- rerun:
+  - `python3 agent_chat_control_plane.py setup-launchd`
+  - `python3 agent_chat_control_plane.py doctor --json`
+- verify `doctor --json` now shows the migrated supergroup id under `transport.telegram_chat_id`
 
 ### Inbound replies are ignored
 
@@ -193,7 +240,32 @@ Expected behavior:
 
 Telegram topic specifics:
 - once a topic is bound to a session, implicit replies in that topic target the bound session first.
-- if a reply comes from a bound topic but outbound messages are not staying in-thread, inspect `~/.codex/tmp/agent_chat_session_registry.json` for `telegram_thread_bindings` and the session's `telegram_message_thread_id`.
+- if a reply comes from a bound topic but outbound messages are not staying in-thread, inspect `~/.codex/tmp/agent_chat_session_registry.json`; `telegram_thread_bindings` is authoritative and per-session `telegram_message_thread_id` fields are migration metadata only.
+
+### Telegram topic plain text does nothing
+
+Symptoms:
+- `hello` in topic appears in Telegram, but there is no bot response.
+- `~/.codex/tmp/telegram_inbound_cursor.json` does not advance.
+
+Checks:
+- run `scripts/telegram-diagnose.sh --pause-launchd` for deterministic upstream polling checks
+- if `AGENT_TELEGRAM_CHAT_ID` is empty, run `setup-launchd` and complete bootstrap by sending plain text from the target topic/group
+- ensure the topic is bound at least once: send `@<session_ref> ping` in that topic, then retry plain text.
+- enable trace and inspect logs:
+  - `AGENT_CHAT_TRACE=1`
+  - `rg -n "telegram getUpdates|inbound rowid=" ~/Library/Logs/agent-chat.launchd.err.log | tail -n 80`
+- if no new `inbound rowid` appears after sending a topic message, test upstream delivery directly:
+  - stop poller temporarily (`launchctl bootout gui/$(id -u)/com.agent-chat`)
+  - call `getUpdates` with offset after current cursor
+  - restart poller (`launchctl bootstrap ... && launchctl kickstart ...`)
+- if upstream `getUpdates` returns zero updates for your new message:
+  - re-check `/setprivacy` is disabled for the bot
+  - remove and re-add bot to the group
+  - promote bot to admin again
+- if logs show `telegram getUpdates failed: HTTP Error 409: Conflict`:
+  - another process/webhook is consuming this bot token; stop the other consumer or clear webhook (`deleteWebhook`)
+- for setup diagnostics only, you can temporarily set `AGENT_TELEGRAM_ACCEPT_ALL_CHATS=1` to bypass chat-id filtering.
 
 ### Ambiguous replies or wrong target session
 

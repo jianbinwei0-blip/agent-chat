@@ -34,8 +34,123 @@ Non-goals:
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
 
 Privacy/Security permissions required on macOS:
-- `Automation`: allow the launchd runtime app/Python and `osascript` to control `Messages`
-- `Full Disk Access`: grant the launchd runtime app or Python binary (shown by setup commands) so it can read `~/Library/Messages/chat.db`
+- Telegram-only mode (`AGENT_CHAT_TRANSPORT=telegram`): no Full Disk Access required.
+- iMessage mode (`imessage` or `both`): grant `Automation` (Messages control) and `Full Disk Access` (read `~/Library/Messages/chat.db`) to the runtime app/Python target printed by setup.
+
+## Non-Technical Setup (Telegram, Recommended)
+
+If you want the fastest path with the least terminal work, use the guided script:
+
+1. In Telegram (once):
+   - create or open your bot in `@BotFather`
+   - create your target group in Telegram (`New Group`)
+   - if you want topic routing, use a supergroup with Topics enabled (`Group Info -> Edit -> Topics`)
+   - run `/setprivacy` in `@BotFather` and choose `Disable` for the bot
+   - add the bot to your target group
+   - promote the bot to admin (`Group Info -> Administrators -> Add Admin`)
+   - verify admin permissions include posting messages (and topic management when Topics are enabled)
+2. Run:
+
+```bash
+cd /path/to/agent-chat
+bash scripts/setup-telegram-easy.sh
+```
+
+The script will:
+- ask whether you want `codex` or `claude`
+- ask for your Telegram bot token
+- save/update `.env.telegram.local`
+- run `setup-notify-hook`, `setup-launchd`, and `doctor`
+
+3. First-use check in Telegram:
+   - if setup pauses, send one plain message in your target group/topic (this bootstraps chat id)
+   - send `list`
+   - send `@<session_ref> hello` once to bind the topic to that session
+   - after binding, plain text in that topic routes automatically
+   - if you see `group chat was upgraded to a supergroup`, set `AGENT_TELEGRAM_CHAT_ID` to the returned `migrate_to_chat_id` and rerun `setup-launchd`
+
+## Telegram Golden Paths (Fastest First Success)
+
+Use this section when your goal is Telegram + one runtime with minimum branching.
+The full `Quickstart` below still covers iMessage and mixed transport setups.
+If you want the simplest guided flow, run `bash scripts/setup-telegram-easy.sh` instead.
+
+### Telegram + Codex (5-minute path)
+
+1. Bot and group prep in Telegram (once per bot):
+   - in `@BotFather`, run `/newbot` (or `/token`) and copy token
+   - run `/setprivacy` for the bot and select `Disable`
+   - add bot to target group/topic and promote to admin
+2. Repo + env prep:
+
+```bash
+cd /path/to/agent-chat
+PYTHON_BIN="$(command -v python3)"
+"$PYTHON_BIN" --version
+
+cp env.telegram.example .env.telegram.local
+# edit .env.telegram.local and set AGENT_TELEGRAM_BOT_TOKEN
+source .env.telegram.local
+
+unset AGENT_IMESSAGE_TO
+export AGENT_CHAT_AGENT="codex"
+export AGENT_CHAT_HOME="${AGENT_CHAT_HOME:-$HOME/.codex}"
+```
+
+3. Configure and start:
+
+```bash
+"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --agent codex --python-bin "$PYTHON_BIN"
+"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --agent codex --python-bin "$PYTHON_BIN"
+"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent codex --json
+```
+
+Success markers:
+- `setup-notify-hook` prints `Updated notify hook in ~/.codex/config.toml`
+- `setup-launchd` exits cleanly (if chat ID is unknown, it waits for one inbound Telegram message)
+- `doctor --json` shows:
+  - `"agent": "codex"`
+  - `"transport.mode": "telegram"`
+  - `"transport.telegram_token_present": true`
+  - non-empty `"transport.telegram_chat_id"` (or `"transport.telegram_chat_ids"`)
+  - `"launchd.loaded": true`
+
+### Telegram + Claude (5-minute path)
+
+1. Use the same bot/group prep as Codex path.
+2. Repo + env prep:
+
+```bash
+cd /path/to/agent-chat
+PYTHON_BIN="$(command -v python3)"
+"$PYTHON_BIN" --version
+
+cp env.telegram.example .env.telegram.local
+# edit .env.telegram.local and set AGENT_TELEGRAM_BOT_TOKEN
+source .env.telegram.local
+
+unset AGENT_IMESSAGE_TO
+export AGENT_CHAT_AGENT="claude"
+export CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+```
+
+3. Configure and start:
+
+```bash
+"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --agent claude --python-bin "$PYTHON_BIN"
+"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --agent claude --python-bin "$PYTHON_BIN"
+"$PYTHON_BIN" agent_chat_control_plane.py doctor --agent claude --json
+```
+
+Success markers:
+- `setup-notify-hook` prints `Updated notify hook in ~/.claude/settings.json`
+- `setup-launchd` exits cleanly (or pauses for Telegram chat bootstrap message)
+- `doctor --json` shows:
+  - `"agent": "claude"`
+  - `"transport.mode": "telegram"`
+  - `"transport.telegram_token_present": true`
+  - non-empty `"transport.telegram_chat_id"` (or `"transport.telegram_chat_ids"`)
+  - `"launchd.loaded": true`
 
 ## Quickstart
 
@@ -97,6 +212,34 @@ If you use Telegram transport (`AGENT_CHAT_TRANSPORT=telegram|both`), get a bot 
 3. Copy the HTTP API token and set:
    - `export AGENT_TELEGRAM_BOT_TOKEN="<bot token>"`
 
+Telegram topic/supergroup setup (recommended):
+
+1. Create a Telegram group in the client app (`New Group`) and add at least one human member.
+2. If you want per-topic routing, enable Topics for that group (`Group Info -> Edit -> Topics`), which uses supergroup behavior.
+3. In `@BotFather`, run `/setprivacy`, choose your bot, and select `Disable`.
+4. Add the bot to that group.
+5. Promote the bot to admin (`Group Info -> Administrators -> Add Admin`) and allow message posting (plus topic-management permissions when Topics are enabled).
+6. Set chat routing env vars:
+   - `export AGENT_CHAT_TRANSPORT="telegram"`
+   - optional: `export AGENT_TELEGRAM_CHAT_ID="<group chat id>"` (example: `-1003836591224`)
+   - optional: `export AGENT_TELEGRAM_CHAT_IDS="<group chat id>,<owner user id>"` for multiple allowed inbound sources.
+   - for topic-enabled groups, chat ids are typically supergroup ids beginning with `-100`.
+7. Start the control plane (`setup-launchd` or `run`).
+   - If `AGENT_TELEGRAM_CHAT_ID`/`AGENT_TELEGRAM_CHAT_IDS` are missing, `setup-launchd` enters Telegram bootstrap mode and waits for a message from the target group/topic to auto-detect the group chat id.
+   - On macOS with default setup behavior (without `--no-open`), setup may also open a Telegram deep link (`startgroup`) to speed up bot/group onboarding.
+   - Telegram Bot API cannot create a group on your behalf; group creation still happens in the Telegram client.
+8. In the target topic, send one explicit bind message to establish session/topic mapping:
+   - `@<session_ref> hello`
+9. After binding, plain text in that topic routes to the bound session. You do not need direct-reply or `@bot` mention for every message.
+10. Move an existing Codex session to a different topic:
+   - In the destination topic, send `@<session_ref> hello` once.
+   - Binding is canonicalized as one-topic-per-session and one-session-per-topic, so the session follows the new topic automatically.
+
+If topic messages are not received after setup:
+- remove and re-add the bot to the group after privacy changes, then promote to admin again.
+- verify no other process is consuming the same bot token via `getUpdates` (look for HTTP `409 Conflict`).
+- if Telegram API returns `group chat was upgraded to a supergroup`, update to `migrate_to_chat_id`, then rerun `setup-launchd` and `doctor`.
+
 4. Configure notify hook for your agent runtime.
 
 ```bash
@@ -107,7 +250,7 @@ If you use Telegram transport (`AGENT_CHAT_TRANSPORT=telegram|both`), get a bot 
 ```
 
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
-When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+When transport includes Telegram, setup requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
 `setup-notify-hook` and `setup-launchd` require Homebrew + tmux. If missing, setup first attempts automatic Homebrew install, then runs `brew install tmux`.
 
 This updater is idempotent:
@@ -128,9 +271,13 @@ Compatibility note:
 ```
 
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
-When transport includes Telegram, setup also requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+When transport includes Telegram, setup requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+If Telegram chat IDs are missing, `setup-launchd` now waits for an inbound message from the target group/topic and auto-detects `AGENT_TELEGRAM_CHAT_ID`.
 
-`setup-launchd` writes `~/Library/LaunchAgents/<label>.plist`, bootstraps the service, and by default runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd. When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/AgentChatPython.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
+`setup-launchd` writes `~/Library/LaunchAgents/<label>.plist` and bootstraps the service.
+If transport includes iMessage (`imessage`/`both`), setup also runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd.
+If transport is `telegram` only, `chat.db` Full Disk Access setup is skipped.
+When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/AgentChatPython.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
 During permission setup, follow the command output exactly. It prints:
 - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
@@ -144,6 +291,7 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 - `Full Disk Access confirmed: chat.db is now readable.`
 
 `setup-permissions` now flushes and prints the detailed grant target instructions before opening System Settings. It then starts polling `chat.db` and keeps polling until readable or timeout.
+`setup-permissions` is only needed when transport includes iMessage (`imessage`/`both`).
 
 6. Optional: run in foreground instead of launchd.
 
@@ -157,6 +305,30 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 "$PYTHON_BIN" agent_chat_control_plane.py once --trace
 ```
 
+8. Optional Telegram diagnostics helper (Codex + Claude setups).
+
+```bash
+scripts/telegram-diagnose.sh
+# deterministic upstream probe:
+# scripts/telegram-diagnose.sh --pause-launchd
+```
+
+## First Live Roundtrip (Telegram Aha Check)
+
+After setup succeeds, validate real routing in under a minute:
+
+1. In the target Telegram topic/group, send `list` to inspect active session refs.
+2. Send one explicit bind message: `@<session_ref> hello`.
+3. Expect a routed response in the same topic; this establishes topic/session mapping.
+4. Send plain text (for example `status @<session_ref>` or `continue`) in the same topic.
+5. If no response arrives, run:
+
+```bash
+scripts/telegram-diagnose.sh --pause-launchd
+```
+
+If diagnostics report `HTTP 409 Conflict`, stop the competing `getUpdates` consumer and retry.
+
 ## Codex / Claude Assisted Setup
 
 You can ask Codex CLI or Claude CLI to run this setup end-to-end using the same idempotent commands.
@@ -169,7 +341,8 @@ From the `agent-chat` repo root, run Codex and provide:
 Read README.md and set up agent-chat for codex.
 Homebrew + tmux are required; if missing, let setup auto-install both.
 Use Python 3.11+ preflight checks.
-Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN and AGENT_TELEGRAM_CHAT_ID from my environment.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
+If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
 Unset AGENT_IMESSAGE_TO for telegram-only mode.
 Run:
 - python3 agent_chat_control_plane.py setup-notify-hook --agent codex --python-bin "$(command -v python3)"
@@ -186,7 +359,8 @@ From the same repo root, run Claude and provide:
 Read README.md and set up agent-chat for claude.
 Homebrew + tmux are required; if missing, let setup auto-install both.
 Use Python 3.11+ preflight checks.
-Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN and AGENT_TELEGRAM_CHAT_ID from my environment.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
+If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
 Unset AGENT_IMESSAGE_TO for telegram-only mode.
 Set CLAUDE_HOME if needed.
 Run:
@@ -285,6 +459,7 @@ Pending runtime-choice state is scoped as follows:
 Telegram topic/thread routing behavior:
 - implicit replies in a bound Telegram topic resolve to the bound session before generic reply-context heuristics.
 - when a session is bound to a Telegram topic, outbound session updates are sent with `message_thread_id` so messages stay in that topic.
+- topic bindings are canonicalized as one-topic-per-session and one-session-per-topic; `telegram_thread_bindings` is authoritative when older per-session metadata disagrees.
 
 ### Important environment variables
 
@@ -293,7 +468,10 @@ Telegram topic/thread routing behavior:
 - `AGENT_CHAT_NOTIFY_MODE`: `send`, `state_only`, or `route`
 - `AGENT_CHAT_TRANSPORT`: `imessage` (default), `telegram`, or `both`
 - `AGENT_TELEGRAM_BOT_TOKEN`: Telegram bot token (required for `telegram` / `both`)
-- `AGENT_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (required for `telegram` / `both`)
+- `AGENT_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (auto-detected during `setup-launchd` bootstrap when unset)
+- `AGENT_TELEGRAM_CHAT_IDS`: comma-separated allowlist for inbound chat IDs (optional; includes `AGENT_TELEGRAM_CHAT_ID` when set)
+- `AGENT_TELEGRAM_OWNER_USER_IDS`: comma-separated Telegram user IDs treated as owner senders for Telegram owner fallback routing (optional)
+- `AGENT_TELEGRAM_ACCEPT_ALL_CHATS`: accept inbound updates from any chat (`1` to enable; use only for diagnostics)
 - `AGENT_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
 - `AGENT_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
 - `AGENT_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
