@@ -93,6 +93,7 @@ _DEFAULT_INPUT_NEEDED_TEXT = "Waiting on approval / question / input."
 _DEFAULT_TMUX_ACK_TIMEOUT_S = 2.0
 _CHAT_DB_WARN_INTERVAL_S = 300.0
 _DEFAULT_TELEGRAM_SEND_TIMEOUT_S = 10.0
+_DEFAULT_TELEGRAM_SETUP_BOOTSTRAP_TIMEOUT_S = 90.0
 _DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org"
 _DEFAULT_TMUX_NEW_SESSION_NAME = "agent"
 _DEFAULT_TMUX_WINDOW_PREFIX = "agent"
@@ -516,10 +517,14 @@ def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
     if _transport_telegram_enabled(mode=transport_mode):
         token = _telegram_bot_token()
         chat_id = _telegram_chat_id()
+        chat_ids_raw = os.environ.get("AGENT_TELEGRAM_CHAT_IDS", "")
+        chat_ids = chat_ids_raw.strip() if isinstance(chat_ids_raw, str) else ""
         if token:
             items.append(f"AGENT_TELEGRAM_BOT_TOKEN={shlex.quote(token)}")
         if chat_id:
             items.append(f"AGENT_TELEGRAM_CHAT_ID={shlex.quote(chat_id)}")
+        if chat_ids:
+            items.append(f"AGENT_TELEGRAM_CHAT_IDS={shlex.quote(chat_ids)}")
         api_base_raw = os.environ.get("AGENT_TELEGRAM_API_BASE", "")
         api_base = api_base_raw.strip() if isinstance(api_base_raw, str) else ""
         if api_base:
@@ -876,6 +881,66 @@ def _telegram_chat_id() -> str | None:
     return chat_id or None
 
 
+def _telegram_chat_ids() -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    raw_multi = os.environ.get("AGENT_TELEGRAM_CHAT_IDS", "")
+    if isinstance(raw_multi, str) and raw_multi.strip():
+        for part in re.split(r"[\s,]+", raw_multi.strip()):
+            chat_id = part.strip()
+            if not chat_id or chat_id in seen:
+                continue
+            seen.add(chat_id)
+            out.append(chat_id)
+
+    primary = _telegram_chat_id()
+    if isinstance(primary, str):
+        chat_id = primary.strip()
+        if chat_id and chat_id not in seen:
+            seen.add(chat_id)
+            out.append(chat_id)
+
+    return out
+
+
+def _telegram_owner_user_ids() -> set[str]:
+    out: set[str] = set()
+
+    raw_multi = os.environ.get("AGENT_TELEGRAM_OWNER_USER_IDS", "")
+    if isinstance(raw_multi, str) and raw_multi.strip():
+        for part in re.split(r"[\s,]+", raw_multi.strip()):
+            candidate = part.strip()
+            if candidate:
+                out.add(candidate)
+
+    if out:
+        return out
+
+    # Backward-compatible fallback: infer a likely owner id from configured
+    # private chat ids (positive numeric ids) when explicit owner ids are unset.
+    for chat_id in _telegram_chat_ids():
+        trimmed = chat_id.strip()
+        if not trimmed:
+            continue
+        if trimmed.startswith("-"):
+            continue
+        out.add(trimmed)
+    return out
+
+
+def _telegram_sender_is_owner(*, sender_user_id: str | None) -> bool:
+    candidate = sender_user_id.strip() if isinstance(sender_user_id, str) else ""
+    if not candidate:
+        return False
+    owners = _telegram_owner_user_ids()
+    return candidate in owners
+
+
+def _telegram_accept_all_chats() -> bool:
+    return _env_enabled("AGENT_TELEGRAM_ACCEPT_ALL_CHATS", default=False)
+
+
 def _normalize_telegram_thread_id(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -901,11 +966,38 @@ def _telegram_thread_key(*, chat_id: str | None, thread_id: int | None) -> str |
     return f"{chat}:{normalized_thread_id}"
 
 
-def _telegram_thread_id_from_key(*, thread_key: str | None) -> int | None:
+def _telegram_thread_chat_id_from_key(*, thread_key: str | None) -> str | None:
     key = thread_key.strip() if isinstance(thread_key, str) else ""
     if ":" not in key:
         return None
+    chat_raw = key.rsplit(":", 1)[0]
+    chat = chat_raw.strip()
+    if not chat:
+        return None
     thread_raw = key.rsplit(":", 1)[-1]
+    if _normalize_telegram_thread_id(thread_raw) is None:
+        return None
+    return chat
+
+
+def _normalize_telegram_thread_key(*, thread_key: str | None) -> str | None:
+    key = thread_key.strip() if isinstance(thread_key, str) else ""
+    if ":" not in key:
+        return None
+    chat = key.rsplit(":", 1)[0].strip()
+    thread_raw = key.rsplit(":", 1)[-1]
+    thread_id = _normalize_telegram_thread_id(thread_raw)
+    if not chat or thread_id is None:
+        return None
+    return _telegram_thread_key(chat_id=chat, thread_id=thread_id)
+
+
+def _telegram_thread_id_from_key(*, thread_key: str | None) -> int | None:
+    key = thread_key.strip() if isinstance(thread_key, str) else ""
+    normalized_key = _normalize_telegram_thread_key(thread_key=key)
+    if normalized_key is None:
+        return None
+    thread_raw = normalized_key.rsplit(":", 1)[-1]
     return _normalize_telegram_thread_id(thread_raw)
 
 
@@ -926,6 +1018,95 @@ def _validate_telegram_setup_requirements(*, transport_mode: str) -> str | None:
     if _telegram_bot_token():
         return None
     return _telegram_bot_token_setup_instructions()
+
+
+def _bootstrap_telegram_group_chat_id(
+    *,
+    codex_home: Path,
+    timeout_s: float,
+    open_link: bool,
+) -> tuple[str | None, str | None]:
+    token = _telegram_bot_token()
+    if not isinstance(token, str) or not token.strip():
+        return None, _telegram_bot_token_setup_instructions().strip()
+    token_text = token.strip()
+
+    timeout_window_s = float(timeout_s) if timeout_s > 0 else _DEFAULT_TELEGRAM_SETUP_BOOTSTRAP_TIMEOUT_S
+    timeout_window_s = max(1.0, timeout_window_s)
+    after_update_id = _load_telegram_inbound_cursor(codex_home=codex_home)
+
+    bot_username: str | None = None
+    get_me_url = f"{_telegram_api_base()}/bot{token_text}/getMe"
+    try:
+        with urllib_request.urlopen(urllib_request.Request(get_me_url), timeout=_DEFAULT_TELEGRAM_SEND_TIMEOUT_S) as response:
+            raw = response.read()
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        result = parsed.get("result") if isinstance(parsed, dict) else None
+        username_raw = result.get("username") if isinstance(result, dict) else None
+        if isinstance(username_raw, str):
+            candidate = username_raw.strip()
+            if candidate:
+                bot_username = candidate
+    except Exception:
+        bot_username = None
+
+    if open_link and isinstance(bot_username, str):
+        deep_link = f"https://t.me/{bot_username}?startgroup=true"
+        try:
+            subprocess.run(
+                ["open", deep_link],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    sys.stdout.write(
+        "Telegram setup: detecting target group/supergroup chat id from new inbound messages.\n"
+    )
+    if isinstance(bot_username, str):
+        sys.stdout.write(
+            f"Action required: add @{bot_username} to the target topic/group and send any plain-text message.\n"
+        )
+    else:
+        sys.stdout.write(
+            "Action required: add the bot to the target topic/group and send any plain-text message.\n"
+        )
+    sys.stdout.flush()
+
+    deadline = time.monotonic() + timeout_window_s
+    while time.monotonic() < deadline:
+        updates = _fetch_telegram_updates(
+            token=token_text,
+            chat_ids=None,
+            after_update_id=after_update_id,
+        )
+        if updates:
+            max_update_id = max(row[0] for row in updates)
+            if max_update_id > after_update_id:
+                after_update_id = max_update_id
+                _save_telegram_inbound_cursor(
+                    codex_home=codex_home,
+                    last_update_id=after_update_id,
+                )
+            for _, _, _, _, incoming_chat_id, _ in updates:
+                chat_id_text = incoming_chat_id.strip() if isinstance(incoming_chat_id, str) else ""
+                if not chat_id_text:
+                    continue
+                # Telegram groups/supergroups use negative chat ids.
+                if not chat_id_text.startswith("-"):
+                    continue
+                return chat_id_text, None
+        time.sleep(1.0)
+
+    return (
+        None,
+        (
+            "timed out waiting for a Telegram group message. "
+            "Send a plain-text message in the target topic/group and rerun setup-launchd."
+        ),
+    )
 
 
 def _telegram_api_base() -> str:
@@ -1002,60 +1183,108 @@ def _send_telegram_message(
 def _fetch_telegram_updates(
     *,
     token: str,
-    chat_id: str | None,
+    chat_ids: list[str] | None,
     after_update_id: int,
-) -> list[tuple[int, str, str | None, int | None]]:
+) -> list[tuple[int, str, str | None, int | None, str, str | None]]:
     token_text = token.strip()
     if not token_text:
         return []
 
-    params: dict[str, str] = {"timeout": "0", "allowed_updates": json.dumps(["message"])}
+    params: dict[str, str] = {
+        "timeout": "0",
+        "allowed_updates": json.dumps(["message", "edited_message", "channel_post", "edited_channel_post"]),
+    }
     if int(after_update_id) > 0:
         params["offset"] = str(int(after_update_id) + 1)
+
+    trace_enabled = _env_enabled("AGENT_CHAT_TRACE", default=False)
 
     url = f"{_telegram_api_base()}/bot{token_text}/getUpdates?{urllib_parse.urlencode(params)}"
     request = urllib_request.Request(url)
     try:
         with urllib_request.urlopen(request, timeout=_DEFAULT_TELEGRAM_SEND_TIMEOUT_S) as response:
             raw = response.read()
-    except Exception:
+    except Exception as exc:
+        if trace_enabled:
+            _warn_stderr(f"[agent-chat][trace] telegram getUpdates failed: {type(exc).__name__}: {exc}")
         return []
 
     try:
         parsed = json.loads(raw.decode("utf-8", errors="replace"))
-    except Exception:
+    except Exception as exc:
+        if trace_enabled:
+            _warn_stderr(f"[agent-chat][trace] telegram getUpdates decode failed: {type(exc).__name__}: {exc}")
         return []
 
     if not isinstance(parsed, dict) or not bool(parsed.get("ok")):
+        if trace_enabled:
+            description = parsed.get("description") if isinstance(parsed, dict) else None
+            _warn_stderr(
+                f"[agent-chat][trace] telegram getUpdates non-ok response: {description if isinstance(description, str) else parsed!r}"
+            )
         return []
     result = parsed.get("result")
     if not isinstance(result, list):
+        if trace_enabled:
+            _warn_stderr("[agent-chat][trace] telegram getUpdates response missing list result")
         return []
+    if trace_enabled and result:
+        _warn_stderr(
+            f"[agent-chat][trace] telegram getUpdates fetched={len(result)} after_update_id={after_update_id}"
+        )
 
-    target_chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
-    out: list[tuple[int, str, str | None, int | None]] = []
+    allowed_chat_ids: set[str] = set()
+    for candidate in chat_ids or []:
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip()
+        if normalized:
+            allowed_chat_ids.add(normalized)
+
+    out: list[tuple[int, str, str | None, int | None, str, str | None]] = []
     for update in result:
         if not isinstance(update, dict):
             continue
         update_id = update.get("update_id")
         if not isinstance(update_id, int):
             continue
-        message = update.get("message")
-        if not isinstance(message, dict):
+        message_like: dict[str, Any] | None = None
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+            candidate = update.get(key)
+            if isinstance(candidate, dict):
+                message_like = candidate
+                break
+        if not isinstance(message_like, dict):
+            out.append((update_id, "", None, None, "", None))
             continue
-        chat = message.get("chat")
+        chat = message_like.get("chat")
         if not isinstance(chat, dict):
+            out.append((update_id, "", None, None, "", None))
             continue
         incoming_chat_id = chat.get("id")
         incoming_chat_text = str(incoming_chat_id).strip() if incoming_chat_id is not None else ""
-        if target_chat_id and incoming_chat_text != target_chat_id:
+        if not incoming_chat_text:
+            out.append((update_id, "", None, None, "", None))
             continue
-        text = message.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if allowed_chat_ids and incoming_chat_text not in allowed_chat_ids:
+            out.append((update_id, "", None, None, incoming_chat_text, None))
             continue
-        message_thread_id = _normalize_telegram_thread_id(message.get("message_thread_id"))
+        sender_user_id: str | None = None
+        sender_raw = message_like.get("from")
+        if isinstance(sender_raw, dict):
+            sender_id_raw = sender_raw.get("id")
+            sender_id_text = str(sender_id_raw).strip() if sender_id_raw is not None else ""
+            if sender_id_text:
+                sender_user_id = sender_id_text
+        text_raw = message_like.get("text")
+        if isinstance(text_raw, str):
+            normalized_text = text_raw.strip()
+        else:
+            caption_raw = message_like.get("caption")
+            normalized_text = caption_raw.strip() if isinstance(caption_raw, str) else ""
+        message_thread_id = _normalize_telegram_thread_id(message_like.get("message_thread_id"))
         reply_reference_text: str | None = None
-        reply_to_message = message.get("reply_to_message")
+        reply_to_message = message_like.get("reply_to_message")
         if isinstance(reply_to_message, dict):
             reply_text = reply_to_message.get("text")
             if isinstance(reply_text, str):
@@ -1063,7 +1292,7 @@ def _fetch_telegram_updates(
                 if trimmed_reply_text:
                     reply_reference_text = trimmed_reply_text
 
-        out.append((update_id, text.strip(), reply_reference_text, message_thread_id))
+        out.append((update_id, normalized_text, reply_reference_text, message_thread_id, incoming_chat_text, sender_user_id))
     return out
 
 
@@ -1287,6 +1516,7 @@ def _deliver_message_across_transports(
     codex_home: Path,
     imessage_recipient: str,
     message: str,
+    telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
 ) -> bool:
     queue_path = _queue_path(codex_home=codex_home)
@@ -1309,7 +1539,7 @@ def _deliver_message_across_transports(
                 )
 
     if _transport_telegram_enabled(mode=mode):
-        chat_id = _telegram_chat_id()
+        chat_id = telegram_chat_id if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else _telegram_chat_id()
         if isinstance(chat_id, str) and chat_id.strip():
             attempted = True
             chat_id_text = chat_id.strip()
@@ -1810,6 +2040,7 @@ def _build_launchagent_plist(
         "AGENT_CHAT_TRANSPORT",
         "AGENT_TELEGRAM_BOT_TOKEN",
         "AGENT_TELEGRAM_CHAT_ID",
+        "AGENT_TELEGRAM_CHAT_IDS",
         "AGENT_TELEGRAM_API_BASE",
         "AGENT_TELEGRAM_INBOUND_CURSOR",
     )
@@ -1993,6 +2224,7 @@ def _run_setup_launchd(
     repair_tcc: bool = False,
 ) -> int:
     transport_mode = _transport_mode()
+    imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
     telegram_setup_err = _validate_telegram_setup_requirements(transport_mode=transport_mode)
     if isinstance(telegram_setup_err, str):
         sys.stdout.write(telegram_setup_err)
@@ -2002,6 +2234,28 @@ def _run_setup_launchd(
     if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
         sys.stdout.write("AGENT_IMESSAGE_TO is required. Provide --recipient or set AGENT_IMESSAGE_TO.\n")
         return 1
+    if _transport_telegram_enabled(mode=transport_mode):
+        telegram_chat_ids = _telegram_chat_ids()
+        if not telegram_chat_ids:
+            bootstrap_chat_id, bootstrap_err = _bootstrap_telegram_group_chat_id(
+                codex_home=codex_home,
+                timeout_s=float(_DEFAULT_TELEGRAM_SETUP_BOOTSTRAP_TIMEOUT_S),
+                open_link=bool(open_settings),
+            )
+            if isinstance(bootstrap_chat_id, str) and bootstrap_chat_id.strip():
+                os.environ["AGENT_TELEGRAM_CHAT_ID"] = bootstrap_chat_id.strip()
+                telegram_chat_ids = _telegram_chat_ids()
+            if not telegram_chat_ids:
+                sys.stdout.write(
+                    "AGENT_TELEGRAM_CHAT_ID is required when AGENT_CHAT_TRANSPORT includes Telegram.\n"
+                )
+                if isinstance(bootstrap_err, str) and bootstrap_err.strip():
+                    sys.stdout.write(bootstrap_err.strip() + "\n")
+                else:
+                    sys.stdout.write(
+                        "Set AGENT_TELEGRAM_CHAT_ID (or AGENT_TELEGRAM_CHAT_IDS) and rerun setup-launchd.\n"
+                    )
+                return 1
 
     label_text = label.strip() or _DEFAULT_LAUNCHD_LABEL
     python_text = python_bin.strip() if isinstance(python_bin, str) else ""
@@ -2017,7 +2271,7 @@ def _run_setup_launchd(
         python_bin=python_text
     )
 
-    if setup_permissions:
+    if setup_permissions and imessage_enabled:
         perm_rc = _run_setup_permissions(
             codex_home=codex_home,
             timeout_s=timeout_s,
@@ -2119,7 +2373,7 @@ def _run_setup_launchd(
     except Exception:
         pass
     launchd_warning = _launchd_inbound_warning_active(path=err_log, max_age_s=120.0)
-    if launchd_warning:
+    if imessage_enabled and launchd_warning:
         chat_db, chat_db_readable, chat_db_error = _chat_db_access_status(codex_home=codex_home)
         permission_bundle_id = _app_bundle_identifier(app_path=permission_app_path) if permission_app_path is not None else None
         sys.stdout.write(
@@ -2221,12 +2475,16 @@ def _run_setup_launchd(
     if isinstance(app_note, str) and app_note.strip():
         sys.stdout.write(f"Python app setup note: {app_note.strip()}\n")
     sys.stdout.write(f"Script: {script_abs}\n")
-    if setup_permissions:
+    if imessage_enabled and setup_permissions:
         sys.stdout.write("chat.db permission check: passed for this Python binary.\n")
-    else:
+    elif imessage_enabled:
         sys.stdout.write(
             "chat.db permission check: skipped. "
             "If inbound replies stay disabled, run `setup-permissions` for this Python binary.\n"
+        )
+    else:
+        sys.stdout.write(
+            "chat.db permission check: not required for telegram-only transport.\n"
         )
     return 0
 
@@ -2332,6 +2590,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
     telegram_enabled = _transport_telegram_enabled(mode=transport_mode)
     telegram_chat_id = _telegram_chat_id()
+    telegram_chat_ids = _telegram_chat_ids()
     telegram_token_present = bool(_telegram_bot_token())
     launchd_label = os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
@@ -2346,31 +2605,38 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     lock_pid = _read_lock_pid(lock_path)
     lock_alive = _is_pid_alive(lock_pid)
 
-    chat_db, shell_chat_db_readable, shell_chat_db_error = _chat_db_access_status(codex_home=codex_home)
-    chat_db_readable = shell_chat_db_readable
-    chat_db_error = shell_chat_db_error
-    chat_db_source = "shell"
+    chat_db = _chat_db_path(codex_home=codex_home)
+    shell_chat_db_readable: bool | None = None
+    shell_chat_db_error: str | None = None
+    chat_db_readable: bool | None = None
+    chat_db_error: str | None = None
+    chat_db_source = "not_required"
     runtime_chat_db_readable: bool | None = None
     runtime_chat_db_error: str | None = None
-    runtime_python = (
-        launchd_runtime_python.strip()
-        if isinstance(launchd_runtime_python, str) and launchd_runtime_python.strip()
-        else ""
-    )
-    if runtime_python:
-        chat_db, runtime_chat_db_readable, runtime_chat_db_error = _chat_db_access_status_for_runtime(
-            codex_home=codex_home,
-            runtime_python_bin=runtime_python,
+    if imessage_enabled:
+        chat_db, shell_chat_db_readable, shell_chat_db_error = _chat_db_access_status(codex_home=codex_home)
+        chat_db_readable = shell_chat_db_readable
+        chat_db_error = shell_chat_db_error
+        chat_db_source = "shell"
+        runtime_python = (
+            launchd_runtime_python.strip()
+            if isinstance(launchd_runtime_python, str) and launchd_runtime_python.strip()
+            else ""
         )
-        chat_db_readable = runtime_chat_db_readable
-        chat_db_error = runtime_chat_db_error
-        chat_db_source = "runtime_probe"
+        if runtime_python:
+            chat_db, runtime_chat_db_readable, runtime_chat_db_error = _chat_db_access_status_for_runtime(
+                codex_home=codex_home,
+                runtime_python_bin=runtime_python,
+            )
+            chat_db_readable = runtime_chat_db_readable
+            chat_db_error = runtime_chat_db_error
+            chat_db_source = "runtime_probe"
 
-    # launchd runtime status is authoritative for long-lived inbound health once restored.
-    if launchd_loaded and lock_alive and launchd_inbound_restored and not launchd_inbound_warning:
-        chat_db_readable = True
-        chat_db_error = None
-        chat_db_source = "launchd_log"
+        # launchd runtime status is authoritative for long-lived inbound health once restored.
+        if launchd_loaded and lock_alive and launchd_inbound_restored and not launchd_inbound_warning:
+            chat_db_readable = True
+            chat_db_error = None
+            chat_db_source = "launchd_log"
     chat_db_exists = chat_db.exists()
 
     registry = _load_registry(codex_home=codex_home)
@@ -2414,11 +2680,11 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
         health.append("missing recipient (AGENT_IMESSAGE_TO)")
     if telegram_enabled and not telegram_token_present:
         health.append("missing Telegram bot token (AGENT_TELEGRAM_BOT_TOKEN)")
-    if telegram_enabled and not (isinstance(telegram_chat_id, str) and telegram_chat_id.strip()):
-        health.append("missing Telegram chat id (AGENT_TELEGRAM_CHAT_ID)")
+    if telegram_enabled and not telegram_chat_ids:
+        health.append("missing Telegram chat id (set AGENT_TELEGRAM_CHAT_ID or AGENT_TELEGRAM_CHAT_IDS)")
     if not launchd_loaded:
         health.append("launchd service not loaded")
-    if launchd_inbound_warning:
+    if imessage_enabled and launchd_inbound_warning:
         health.append("launchd reports inbound disabled (check chat.db permissions)")
     if imessage_enabled and not chat_db_readable:
         health.append("chat.db unreadable for inbound replies")
@@ -2451,6 +2717,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
             "imessage_enabled": imessage_enabled,
             "telegram_enabled": telegram_enabled,
             "telegram_chat_id": telegram_chat_id,
+            "telegram_chat_ids": telegram_chat_ids,
             "telegram_token_present": telegram_token_present,
         },
         "launchd": {
@@ -2522,6 +2789,11 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
     if bool(transport.get("telegram_enabled")):
         telegram_chat_id = transport.get("telegram_chat_id")
         sys.stdout.write(f"Telegram chat: {telegram_chat_id or '(missing)'}\n")
+        telegram_chat_ids = transport.get("telegram_chat_ids")
+        if isinstance(telegram_chat_ids, list) and telegram_chat_ids:
+            rendered_chat_ids = ", ".join(str(item).strip() for item in telegram_chat_ids if str(item).strip())
+            if rendered_chat_ids:
+                sys.stdout.write(f"Telegram inbound chats: {rendered_chat_ids}\n")
         sys.stdout.write(
             f"Telegram token: {'configured' if bool(transport.get('telegram_token_present')) else 'missing'}\n"
         )
@@ -2662,7 +2934,7 @@ def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]
         return {}
     out: dict[str, str] = {}
     for key, value in raw.items():
-        thread_key = key.strip() if isinstance(key, str) else ""
+        thread_key = _normalize_telegram_thread_key(thread_key=key if isinstance(key, str) else None)
         sid = value.strip() if isinstance(value, str) else ""
         if not thread_key or not sid:
             continue
@@ -2670,6 +2942,60 @@ def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]
             continue
         out[thread_key] = sid
     return out
+
+
+def _canonicalize_telegram_thread_state(*, sessions: dict[str, Any], raw_bindings: object) -> dict[str, str]:
+    explicit = _normalize_telegram_thread_bindings(raw=raw_bindings, sessions=sessions)
+    explicit_thread_keys = set(explicit.keys())
+    canonical: dict[str, str] = {}
+    session_to_thread: dict[str, str] = {}
+
+    # Explicit bindings from registry state are authoritative. When duplicates
+    # exist for a session, last entry wins by insertion order.
+    for thread_key, sid in explicit.items():
+        previous_thread = session_to_thread.get(sid)
+        if isinstance(previous_thread, str) and previous_thread != thread_key:
+            canonical.pop(previous_thread, None)
+
+        previous_sid = canonical.get(thread_key)
+        if isinstance(previous_sid, str) and previous_sid != sid:
+            session_to_thread.pop(previous_sid, None)
+
+        canonical[thread_key] = sid
+        session_to_thread[sid] = thread_key
+
+    # Backfill from session metadata only when no explicit binding exists.
+    for sid, rec in sessions.items():
+        if not isinstance(sid, str) or not sid:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if sid in session_to_thread:
+            continue
+        thread_key = _telegram_thread_key(
+            chat_id=rec.get("telegram_chat_id") if isinstance(rec.get("telegram_chat_id"), str) else None,
+            thread_id=_normalize_telegram_thread_id(rec.get("telegram_message_thread_id")),
+        )
+        if not thread_key or thread_key in canonical or thread_key in explicit_thread_keys:
+            continue
+        canonical[thread_key] = sid
+        session_to_thread[sid] = thread_key
+
+    # Sync session metadata to canonical mapping; clear stale topic metadata.
+    for sid, rec in sessions.items():
+        if not isinstance(sid, str) or not sid or not isinstance(rec, dict):
+            continue
+        assigned_key = session_to_thread.get(sid)
+        if isinstance(assigned_key, str):
+            rec["telegram_chat_id"] = _telegram_thread_chat_id_from_key(thread_key=assigned_key)
+            rec["telegram_message_thread_id"] = _telegram_thread_id_from_key(thread_key=assigned_key)
+        else:
+            if "telegram_chat_id" in rec:
+                rec["telegram_chat_id"] = None
+            if "telegram_message_thread_id" in rec:
+                rec["telegram_message_thread_id"] = None
+
+    return canonical
 
 
 def _load_registry(*, codex_home: Path) -> dict[str, Any]:
@@ -2687,9 +3013,9 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
         raw=raw.get("pending_new_session_choice_by_thread")
     )
-    telegram_thread_bindings = _normalize_telegram_thread_bindings(
-        raw=raw.get("telegram_thread_bindings"),
+    telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions_map,
+        raw_bindings=raw.get("telegram_thread_bindings"),
     )
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
@@ -2721,9 +3047,9 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
         raw=registry.get("pending_new_session_choice_by_thread")
     )
-    telegram_thread_bindings = _normalize_telegram_thread_bindings(
-        raw=registry.get("telegram_thread_bindings"),
+    telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions,
+        raw_bindings=registry.get("telegram_thread_bindings"),
     )
 
     # Keep only newest sessions by recency keys.
@@ -2931,18 +3257,29 @@ def _bind_telegram_thread_to_session(
     sid = session_id.strip() if isinstance(session_id, str) else ""
     if not thread_key or not sid:
         return
-    bindings = registry.setdefault("telegram_thread_bindings", {})
-    if not isinstance(bindings, dict):
-        bindings = {}
-        registry["telegram_thread_bindings"] = bindings
-    bindings[thread_key] = sid
     _upsert_session(
         registry=registry,
         session_id=sid,
-        fields={
-            "telegram_chat_id": chat_id.strip() if isinstance(chat_id, str) and chat_id.strip() else None,
-            "telegram_message_thread_id": _normalize_telegram_thread_id(message_thread_id),
-        },
+        fields={},
+    )
+    sessions = registry.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+        registry["sessions"] = sessions
+    bindings = _canonicalize_telegram_thread_state(
+        sessions=sessions,
+        raw_bindings=registry.get("telegram_thread_bindings"),
+    )
+    bindings[thread_key] = sid
+    ordered_bindings = {
+        existing_key: existing_sid
+        for existing_key, existing_sid in bindings.items()
+        if existing_key != thread_key
+    }
+    ordered_bindings[thread_key] = sid
+    registry["telegram_thread_bindings"] = _canonicalize_telegram_thread_state(
+        sessions=sessions,
+        raw_bindings=ordered_bindings,
     )
 
 
@@ -2968,30 +3305,189 @@ def _lookup_session_by_telegram_thread(
     return None
 
 
+def _lookup_single_telegram_thread_for_chat(
+    *,
+    registry: dict[str, Any],
+    chat_id: str | None,
+) -> int | None:
+    normalized_chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
+    if not normalized_chat_id:
+        return None
+    bindings = registry.get("telegram_thread_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    prefix = f"{normalized_chat_id}:"
+    thread_ids: set[int] = set()
+    for thread_key, sid in bindings.items():
+        if not isinstance(thread_key, str) or not thread_key.startswith(prefix):
+            continue
+        if not isinstance(sid, str) or not sid.strip():
+            continue
+        thread_id = _telegram_thread_id_from_key(thread_key=thread_key)
+        if thread_id is None:
+            continue
+        thread_ids.add(int(thread_id))
+    if len(thread_ids) != 1:
+        return None
+    return next(iter(thread_ids))
+
+
+def _lookup_single_session_by_telegram_chat(
+    *,
+    registry: dict[str, Any],
+    chat_id: str | None,
+) -> str | None:
+    normalized_chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
+    if not normalized_chat_id:
+        return None
+
+    candidate_sids: set[str] = set()
+
+    bindings = registry.get("telegram_thread_bindings")
+    if isinstance(bindings, dict):
+        prefix = f"{normalized_chat_id}:"
+        for thread_key, sid in bindings.items():
+            if not isinstance(thread_key, str) or not thread_key.startswith(prefix):
+                continue
+            if isinstance(sid, str) and sid.strip():
+                candidate_sids.add(sid.strip())
+
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict):
+        for sid, rec in sessions.items():
+            if not isinstance(sid, str) or not sid.strip():
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rec_chat_raw = rec.get("telegram_chat_id")
+            rec_chat_id = rec_chat_raw.strip() if isinstance(rec_chat_raw, str) else ""
+            if rec_chat_id and rec_chat_id == normalized_chat_id:
+                candidate_sids.add(sid.strip())
+
+    if len(candidate_sids) != 1:
+        return None
+    sid = next(iter(candidate_sids))
+    if not isinstance(sessions, dict) or sid not in sessions:
+        return None
+    return sid
+
+
 def _telegram_thread_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> int | None:
     sid = session_id.strip() if isinstance(session_id, str) else ""
     if not sid:
         return None
-    sessions = registry.get("sessions")
-    if isinstance(sessions, dict):
-        rec = sessions.get(sid)
-        if isinstance(rec, dict):
-            from_rec = _normalize_telegram_thread_id(rec.get("telegram_message_thread_id"))
-            if from_rec is not None:
-                return from_rec
+
+    # Primary source of truth is canonical thread bindings.
     bindings = registry.get("telegram_thread_bindings")
-    if not isinstance(bindings, dict):
+    if isinstance(bindings, dict):
+        for thread_key, bound_sid in bindings.items():
+            if isinstance(bound_sid, str) and bound_sid == sid:
+                from_key = _telegram_thread_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+                if from_key is not None:
+                    return from_key
+
+    # Backward-compatible fallback: use session metadata when no canonical
+    # mapping exists yet (for legacy records that predate bindings map).
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
         return None
-    for thread_key, bound_sid in bindings.items():
-        if isinstance(bound_sid, str) and bound_sid == sid:
-            from_key = _telegram_thread_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
-            if from_key is not None:
-                return from_key
+
+    fallback_thread_id = _normalize_telegram_thread_id(rec.get("telegram_message_thread_id"))
+    if fallback_thread_id is None:
+        return None
+
+    configured_chat = _telegram_chat_id()
+    configured_chat_id = configured_chat.strip() if isinstance(configured_chat, str) else ""
+    rec_chat_raw = rec.get("telegram_chat_id")
+    rec_chat_id = rec_chat_raw.strip() if isinstance(rec_chat_raw, str) else ""
+
+    # Avoid cross-chat routing when both IDs are known and disagree.
+    if configured_chat_id and rec_chat_id and rec_chat_id != configured_chat_id:
+        return None
+
+    return fallback_thread_id
+
+
+def _telegram_chat_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> str | None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return None
+
+    bindings = registry.get("telegram_thread_bindings")
+    if isinstance(bindings, dict):
+        for thread_key, bound_sid in bindings.items():
+            if isinstance(bound_sid, str) and bound_sid == sid:
+                from_key = _telegram_thread_chat_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+                if isinstance(from_key, str) and from_key.strip():
+                    return from_key.strip()
+
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    rec_chat_raw = rec.get("telegram_chat_id")
+    rec_chat_id = rec_chat_raw.strip() if isinstance(rec_chat_raw, str) else ""
+    if rec_chat_id:
+        return rec_chat_id
     return None
 
 
-def _parse_inbound_command(text: str) -> dict[str, str]:
+def _strip_leading_telegram_mention_for_command(*, text: str) -> str:
     raw = text.strip()
+    if not raw.startswith("@"):
+        return raw
+    match = re.match(r"^@[A-Za-z0-9_]+\s+(.+)$", raw, flags=re.DOTALL)
+    if not match:
+        return raw
+    remainder = match.group(1).strip()
+    if not remainder:
+        return raw
+    first_token = remainder.split(None, 1)[0]
+    first_lower = first_token.lower()
+    if first_token.startswith("@") or first_lower in {"help", "list", "status", "new"}:
+        return remainder
+    return raw
+
+
+def _normalize_telegram_slash_command(*, text: str) -> str:
+    raw = text.strip()
+    if not raw.startswith("/"):
+        return raw
+
+    match = re.match(r"^/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$", raw, flags=re.DOTALL)
+    if not match:
+        return raw
+
+    command = match.group(1).strip().lower()
+    remainder = (match.group(2) or "").strip()
+
+    if command == "help":
+        return "help"
+    if command == "list":
+        return "list"
+    if command == "status":
+        return f"status {remainder}".strip()
+    if command == "new":
+        return f"new {remainder}".strip()
+    if command in {"resume", "r", "reply"}:
+        if not remainder:
+            return raw
+        m_resume = re.match(r"^@?([^\s:]+)\s+(.+)$", remainder, flags=re.DOTALL)
+        if not m_resume:
+            return remainder
+        session_ref = m_resume.group(1).strip()
+        prompt = m_resume.group(2).strip()
+        if not session_ref or not prompt:
+            return remainder
+        return f"@{session_ref} {prompt}"
+
+    return raw
+
+
+def _parse_inbound_command(text: str) -> dict[str, str]:
+    raw = _strip_leading_telegram_mention_for_command(text=text)
+    raw = _normalize_telegram_slash_command(text=raw)
     if not raw:
         return {"action": "noop"}
 
@@ -3430,6 +3926,7 @@ def _send_structured(
     dry_run: bool,
     message_index: dict[str, Any],
     agent: str | None = None,
+    telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
 ) -> None:
     normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
@@ -3438,9 +3935,12 @@ def _send_structured(
     body = outbound._redact(text.rstrip()) + "\n"
 
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
+    resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
     if resolved_thread_id is None and isinstance(session_id, str) and session_id.strip():
         registry = _load_registry(codex_home=codex_home)
         resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
+        if resolved_chat_id is None:
+            resolved_chat_id = _telegram_chat_id_for_session(registry=registry, session_id=session_id)
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -3464,6 +3964,7 @@ def _send_structured(
             codex_home=codex_home,
             imessage_recipient=recipient,
             message=msg,
+            telegram_chat_id=resolved_chat_id,
             telegram_message_thread_id=resolved_thread_id,
         )
 
@@ -5636,6 +6137,18 @@ def _process_inbound_replies(
             row_context.get("telegram_chat_id") if isinstance(row_context.get("telegram_chat_id"), str) else None
         )
         row_telegram_thread_id = _normalize_telegram_thread_id(row_context.get("telegram_message_thread_id"))
+        if row_transport == "telegram" and row_telegram_thread_id is None:
+            inferred_thread_id = _lookup_single_telegram_thread_for_chat(
+                registry=registry,
+                chat_id=row_telegram_chat_id,
+            )
+            if inferred_thread_id is not None:
+                row_telegram_thread_id = inferred_thread_id
+        row_telegram_sender_user_id = (
+            row_context.get("telegram_sender_user_id")
+            if isinstance(row_context.get("telegram_sender_user_id"), str)
+            else None
+        )
         row_thread_key = _telegram_thread_key(chat_id=row_telegram_chat_id, thread_id=row_telegram_thread_id)
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
         if reference_guids_fn is not None:
@@ -5683,6 +6196,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
             if choice in _SUPPORTED_AGENTS:
@@ -5702,6 +6216,7 @@ def _process_inbound_replies(
                         dry_run=dry_run,
                         message_index=message_index,
                         telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                     )
                     continue
 
@@ -5752,6 +6267,7 @@ def _process_inbound_replies(
                         message_index=message_index,
                         agent=choice,
                         telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                     )
                     continue
 
@@ -5821,6 +6337,7 @@ def _process_inbound_replies(
                     message_index=message_index,
                     agent=choice,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
 
@@ -5841,6 +6358,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -5855,6 +6373,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -5872,6 +6391,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
 
@@ -5885,6 +6405,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -5905,6 +6426,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
 
@@ -5922,6 +6444,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
 
@@ -5949,6 +6472,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -5966,6 +6490,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -5982,6 +6507,13 @@ def _process_inbound_replies(
                     chat_id=row_telegram_chat_id,
                     message_thread_id=row_telegram_thread_id,
                 )
+                if not target_sid and row_thread_key and _telegram_sender_is_owner(
+                    sender_user_id=row_telegram_sender_user_id
+                ):
+                    target_sid = _lookup_single_session_by_telegram_chat(
+                        registry=registry,
+                        chat_id=row_telegram_chat_id,
+                    )
             if not target_sid:
                 target_sid, err = _resolve_session_from_reply_context(
                     conn=conn,
@@ -6057,6 +6589,7 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 continue
 
@@ -6070,6 +6603,7 @@ def _process_inbound_replies(
                 dry_run=dry_run,
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -6137,6 +6671,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
         if not prompt_for_dispatch:
@@ -6151,6 +6686,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -6181,6 +6717,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             _upsert_session(
                 registry=registry,
@@ -6212,6 +6749,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             _upsert_session(
                 registry=registry,
@@ -6261,6 +6799,7 @@ def _process_inbound_replies(
                     message_index=message_index,
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -6302,6 +6841,7 @@ def _process_inbound_replies(
                     message_index=message_index,
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -6328,6 +6868,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             _upsert_session(
                 registry=registry,
@@ -6357,6 +6898,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
             )
             continue
 
@@ -6371,6 +6913,7 @@ def _process_inbound_replies(
             message_index=message_index,
             agent=session_agent,
             telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
         )
 
         _upsert_session(
@@ -6403,34 +6946,38 @@ def _process_inbound_telegram_replies(
     trace: bool = False,
 ) -> int:
     token = _telegram_bot_token()
-    chat_id = _telegram_chat_id()
+    accept_all_chats = _telegram_accept_all_chats()
+    chat_ids = _telegram_chat_ids()
     if not isinstance(token, str) or not token.strip():
         return after_update_id
-    if not isinstance(chat_id, str) or not chat_id.strip():
+    if not chat_ids and not accept_all_chats:
         return after_update_id
 
     updates = _fetch_telegram_updates(
         token=token.strip(),
-        chat_id=chat_id.strip(),
+        chat_ids=None if accept_all_chats else chat_ids,
         after_update_id=after_update_id,
     )
     if not updates:
         return after_update_id
-    update_reply_text_map = {int(update_id): reply_text for update_id, _text, reply_text, _thread_id in updates}
+    update_reply_text_map = {
+        int(update_id): reply_text for update_id, _text, reply_text, _thread_id, _chat_id, _sender_user_id in updates
+    }
     update_context_map: dict[int, dict[str, Any]] = {
         int(update_id): {
             "transport": "telegram",
-            "telegram_chat_id": chat_id.strip(),
+            "telegram_chat_id": source_chat_id,
             "telegram_message_thread_id": _normalize_telegram_thread_id(thread_id),
+            "telegram_sender_user_id": sender_user_id,
         }
-        for update_id, _text, _reply_text, thread_id in updates
+        for update_id, _text, _reply_text, thread_id, source_chat_id, sender_user_id in updates
     }
 
     def _fetch_virtual_replies(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> list[tuple[int, str, str | None]]:
         del conn, handle_ids
         return [
             (update_id, text, None)
-            for update_id, text, _reply_text, _thread_id in updates
+            for update_id, text, _reply_text, _thread_id, _chat_id, _sender_user_id in updates
             if int(update_id) > int(after_rowid)
         ]
 
@@ -6777,6 +7324,12 @@ def main(argv: list[str]) -> int:
             script_path=Path(__file__).resolve(),
         )
     if args.cmd == "setup-permissions":
+        if not _transport_imessage_enabled(mode=transport_mode):
+            sys.stdout.write(
+                "Full Disk Access setup is only required when AGENT_CHAT_TRANSPORT includes iMessage "
+                "(imessage or both).\n"
+            )
+            return 0
         launchd_label = (
             os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip()
             or _DEFAULT_LAUNCHD_LABEL
@@ -6871,8 +7424,9 @@ def main(argv: list[str]) -> int:
 
     files_cursor, seen_needs_input_call_ids = _load_outbound_cursor(codex_home=codex_home)
 
-    conn = _open_chat_db(codex_home)
-    handle_ids = reply._candidate_handle_ids(recipient)
+    imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
+    conn = _open_chat_db(codex_home) if imessage_enabled else None
+    handle_ids = reply._candidate_handle_ids(recipient) if imessage_enabled else []
     inbound_rowid = 0
     if conn is not None:
         inbound_rowid = _ensure_inbound_cursor_seed(
@@ -6896,6 +7450,8 @@ def main(argv: list[str]) -> int:
     def _ensure_inbound_ready(*, now_monotonic: float | None = None) -> bool:
         nonlocal conn, inbound_rowid, next_inbound_retry_monotonic
 
+        if not imessage_enabled:
+            return False
         if conn is not None:
             return True
 
@@ -6916,7 +7472,8 @@ def main(argv: list[str]) -> int:
         )
         return True
 
-    _ensure_inbound_ready(now_monotonic=0.0)
+    if imessage_enabled:
+        _ensure_inbound_ready(now_monotonic=0.0)
 
     def cycle() -> None:
         nonlocal files_cursor, seen_needs_input_call_ids, inbound_rowid, telegram_update_id
@@ -6941,7 +7498,7 @@ def main(argv: list[str]) -> int:
             seen_needs_input_call_ids=seen_needs_input_call_ids,
         )
 
-        if _ensure_inbound_ready():
+        if imessage_enabled and _ensure_inbound_ready():
             conn_ready = conn
             if conn_ready is None:
                 return

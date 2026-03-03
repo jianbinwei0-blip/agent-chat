@@ -15,7 +15,7 @@
 
 1. Codex or Claude emits notify payload to `agent_chat_control_plane.py notify`.
 2. Control plane updates session registry and sends routed messages for active transport mode.
-3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db`, and fetches Telegram updates.
+3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db` only when transport includes iMessage, and fetches Telegram updates when transport includes Telegram.
 4. Replies are routed by `@ref`, reply context, or missing-session choice flow.
    - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`) before creating a background session.
    - for Telegram topics, thread binding (`chat_id:message_thread_id -> session_id`) is checked first for implicit replies.
@@ -84,10 +84,12 @@ Pending choice scope:
 - Telegram topics: one pending request per `chat_id:message_thread_id`.
 
 When a runtime choice creates a session from Telegram topic input, the topic is bound to that session. Outbound session messages then include `message_thread_id` so updates stay in the same topic.
+Registry migration/load/save keeps Telegram topic bindings canonical (one topic per session, one session per topic), and `telegram_thread_bindings` is treated as the source of truth when it conflicts with per-session topic fields.
+To move an existing Codex session to another Telegram topic, send one explicit bind message in the destination topic: `@<session_ref> hello`. The destination topic becomes the session's canonical binding.
 
 ## Failure Modes
 
-- `chat.db` unreadable:
+- `chat.db` unreadable (only relevant when transport includes iMessage):
   - Symptoms: inbound disabled warnings in stderr log.
   - Fix: run `python3 agent_chat_control_plane.py setup-launchd` (recommended) or `setup-permissions`, then grant the exact target printed by setup:
     - `Permission to grant: Full Disk Access (System Settings > Privacy & Security > Full Disk Access).`
@@ -110,6 +112,7 @@ When a runtime choice creates a session from Telegram topic input, the topic is 
 ## Launchd Runtime Notes
 
 - `setup-launchd` uses the current Python interpreter by default and writes a LaunchAgent plist automatically.
+- Full Disk Access/chat.db checks run only when transport includes iMessage (`imessage`/`both`).
 - when possible, `setup-launchd` prepares `~/Applications/AgentChatPython.app` and uses its embedded runtime path in LaunchAgent `ProgramArguments`.
 - Verify the launchd `ProgramArguments` path points to `agent_chat_control_plane.py`.
 - Avoid protected-path mismatches (for example stale script paths under denied folders).

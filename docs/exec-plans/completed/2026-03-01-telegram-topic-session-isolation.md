@@ -7,6 +7,7 @@ Implement Telegram topic/thread-based session isolation so each Codex/Claude ses
 1. Route inbound Telegram replies by `message_thread_id` before heuristic reply-context matching.
 2. Bind sessions to Telegram thread IDs and keep outbound session updates in their bound threads.
 3. Preserve existing behavior as fallback when topics are unavailable or thread binding is missing.
+4. Enforce strict one-topic-per-session migration where registry `telegram_thread_bindings` is the authoritative source when metadata conflicts.
 
 ## Scope
 
@@ -35,6 +36,10 @@ Implement Telegram topic/thread-based session isolation so each Codex/Claude ses
 - Outbound thread routing:
   - outbound messages for a bound session include `message_thread_id` and appear in the session thread.
   - when thread metadata is absent/unavailable, sender falls back to existing chat-level behavior.
+- Strict migration + mapping authority:
+  - registry load/save canonicalizes Telegram topic bindings so each session maps to exactly one topic and each topic maps to exactly one session.
+  - when session metadata conflicts with `telegram_thread_bindings`, mapping wins.
+  - session topic lookup for outbound routing is driven by mapping (not stale per-session metadata).
 - Regression tests:
   - targeted and existing control-plane tests pass.
 
@@ -113,16 +118,27 @@ graph TD
   - targeted thread-routing tests
   - full unit suite
 
+## Implementation Status (2026-03-02)
+
+- Completed `T1`: Added regression tests covering strict one-topic-per-session rebinding, topic takeover cleanup, strict load migration, and mapping-first outbound thread lookup.
+- Completed `T2`: Registry load/save now canonicalize Telegram bindings and synchronize/clear session topic metadata to remove stale mappings.
+- Completed `T3`: Telegram helpers already carry `message_thread_id` in fetch/send paths.
+- Completed `T4`: Inbound thread-first routing and thread-scoped pending runtime choice flow are in place and validated.
+- Completed `T5`: Outbound thread resolution now follows canonical `telegram_thread_bindings` mapping.
+- Completed `T6`: Docs and validation updated with strict migration and mapping precedence behavior.
+
 ## Decision Log
 
 - 2026-03-01: Thread-first resolution should take precedence over implicit reply-context heuristics for Telegram updates that include `message_thread_id`.
 - 2026-03-01: Pending new-session runtime choices should be scoped per Telegram thread key to avoid cross-thread collisions.
 - 2026-03-01: Outbound thread routing should be best-effort with fallback to current chat-level send behavior.
+- 2026-03-02: Strict migration is required on registry load/save, and `telegram_thread_bindings` mapping always wins when session metadata disagrees.
 
 ## Validation Notes
 
-- Target commands:
-  - `/Users/jwei/Documents/agent-chat/.venv/bin/python -m unittest tests.test_agent_chat_control_plane -v`
-  - `/Users/jwei/Documents/agent-chat/.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v`
-- Expected result:
-  - all tests pass with new thread-routing coverage included.
+- Executed commands:
+  - `python3 -m unittest tests.test_agent_chat_control_plane.TestAgentChatControlPlane.test_bind_telegram_thread_to_session_rebinds_session_to_single_topic tests.test_agent_chat_control_plane.TestAgentChatControlPlane.test_bind_telegram_thread_to_session_topic_takeover_clears_old_session_metadata tests.test_agent_chat_control_plane.TestAgentChatControlPlane.test_load_registry_strict_migration_enforces_single_topic_per_session tests.test_agent_chat_control_plane.TestAgentChatControlPlane.test_telegram_thread_id_for_session_prefers_mapping tests.test_agent_chat_control_plane.TestAgentChatControlPlane.test_telegram_thread_id_for_session_requires_mapping`
+  - `python3 -m unittest tests.test_agent_chat_control_plane`
+- Result:
+  - all targeted regressions pass.
+  - full control-plane suite passes (`Ran 154 tests ... OK`).
