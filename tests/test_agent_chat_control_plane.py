@@ -314,6 +314,64 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertEqual(thread_id, 999)
 
+    def test_telegram_thread_id_for_session_falls_back_to_general_topic_when_unbound(self) -> None:
+        registry = {
+            "sessions": {
+                "sid-123": {
+                    "session_id": "sid-123",
+                    "tmux_pane": "%9",
+                }
+            },
+            "telegram_thread_bindings": {},
+        }
+
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "AGENT_TELEGRAM_CHAT_ID": "123456",
+            },
+            clear=False,
+        ):
+            thread_id = cp._telegram_thread_id_for_session(  # type: ignore[attr-defined]
+                registry=registry,
+                session_id="sid-123",
+            )
+
+        self.assertEqual(thread_id, 1)
+
+    def test_telegram_thread_id_for_session_falls_back_to_general_topic_without_env_chat_when_registry_unambiguous(
+        self,
+    ) -> None:
+        registry = {
+            "sessions": {
+                "sid-target": {
+                    "session_id": "sid-target",
+                },
+                "sid-bound": {
+                    "session_id": "sid-bound",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 321,
+                },
+            },
+            "telegram_thread_bindings": {
+                "123456:321": "sid-bound",
+            },
+        }
+
+        with mock.patch.dict(
+            cp.os.environ,  # type: ignore[attr-defined]
+            {
+                "AGENT_TELEGRAM_CHAT_ID": "",
+            },
+            clear=False,
+        ):
+            thread_id = cp._telegram_thread_id_for_session(  # type: ignore[attr-defined]
+                registry=registry,
+                session_id="sid-target",
+            )
+
+        self.assertEqual(thread_id, 1)
+
     def test_lookup_agent_home_path_uses_default_codex_when_runtime_points_codex_home_to_claude(self) -> None:
         with mock.patch.dict(
             cp.os.environ,  # type: ignore[attr-defined]
@@ -1555,6 +1613,37 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(response, "ok")
         resume_mock.assert_called_once()
 
+    def test_dispatch_prompt_strict_tmux_with_pane_and_no_session_path_sends_prompt(self) -> None:
+        sid = "019cb278-b494-7d70-8175-94793ecc443a"
+        rec = {
+            "cwd": "/tmp/project",
+            "tmux_pane": "%9",
+        }
+
+        with (
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_matches_session", return_value=True, create=True),
+            mock.patch.object(cp.reply, "_tmux_send_prompt", return_value=True) as tmux_send_mock,
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value="fallback") as resume_mock,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {"AGENT_CHAT_STRICT_TMUX": "1"},
+                clear=False,
+            ),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+                agent="codex",
+            )
+
+        self.assertEqual(mode, "tmux")
+        self.assertIsNone(response)
+        tmux_send_mock.assert_called_once_with(pane="%9", prompt="continue")
+        resume_mock.assert_not_called()
+
     def test_apply_attention_context_to_session_ignores_terminal_fields(self) -> None:
         sid = "11111111-1111-1111-1111-111111111111"
         rec: dict[str, object] = {"cwd": "/tmp/project"}
@@ -2356,6 +2445,149 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rec.get("agent"), "codex")
         self.assertTrue(any("without tmux" in str(m.get("text", "")).lower() for m in sent))
 
+    def test_process_inbound_replies_resume_recovers_pruned_full_session_id(self) -> None:
+        sid = "019cb278-b494-7d70-8175-94793ecc443a"
+        session_path = f"/tmp/sessions/{sid}.jsonl"
+        registry: dict[str, object] = {
+            "sessions": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+            "telegram_thread_bindings": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _dispatch_with_recovered_session(**kwargs: object):
+            rec = kwargs.get("session_rec")
+            if isinstance(rec, dict) and rec.get("session_path") == session_path:
+                return "resume", "ok"
+            return "tmux_stale", None
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(104, f"@{sid} hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_disk",
+                return_value={"session_path": session_path, "cwd": "/tmp/project", "agent": "codex"},
+            ) as recover_mock,
+            mock.patch.object(cp, "_resolve_session_agent", return_value="codex"),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", side_effect=_dispatch_with_recovered_session),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 104)
+        recover_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            session_id=sid,
+            registry=registry,
+        )
+        sessions = registry.get("sessions")
+        self.assertIsInstance(sessions, dict)
+        if not isinstance(sessions, dict):
+            self.fail("expected sessions map")
+        rec = sessions.get(sid)
+        self.assertIsInstance(rec, dict)
+        if not isinstance(rec, dict):
+            self.fail("expected recovered session record")
+        self.assertEqual(rec.get("session_path"), session_path)
+        self.assertIsNone(registry.get("pending_new_session_choice"))
+        self.assertFalse(any(msg.get("kind") == "needs_input" for msg in sent))
+        self.assertTrue(any(msg.get("kind") == "responded" and msg.get("session_id") == sid for msg in sent))
+
+    def test_process_inbound_replies_resume_recovers_pruned_full_session_id_from_tmux(self) -> None:
+        sid = "019cb278-b494-7d70-8175-94793ecc443a"
+        registry: dict[str, object] = {
+            "sessions": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+            "telegram_thread_bindings": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _dispatch_with_recovered_tmux(**kwargs: object):
+            rec = kwargs.get("session_rec")
+            if isinstance(rec, dict) and rec.get("tmux_pane") == "%9":
+                return "tmux", None
+            return "tmux_stale", None
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(105, f"@{sid} hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_disk",
+                return_value=None,
+            ),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_tmux",
+                return_value={"agent": "codex", "tmux_pane": "%9", "cwd": "/tmp/project"},
+                create=True,
+            ) as recover_tmux_mock,
+            mock.patch.object(cp, "_resolve_session_agent", return_value="codex"),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", side_effect=_dispatch_with_recovered_tmux),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 105)
+        recover_tmux_mock.assert_called_once_with(
+            codex_home=Path("/tmp/codex-home"),
+            session_id=sid,
+            registry=registry,
+            agent="codex",
+        )
+        sessions = registry.get("sessions")
+        self.assertIsInstance(sessions, dict)
+        if not isinstance(sessions, dict):
+            self.fail("expected sessions map")
+        rec = sessions.get(sid)
+        self.assertIsInstance(rec, dict)
+        if not isinstance(rec, dict):
+            self.fail("expected recovered tmux-backed session record")
+        self.assertEqual(rec.get("tmux_pane"), "%9")
+        self.assertFalse(any(msg.get("kind") == "needs_input" for msg in sent))
+        self.assertTrue(any(msg.get("kind") == "accepted" and msg.get("session_id") == sid for msg in sent))
+
     def test_process_inbound_replies_implicit_telegram_thread_binding_resolves_target_first(self) -> None:
         registry: dict[str, object] = {
             "sessions": {
@@ -2482,6 +2714,184 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 for msg in sent
             )
         )
+
+    def test_process_inbound_replies_implicit_telegram_rebinds_to_latest_tmux_session(self) -> None:
+        old_sid = "019cb278-b494-7d70-8175-94793ecc443a"
+        new_sid = "019cb1da-ef74-7672-9e75-cdef42e33823"
+        thread_key = "123456:888"
+        registry: dict[str, object] = {
+            "sessions": {
+                old_sid: {
+                    "session_id": old_sid,
+                    "ref": old_sid[:8],
+                    "agent": "codex",
+                    "awaiting_input": True,
+                    "tmux_pane": "%9",
+                    "tmux_socket": "sock",
+                    "cwd": "/tmp/project",
+                }
+            },
+            "telegram_thread_bindings": {thread_key: old_sid},
+            "telegram_thread_tmux_bindings": {
+                thread_key: {"tmux_pane": "%9", "tmux_socket": "sock", "agent": "codex"}
+            },
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                313: {
+                    "transport": "telegram",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 888,
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(313, "hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context") as resolve_context_mock,
+            mock.patch.object(cp, "_resolve_session_agent", return_value="codex"),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_latest_session_id_from_pane", return_value=new_sid, create=True),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_disk",
+                return_value={"session_path": f"/tmp/sessions/{new_sid}.jsonl", "cwd": "/tmp/project", "agent": "codex"},
+            ) as recover_disk_mock,
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("resume", "done")) as dispatch_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 313)
+        resolve_context_mock.assert_not_called()
+        recover_disk_mock.assert_any_call(
+            codex_home=Path("/tmp/codex-home"),
+            session_id=new_sid,
+            registry=registry,
+        )
+        dispatch_mock.assert_called_once()
+        self.assertEqual(dispatch_mock.call_args.kwargs.get("target_sid"), new_sid)
+        bindings = registry.get("telegram_thread_bindings")
+        self.assertIsInstance(bindings, dict)
+        if not isinstance(bindings, dict):
+            self.fail("expected telegram_thread_bindings map")
+        self.assertEqual(bindings.get(thread_key), new_sid)
+        sessions = registry.get("sessions")
+        self.assertIsInstance(sessions, dict)
+        if not isinstance(sessions, dict):
+            self.fail("expected sessions map")
+        new_rec = sessions.get(new_sid)
+        self.assertIsInstance(new_rec, dict)
+        if not isinstance(new_rec, dict):
+            self.fail("expected remapped session record")
+        self.assertEqual(new_rec.get("tmux_pane"), "%9")
+        self.assertFalse(any(msg.get("kind") == "needs_input" for msg in sent))
+
+    def test_process_inbound_replies_resume_telegram_uses_thread_tmux_binding_when_ref_missing(self) -> None:
+        stale_ref = "019cb278-b494-7d70-8175-94793ecc443a"
+        active_sid = "019cb1da-ef74-7672-9e75-cdef42e33823"
+        thread_key = "123456:888"
+        registry: dict[str, object] = {
+            "sessions": {},
+            "telegram_thread_bindings": {},
+            "telegram_thread_tmux_bindings": {
+                thread_key: {"tmux_pane": "%9", "tmux_socket": "sock", "agent": "codex"}
+            },
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                314: {
+                    "transport": "telegram",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 888,
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(314, f"@{stale_ref} hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_tmux",
+                return_value=None,
+            ),
+            mock.patch.object(cp, "_resolve_session_agent", return_value="codex"),
+            mock.patch.object(cp, "_tmux_pane_exists", return_value=True),
+            mock.patch.object(cp, "_tmux_latest_session_id_from_pane", return_value=active_sid, create=True),
+            mock.patch.object(
+                cp,
+                "_recover_session_record_from_disk",
+                side_effect=[
+                    None,
+                    {"session_path": f"/tmp/sessions/{active_sid}.jsonl", "cwd": "/tmp/project", "agent": "codex"},
+                ],
+            ) as recover_disk_mock,
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux", None)) as dispatch_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 314)
+        self.assertEqual(recover_disk_mock.call_count, 2)
+        dispatch_mock.assert_called_once()
+        self.assertEqual(dispatch_mock.call_args.kwargs.get("target_sid"), active_sid)
+        bindings = registry.get("telegram_thread_bindings")
+        self.assertIsInstance(bindings, dict)
+        if not isinstance(bindings, dict):
+            self.fail("expected telegram_thread_bindings map")
+        self.assertEqual(bindings.get(thread_key), active_sid)
+        self.assertFalse(any(msg.get("kind") == "needs_input" for msg in sent))
+        self.assertTrue(any(msg.get("kind") == "accepted" and msg.get("session_id") == active_sid for msg in sent))
 
     def test_process_inbound_replies_implicit_telegram_owner_auto_binds_single_chat_session(self) -> None:
         registry: dict[str, object] = {
@@ -3914,6 +4324,141 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(imessage_send.call_count, 0)
         self.assertGreaterEqual(len(sent_telegram), 1)
         self.assertEqual(sent_telegram[0][3], 321)
+
+    def test_send_structured_uses_general_topic_thread_for_unbound_sessions(self) -> None:
+        sent_telegram: list[tuple[str, str, str, int | None]] = []
+
+        def _capture_telegram(
+            *,
+            token: str,
+            chat_id: str,
+            message: str,
+            message_thread_id: int | None = None,
+            timeout_s: float = 10.0,
+        ) -> bool:
+            del timeout_s
+            sent_telegram.append((token, chat_id, message, message_thread_id))
+            return True
+
+        registry = {
+            "sessions": {
+                "sid-with-tmux": {
+                    "session_id": "sid-with-tmux",
+                    "ref": "sid-with-tmux",
+                    "tmux_pane": "%9",
+                },
+                "sid-without-tmux": {
+                    "session_id": "sid-without-tmux",
+                    "ref": "sid-without-tmux",
+                },
+            },
+            "telegram_thread_bindings": {},
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "AGENT_CHAT_TRANSPORT": "telegram",
+                    "AGENT_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "AGENT_TELEGRAM_CHAT_ID": "123456",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_send_telegram_message", side_effect=_capture_telegram),
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="+15551234567",
+                session_id="sid-with-tmux",
+                kind="responded",
+                text="done tmux",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="+15551234567",
+                session_id="sid-without-tmux",
+                kind="responded",
+                text="done no tmux",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        self.assertGreaterEqual(len(sent_telegram), 2)
+        self.assertEqual(sent_telegram[0][3], 1)
+        self.assertEqual(sent_telegram[1][3], 1)
+
+    def test_send_structured_infers_chat_id_from_registry_when_env_chat_missing(self) -> None:
+        sent_telegram: list[tuple[str, str, str, int | None]] = []
+
+        def _capture_telegram(
+            *,
+            token: str,
+            chat_id: str,
+            message: str,
+            message_thread_id: int | None = None,
+            timeout_s: float = 10.0,
+        ) -> bool:
+            del timeout_s
+            sent_telegram.append((token, chat_id, message, message_thread_id))
+            return True
+
+        registry = {
+            "sessions": {
+                "sid-target": {
+                    "session_id": "sid-target",
+                    "ref": "sid-target",
+                },
+                "sid-bound": {
+                    "session_id": "sid-bound",
+                    "ref": "sid-bound",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 321,
+                },
+            },
+            "telegram_thread_bindings": {
+                "123456:321": "sid-bound",
+            },
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "AGENT_CHAT_TRANSPORT": "telegram",
+                    "AGENT_TELEGRAM_BOT_TOKEN": "test-bot-token",
+                    "AGENT_TELEGRAM_CHAT_ID": "",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_send_telegram_message", side_effect=_capture_telegram),
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="+15551234567",
+                session_id="sid-target",
+                kind="responded",
+                text="done inferred",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        self.assertGreaterEqual(len(sent_telegram), 1)
+        self.assertEqual(sent_telegram[0][1], "123456")
+        self.assertEqual(sent_telegram[0][3], 1)
 
     def test_send_structured_honors_explicit_telegram_chat_id(self) -> None:
         sent_telegram: list[tuple[str, str, str, int | None]] = []

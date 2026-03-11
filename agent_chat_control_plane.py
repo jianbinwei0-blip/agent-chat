@@ -941,6 +941,16 @@ def _telegram_accept_all_chats() -> bool:
     return _env_enabled("AGENT_TELEGRAM_ACCEPT_ALL_CHATS", default=False)
 
 
+def _telegram_general_topic_thread_id() -> int | None:
+    raw = os.environ.get("AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID")
+    if isinstance(raw, str):
+        trimmed = raw.strip()
+        if trimmed:
+            return _normalize_telegram_thread_id(trimmed)
+    # Telegram forum supergroups use topic id 1 for #general.
+    return 1
+
+
 def _normalize_telegram_thread_id(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -2881,6 +2891,7 @@ def _default_registry() -> dict[str, Any]:
         "pending_new_session_choice": None,
         "pending_new_session_choice_by_thread": {},
         "telegram_thread_bindings": {},
+        "telegram_thread_tmux_bindings": {},
         "ts": int(time.time()),
     }
 
@@ -2941,6 +2952,43 @@ def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]
         if sid not in sessions:
             continue
         out[thread_key] = sid
+    return out
+
+
+def _normalize_telegram_thread_tmux_bindings(*, raw: object) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for key, value in raw.items():
+        thread_key = _normalize_telegram_thread_key(thread_key=key if isinstance(key, str) else None)
+        if not thread_key:
+            continue
+
+        pane: str = ""
+        socket: str | None = None
+        agent: str | None = None
+
+        if isinstance(value, str):
+            pane = value.strip()
+        elif isinstance(value, dict):
+            pane_raw = value.get("tmux_pane")
+            pane = pane_raw.strip() if isinstance(pane_raw, str) else ""
+            socket_raw = value.get("tmux_socket")
+            if isinstance(socket_raw, str):
+                socket = _normalize_tmux_socket(tmux_socket=socket_raw)
+            agent_raw = value.get("agent")
+            if isinstance(agent_raw, str) and agent_raw.strip():
+                agent = _normalize_agent(agent=agent_raw)
+        if not pane:
+            continue
+
+        record: dict[str, str] = {"tmux_pane": pane}
+        if isinstance(socket, str) and socket.strip():
+            record["tmux_socket"] = socket.strip()
+        if isinstance(agent, str) and agent.strip():
+            record["agent"] = agent.strip()
+        out[thread_key] = record
     return out
 
 
@@ -3017,6 +3065,9 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
         sessions=sessions_map,
         raw_bindings=raw.get("telegram_thread_bindings"),
     )
+    telegram_thread_tmux_bindings = _normalize_telegram_thread_tmux_bindings(
+        raw=raw.get("telegram_thread_tmux_bindings")
+    )
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
     out: dict[str, Any] = {
@@ -3026,6 +3077,7 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
         "pending_new_session_choice": pending_new_session_choice,
         "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
         "telegram_thread_bindings": telegram_thread_bindings,
+        "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
         "ts": int(time.time()),
     }
     return out
@@ -3050,6 +3102,9 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions,
         raw_bindings=registry.get("telegram_thread_bindings"),
+    )
+    telegram_thread_tmux_bindings = _normalize_telegram_thread_tmux_bindings(
+        raw=registry.get("telegram_thread_tmux_bindings")
     )
 
     # Keep only newest sessions by recency keys.
@@ -3088,6 +3143,7 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             "pending_new_session_choice": pending_new_session_choice,
             "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
             "telegram_thread_bindings": telegram_thread_bindings,
+            "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
             "ts": int(time.time()),
         },
     )
@@ -3246,6 +3302,150 @@ def _clear_pending_new_session_choice_by_thread(*, registry: dict[str, Any], thr
     mapping.pop(key, None)
 
 
+def _set_telegram_thread_tmux_binding(
+    *,
+    registry: dict[str, Any],
+    thread_key: str,
+    tmux_pane: str,
+    tmux_socket: str | None = None,
+    agent: str | None = None,
+) -> None:
+    key = _normalize_telegram_thread_key(thread_key=thread_key)
+    pane = tmux_pane.strip() if isinstance(tmux_pane, str) else ""
+    if not key or not pane:
+        return
+
+    bindings = registry.get("telegram_thread_tmux_bindings")
+    if not isinstance(bindings, dict):
+        bindings = {}
+        registry["telegram_thread_tmux_bindings"] = bindings
+
+    record: dict[str, str] = {"tmux_pane": pane}
+    socket_norm = _normalize_tmux_socket(tmux_socket=tmux_socket if isinstance(tmux_socket, str) else None)
+    if isinstance(socket_norm, str) and socket_norm.strip():
+        record["tmux_socket"] = socket_norm.strip()
+    if isinstance(agent, str) and agent.strip():
+        record["agent"] = _normalize_agent(agent=agent)
+    bindings[key] = record
+
+
+def _lookup_telegram_thread_tmux_binding(
+    *,
+    registry: dict[str, Any],
+    thread_key: str | None,
+    fallback_session_id: str | None = None,
+) -> dict[str, str] | None:
+    key = _normalize_telegram_thread_key(thread_key=thread_key)
+    if not key:
+        return None
+
+    bindings = _normalize_telegram_thread_tmux_bindings(raw=registry.get("telegram_thread_tmux_bindings"))
+    registry["telegram_thread_tmux_bindings"] = bindings
+    record = bindings.get(key)
+    if isinstance(record, dict):
+        pane = record.get("tmux_pane")
+        if isinstance(pane, str) and pane.strip():
+            return record
+
+    sid = fallback_session_id.strip() if isinstance(fallback_session_id, str) else ""
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) and sid else None
+    if not isinstance(rec, dict):
+        return None
+    pane = rec.get("tmux_pane")
+    pane_norm = pane.strip() if isinstance(pane, str) else ""
+    if not pane_norm:
+        return None
+    socket_norm = _normalize_tmux_socket(
+        tmux_socket=rec.get("tmux_socket") if isinstance(rec.get("tmux_socket"), str) else None
+    )
+    agent_norm = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else _current_agent())
+    _set_telegram_thread_tmux_binding(
+        registry=registry,
+        thread_key=key,
+        tmux_pane=pane_norm,
+        tmux_socket=socket_norm,
+        agent=agent_norm,
+    )
+    refreshed = _normalize_telegram_thread_tmux_bindings(raw=registry.get("telegram_thread_tmux_bindings"))
+    registry["telegram_thread_tmux_bindings"] = refreshed
+    resolved = refreshed.get(key)
+    return resolved if isinstance(resolved, dict) else None
+
+
+def _resolve_session_from_telegram_thread_tmux_binding(
+    *,
+    codex_home: Path,
+    registry: dict[str, Any],
+    chat_id: str | None,
+    message_thread_id: int | None,
+    fallback_session_id: str | None = None,
+    agent: str | None = None,
+) -> str | None:
+    thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=message_thread_id)
+    if not thread_key:
+        return None
+
+    binding = _lookup_telegram_thread_tmux_binding(
+        registry=registry,
+        thread_key=thread_key,
+        fallback_session_id=fallback_session_id,
+    )
+    if not isinstance(binding, dict):
+        return None
+
+    pane = binding.get("tmux_pane")
+    pane_norm = pane.strip() if isinstance(pane, str) else ""
+    if not pane_norm:
+        return None
+
+    socket_norm = _normalize_tmux_socket(
+        tmux_socket=binding.get("tmux_socket") if isinstance(binding.get("tmux_socket"), str) else None
+    )
+    if not _tmux_pane_exists(pane=pane_norm, tmux_socket=socket_norm):
+        return None
+
+    latest_sid = _tmux_latest_session_id_from_pane(pane=pane_norm, tmux_socket=socket_norm)
+    latest_sid_norm = latest_sid.strip() if isinstance(latest_sid, str) else ""
+    if not latest_sid_norm:
+        return None
+
+    recovered = _recover_session_record_from_disk(
+        codex_home=codex_home,
+        session_id=latest_sid_norm,
+        registry=registry,
+    )
+    fields: dict[str, Any] = recovered if isinstance(recovered, dict) and recovered else {}
+    fields["tmux_pane"] = pane_norm
+    if isinstance(socket_norm, str) and socket_norm.strip():
+        fields["tmux_socket"] = socket_norm.strip()
+
+    fallback_agent: str | None = None
+    binding_agent = binding.get("agent")
+    if isinstance(binding_agent, str) and binding_agent.strip():
+        fallback_agent = _normalize_agent(agent=binding_agent)
+    elif isinstance(agent, str) and agent.strip():
+        fallback_agent = _normalize_agent(agent=agent)
+    elif isinstance(fallback_session_id, str) and fallback_session_id.strip():
+        sessions = registry.get("sessions")
+        old_rec = sessions.get(fallback_session_id.strip()) if isinstance(sessions, dict) else None
+        if isinstance(old_rec, dict):
+            old_agent = old_rec.get("agent")
+            if isinstance(old_agent, str) and old_agent.strip():
+                fallback_agent = _normalize_agent(agent=old_agent)
+    if not isinstance(fields.get("agent"), str) or not str(fields.get("agent")).strip():
+        fields["agent"] = fallback_agent if isinstance(fallback_agent, str) else _current_agent()
+
+    _upsert_session(registry=registry, session_id=latest_sid_norm, fields=fields)
+    _bind_telegram_thread_to_session(
+        registry=registry,
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        session_id=latest_sid_norm,
+    )
+    return latest_sid_norm
+
+
 def _bind_telegram_thread_to_session(
     *,
     registry: dict[str, Any],
@@ -3282,6 +3482,23 @@ def _bind_telegram_thread_to_session(
         raw_bindings=ordered_bindings,
     )
 
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if isinstance(rec, dict):
+        pane = rec.get("tmux_pane")
+        pane_norm = pane.strip() if isinstance(pane, str) else ""
+        if pane_norm:
+            socket_norm = _normalize_tmux_socket(
+                tmux_socket=rec.get("tmux_socket") if isinstance(rec.get("tmux_socket"), str) else None
+            )
+            rec_agent = rec.get("agent") if isinstance(rec.get("agent"), str) else None
+            _set_telegram_thread_tmux_binding(
+                registry=registry,
+                thread_key=thread_key,
+                tmux_pane=pane_norm,
+                tmux_socket=socket_norm,
+                agent=rec_agent,
+            )
+
 
 def _lookup_session_by_telegram_thread(
     *,
@@ -3301,7 +3518,6 @@ def _lookup_session_by_telegram_thread(
     sessions = registry.get("sessions")
     if isinstance(sessions, dict) and sid in sessions:
         return sid
-    bindings.pop(thread_key, None)
     return None
 
 
@@ -3372,6 +3588,45 @@ def _lookup_single_session_by_telegram_chat(
     return sid
 
 
+def _infer_single_telegram_chat_id_from_registry(*, registry: dict[str, Any]) -> str | None:
+    candidate_chat_ids: set[str] = set()
+
+    bindings = registry.get("telegram_thread_bindings")
+    if isinstance(bindings, dict):
+        for thread_key, sid in bindings.items():
+            if not isinstance(sid, str) or not sid.strip():
+                continue
+            chat_id = _telegram_thread_chat_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+            if isinstance(chat_id, str) and chat_id.strip():
+                candidate_chat_ids.add(chat_id.strip())
+
+    tmux_bindings = registry.get("telegram_thread_tmux_bindings")
+    if isinstance(tmux_bindings, dict):
+        for thread_key, binding in tmux_bindings.items():
+            if not isinstance(binding, dict):
+                continue
+            pane = binding.get("tmux_pane")
+            if not isinstance(pane, str) or not pane.strip():
+                continue
+            chat_id = _telegram_thread_chat_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+            if isinstance(chat_id, str) and chat_id.strip():
+                candidate_chat_ids.add(chat_id.strip())
+
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict):
+        for rec in sessions.values():
+            if not isinstance(rec, dict):
+                continue
+            rec_chat_raw = rec.get("telegram_chat_id")
+            rec_chat_id = rec_chat_raw.strip() if isinstance(rec_chat_raw, str) else ""
+            if rec_chat_id:
+                candidate_chat_ids.add(rec_chat_id)
+
+    if len(candidate_chat_ids) != 1:
+        return None
+    return next(iter(candidate_chat_ids))
+
+
 def _telegram_thread_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> int | None:
     sid = session_id.strip() if isinstance(session_id, str) else ""
     if not sid:
@@ -3394,11 +3649,12 @@ def _telegram_thread_id_for_session(*, registry: dict[str, Any], session_id: str
         return None
 
     fallback_thread_id = _normalize_telegram_thread_id(rec.get("telegram_message_thread_id"))
-    if fallback_thread_id is None:
-        return None
 
     configured_chat = _telegram_chat_id()
     configured_chat_id = configured_chat.strip() if isinstance(configured_chat, str) else ""
+    if not configured_chat_id:
+        inferred_chat = _infer_single_telegram_chat_id_from_registry(registry=registry)
+        configured_chat_id = inferred_chat.strip() if isinstance(inferred_chat, str) else ""
     rec_chat_raw = rec.get("telegram_chat_id")
     rec_chat_id = rec_chat_raw.strip() if isinstance(rec_chat_raw, str) else ""
 
@@ -3406,7 +3662,14 @@ def _telegram_thread_id_for_session(*, registry: dict[str, Any], session_id: str
     if configured_chat_id and rec_chat_id and rec_chat_id != configured_chat_id:
         return None
 
-    return fallback_thread_id
+    if fallback_thread_id is not None:
+        return fallback_thread_id
+
+    # For sessions that are not bound to a topic, route to #general so the
+    # session remains discoverable and can later be rebound via @<session_id>.
+    if configured_chat_id:
+        return _telegram_general_topic_thread_id()
+    return None
 
 
 def _telegram_chat_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> str | None:
@@ -3936,11 +4199,14 @@ def _send_structured(
 
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
     resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
-    if resolved_thread_id is None and isinstance(session_id, str) and session_id.strip():
+    if isinstance(session_id, str) and session_id.strip() and (resolved_thread_id is None or resolved_chat_id is None):
         registry = _load_registry(codex_home=codex_home)
-        resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
+        if resolved_thread_id is None:
+            resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
         if resolved_chat_id is None:
             resolved_chat_id = _telegram_chat_id_for_session(registry=registry, session_id=session_id)
+        if resolved_chat_id is None:
+            resolved_chat_id = _infer_single_telegram_chat_id_from_registry(registry=registry)
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -5092,6 +5358,46 @@ def _tmux_pane_mentions_session_id(
     if not target or not sid:
         return False
 
+    latest_sid = _tmux_latest_session_id_from_pane(pane=target, tmux_socket=tmux_socket)
+    if isinstance(latest_sid, str) and latest_sid.strip():
+        return latest_sid.strip().lower() == sid.lower()
+
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "capture-pane",
+                "-p",
+                "-t",
+                target,
+                "-S",
+                "-200",
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return False
+    haystack = proc.stdout or ""
+    if not haystack:
+        return False
+    return sid in haystack
+
+
+def _tmux_latest_session_id_from_pane(
+    *,
+    pane: str,
+    tmux_socket: str | None = None,
+) -> str | None:
+    target = pane.strip()
+    if not target:
+        return None
+
     try:
         proc = subprocess.run(
             _tmux_cmd(
@@ -5112,11 +5418,11 @@ def _tmux_pane_mentions_session_id(
         return False
 
     if proc.returncode != 0:
-        return False
+        return None
 
     haystack = proc.stdout or ""
     if not haystack:
-        return False
+        return None
 
     latest_status_sid: str | None = None
     latest_generic_sid: str | None = None
@@ -5128,10 +5434,10 @@ def _tmux_pane_mentions_session_id(
             latest_generic_sid = generic_match.group(0)
 
     if latest_status_sid:
-        return latest_status_sid.lower() == sid.lower()
+        return latest_status_sid
     if latest_generic_sid:
-        return latest_generic_sid.lower() == sid.lower()
-    return sid in haystack
+        return latest_generic_sid
+    return None
 
 
 def _tmux_filter_panes_by_session_id(
@@ -5278,7 +5584,7 @@ def _dispatch_prompt_to_session(
         tmux_socket_norm = _normalize_tmux_socket(tmux_socket=tmux_socket if isinstance(tmux_socket, str) else None)
         session_path = session_rec.get("session_path")
         pane_norm = pane.strip() if isinstance(pane, str) else ""
-        if (not pane_norm) and isinstance(session_path, str) and session_path.strip():
+        if not pane_norm:
             discovered_pane, discovered_socket = _tmux_discover_codex_pane_for_session(
                 session_rec=session_rec,
                 session_id=target_sid,
@@ -5294,6 +5600,54 @@ def _dispatch_prompt_to_session(
             elif strict_tmux and tmux_identity_present:
                 session_rec["last_dispatch_reason"] = "pane_missing"
                 return "tmux_stale", None
+
+        if pane_norm and not (isinstance(session_path, str) and session_path.strip()):
+            pane_is_valid = _tmux_pane_exists(pane=pane_norm, tmux_socket=tmux_socket_norm)
+            if pane_is_valid:
+                pane_is_valid = _tmux_pane_matches_session(
+                    pane=pane_norm,
+                    session_rec=session_rec,
+                    session_id=target_sid,
+                    tmux_socket=tmux_socket_norm,
+                    agent=effective_agent,
+                )
+            if not pane_is_valid:
+                discovered_pane, discovered_socket = _tmux_discover_codex_pane_for_session(
+                    session_rec=session_rec,
+                    session_id=target_sid,
+                    tmux_socket=tmux_socket_norm,
+                    agent=effective_agent,
+                )
+                if isinstance(discovered_pane, str) and discovered_pane.strip():
+                    pane_norm = discovered_pane.strip()
+                    session_rec["tmux_pane"] = pane_norm
+                    if isinstance(discovered_socket, str) and discovered_socket.strip():
+                        tmux_socket_norm = discovered_socket.strip()
+                        session_rec["tmux_socket"] = tmux_socket_norm
+                    refreshed_valid = _tmux_pane_exists(pane=pane_norm, tmux_socket=tmux_socket_norm)
+                    if refreshed_valid:
+                        refreshed_valid = _tmux_pane_matches_session(
+                            pane=pane_norm,
+                            session_rec=session_rec,
+                            session_id=target_sid,
+                            tmux_socket=tmux_socket_norm,
+                            agent=effective_agent,
+                        )
+                    if not refreshed_valid:
+                        session_rec["last_dispatch_reason"] = "pane_stale"
+                        return "tmux_stale", None
+                else:
+                    session_rec["last_dispatch_reason"] = "pane_stale"
+                    return "tmux_stale", None
+
+            send_kwargs: dict[str, Any] = {"pane": pane_norm, "prompt": prompt}
+            if tmux_socket_norm:
+                send_kwargs["tmux_socket"] = tmux_socket_norm
+            if not reply._tmux_send_prompt(**send_kwargs):
+                session_rec["last_dispatch_reason"] = "send_failed"
+                return "tmux_failed", None
+            session_rec["last_dispatch_reason"] = None
+            return "tmux", None
 
         if pane_norm and isinstance(session_path, str) and session_path.strip():
             session_path_norm = session_path.strip()
@@ -5579,6 +5933,57 @@ def _recover_session_record_from_disk(
         fields["tmux_socket"] = preferred_socket.strip()
 
     return fields
+
+
+def _recover_session_record_from_tmux(
+    *,
+    codex_home: Path,
+    session_id: str,
+    registry: dict[str, Any] | None = None,
+    agent: str | None = None,
+) -> dict[str, Any] | None:
+    sid = session_id.strip()
+    if not sid:
+        return None
+
+    preferred_socket = _normalize_tmux_socket(tmux_socket=os.environ.get("AGENT_CHAT_TMUX_SOCKET"))
+    if preferred_socket is None and isinstance(registry, dict):
+        preferred_socket = _choose_registry_tmux_socket(registry=registry)
+
+    candidates: list[str] = []
+    for raw in (agent, _current_agent(), "codex", "claude"):
+        normalized = _normalize_agent(agent=raw)
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    for candidate_agent in candidates:
+        probe_rec: dict[str, Any] = {"agent": candidate_agent}
+        pane, discovered_socket = _tmux_discover_codex_pane_for_session(
+            session_rec=probe_rec,
+            session_id=sid,
+            tmux_socket=preferred_socket,
+            agent=candidate_agent,
+        )
+        if not isinstance(pane, str) or not pane.strip():
+            continue
+
+        pane_norm = pane.strip()
+        socket_norm = _normalize_tmux_socket(
+            tmux_socket=discovered_socket if isinstance(discovered_socket, str) else preferred_socket
+        )
+        fields: dict[str, Any] = {
+            "agent": candidate_agent,
+            "tmux_pane": pane_norm,
+        }
+        if isinstance(socket_norm, str) and socket_norm.strip():
+            fields["tmux_socket"] = socket_norm.strip()
+
+        _command, pane_path = _tmux_read_pane_context(pane=pane_norm, tmux_socket=socket_norm)
+        if isinstance(pane_path, str) and pane_path.strip():
+            fields["cwd"] = pane_path.strip()
+        return fields
+
+    return None
 
 
 def _session_agent_from_record(*, session_rec: dict[str, Any] | None) -> str | None:
@@ -6500,13 +6905,59 @@ def _process_inbound_replies(
                 session_ref=cmd.get("session_ref", ""),
                 min_prefix=min_prefix,
             )
-        else:
-            if action == "implicit" and row_transport == "telegram":
-                target_sid = _lookup_session_by_telegram_thread(
+            if not target_sid:
+                raw_ref = cmd.get("session_ref", "")
+                requested_sid = raw_ref.strip() if isinstance(raw_ref, str) else ""
+                if requested_sid and _SESSION_UUID_RE.fullmatch(requested_sid):
+                    recovered = _recover_session_record_from_disk(
+                        codex_home=codex_home,
+                        session_id=requested_sid,
+                        registry=registry,
+                    )
+                    if not (isinstance(recovered, dict) and recovered):
+                        recovered = _recover_session_record_from_tmux(
+                            codex_home=codex_home,
+                            session_id=requested_sid,
+                            registry=registry,
+                            agent=_current_agent(),
+                        )
+                    if isinstance(recovered, dict) and recovered:
+                        _upsert_session(registry=registry, session_id=requested_sid, fields=recovered)
+                        target_sid = requested_sid
+                        err = None
+            if not target_sid and row_transport == "telegram":
+                bound_sid = _lookup_session_by_telegram_thread(
                     registry=registry,
                     chat_id=row_telegram_chat_id,
                     message_thread_id=row_telegram_thread_id,
                 )
+                rebound_sid = _resolve_session_from_telegram_thread_tmux_binding(
+                    codex_home=codex_home,
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                    fallback_session_id=bound_sid,
+                    agent=_current_agent(),
+                )
+                if isinstance(rebound_sid, str) and rebound_sid.strip():
+                    target_sid = rebound_sid.strip()
+                    err = None
+        else:
+            if action == "implicit" and row_transport == "telegram":
+                bound_sid = _lookup_session_by_telegram_thread(
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                )
+                rebound_sid = _resolve_session_from_telegram_thread_tmux_binding(
+                    codex_home=codex_home,
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                    fallback_session_id=bound_sid,
+                    agent=_current_agent(),
+                )
+                target_sid = rebound_sid if isinstance(rebound_sid, str) and rebound_sid.strip() else bound_sid
                 if not target_sid and row_thread_key and _telegram_sender_is_owner(
                     sender_user_id=row_telegram_sender_user_id
                 ):

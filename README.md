@@ -460,6 +460,7 @@ Telegram topic/thread routing behavior:
 - implicit replies in a bound Telegram topic resolve to the bound session before generic reply-context heuristics.
 - when a session is bound to a Telegram topic, outbound session updates are sent with `message_thread_id` so messages stay in that topic.
 - topic bindings are canonicalized as one-topic-per-session and one-session-per-topic; `telegram_thread_bindings` is authoritative when older per-session metadata disagrees.
+- when a session is not bound to any Telegram topic, outbound session updates default to the `#general` topic thread (id `1` by default), so sessions remain discoverable and can be rebound later via `@<session_id>`.
 
 ### Important environment variables
 
@@ -472,6 +473,7 @@ Telegram topic/thread routing behavior:
 - `AGENT_TELEGRAM_CHAT_IDS`: comma-separated allowlist for inbound chat IDs (optional; includes `AGENT_TELEGRAM_CHAT_ID` when set)
 - `AGENT_TELEGRAM_OWNER_USER_IDS`: comma-separated Telegram user IDs treated as owner senders for Telegram owner fallback routing (optional)
 - `AGENT_TELEGRAM_ACCEPT_ALL_CHATS`: accept inbound updates from any chat (`1` to enable; use only for diagnostics)
+- `AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID`: fallback Telegram topic thread id for sessions not bound to a topic (default `1` for `#general`; set `0` to disable fallback)
 - `AGENT_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
 - `AGENT_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
 - `AGENT_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
