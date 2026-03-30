@@ -3,22 +3,23 @@
 ## Runtime Contract
 
 - Authoritative long-lived process: launchd label defaults to `com.agent-chat`.
-- Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons.
+- Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons. Pi is integrated through session polling plus direct CLI/tmux control.
 - Single process handles:
-  - outbound needs-input notifications to iMessage and/or Telegram
+  - outbound needs-input notifications to iMessage, Telegram, and/or Discord
   - inbound iMessage replies from `chat.db`
   - inbound Telegram bot updates
+  - inbound Discord channel/thread polling for bot interactions
   - session routing (tmux + resume fallback)
   - fallback queue draining
 
 ## Data Flow
 
-1. Codex or Claude emits notify payload to `agent_chat_control_plane.py notify`.
-2. Control plane updates session registry and sends routed messages for active transport mode.
-3. During `run`, control plane tails session JSONL, polls `~/Library/Messages/chat.db` only when transport includes iMessage, and fetches Telegram updates when transport includes Telegram.
+1. Codex or Claude emits notify payload to `agent_chat_control_plane.py notify`; Pi is observed through session files and direct CLI/tmux control.
+2. Control plane updates session registry and sends routed messages for the active transport set.
+3. During `run`, control plane tails runtime session JSONL, polls `~/Library/Messages/chat.db` only when transport includes iMessage, fetches Telegram updates when transport includes Telegram, and polls configured Discord channels/threads when transport includes Discord.
 4. Replies are routed by `@ref`, reply context, or missing-session choice flow.
-   - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`) before creating a background session.
-   - for Telegram topics, thread binding (`chat_id:message_thread_id -> session_id`) is checked first for implicit replies.
+   - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`/`Pi`) before creating a background session.
+   - for Telegram topics and Discord thread/channel bindings, canonical conversation bindings are checked first for implicit replies.
 5. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
 
 ## Key State Files
@@ -29,6 +30,7 @@
 - `~/.codex/tmp/agent_chat_control_outbound_cursor.json`
 - `~/.codex/tmp/imessage_inbound_cursor.json`
 - `~/.codex/tmp/telegram_inbound_cursor.json`
+- `~/.codex/tmp/discord_inbound_cursor.json`
 - `~/.codex/tmp/agent_chat_queue.jsonl`
 
 ## Health Checks
@@ -71,11 +73,13 @@ When an inbound reply targets a missing session (`@ref ...` or implicit resoluti
 
 - `1) Codex`
 - `2) Claude`
+- `3) Pi`
 - `cancel`
 
 Follow-up behavior:
 - `1`/`codex`: create Codex session in background.
 - `2`/`claude`: create Claude session in background.
+- `3`/`pi`: create Pi session in background.
 - `cancel`: clear the pending request.
 
 If tmux creation fails after runtime choice, control plane falls back to direct (non-tmux) session creation.

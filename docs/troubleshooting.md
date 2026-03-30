@@ -231,11 +231,12 @@ Symptoms:
 - an implicit reply with no resolvable target session (for example, no session currently awaiting input) returns the same runtime choice prompt.
 
 Expected behavior:
-- reply `1`/`codex` or `2`/`claude` to pick runtime for new background session.
+- reply `1`/`codex`, `2`/`claude`, or `3`/`pi` to pick runtime for a new background session.
 - reply `cancel` to abort.
 - if tmux launch fails after runtime choice, control plane falls back to non-tmux session creation.
 - iMessage/non-threaded inbound keeps one global pending runtime-choice request (newest unresolved request wins).
 - Telegram topic inbound keeps pending runtime choice per `chat_id:message_thread_id`.
+- Discord channel/thread inbound keeps pending runtime choice per canonical Discord conversation key.
 - strict mode still requires explicit `@<session_ref>` for ambiguous implicit routing contexts.
 
 Telegram topic specifics:
@@ -266,6 +267,19 @@ Checks:
 - if logs show `telegram getUpdates failed: HTTP Error 409: Conflict`:
   - another process/webhook is consuming this bot token; stop the other consumer or clear webhook (`deleteWebhook`)
 - for setup diagnostics only, you can temporarily set `AGENT_TELEGRAM_ACCEPT_ALL_CHATS=1` to bypass chat-id filtering.
+
+### Discord channel or thread messages do nothing
+
+Symptoms:
+- message appears in Discord, but there is no bot response
+- `doctor --json` shows Discord transport enabled, but no new Discord cursor progress appears
+
+Checks:
+- verify `AGENT_DISCORD_BOT_TOKEN` is valid and the bot has access to the target channel/thread
+- set `AGENT_DISCORD_CHANNEL_ID` or `AGENT_DISCORD_CHANNEL_IDS` to the channel/thread allowlist you expect the poller to watch
+- if you are using threads, send one explicit bind message first (`@<session_ref> hello`) so the control plane stores a canonical conversation binding
+- enable trace and inspect launchd stderr for Discord polling failures
+- run `doctor --json` and verify `transport.discord_enabled`, `transport.discord_token_present`, and `transport.discord_channel_ids`
 
 ### Ambiguous replies or wrong target session
 

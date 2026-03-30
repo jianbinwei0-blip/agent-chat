@@ -81,7 +81,8 @@ def _normalize_recipient(recipient: str) -> str:
 
 def _find_newest_session_file(*, codex_home: Path) -> Path | None:
     try:
-        sessions_dir = codex_home / "sessions"
+        active_agent = (os.environ.get("AGENT_CHAT_AGENT") or "codex").strip().lower()
+        sessions_dir = codex_home / "projects" if active_agent == "claude" else codex_home / "sessions"
         if not sessions_dir.exists():
             return None
 
@@ -184,13 +185,16 @@ def _read_session_id(*, session_path: Path) -> str | None:
                     continue
                 if not isinstance(event, dict):
                     continue
-                if event.get("type") != "session_meta":
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    return None
-                sid = payload.get("id")
-                return sid.strip() if isinstance(sid, str) and sid.strip() else None
+                event_type = event.get("type")
+                if event_type == "session_meta":
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        return None
+                    sid = payload.get("id")
+                    return sid.strip() if isinstance(sid, str) and sid.strip() else None
+                if event_type == "session":
+                    sid = event.get("id")
+                    return sid.strip() if isinstance(sid, str) and sid.strip() else None
         return None
     except Exception:
         return None
@@ -211,13 +215,16 @@ def _read_session_cwd(*, session_path: Path) -> str | None:
                     continue
                 if not isinstance(event, dict):
                     continue
-                if event.get("type") != "session_meta":
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    return None
-                cwd = payload.get("cwd")
-                return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
+                event_type = event.get("type")
+                if event_type == "session_meta":
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        return None
+                    cwd = payload.get("cwd")
+                    return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
+                if event_type == "session":
+                    cwd = event.get("cwd")
+                    return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
         return None
     except Exception:
         return None
@@ -1002,7 +1009,13 @@ def main(argv: list[str]) -> int:
         return 0
     recipient = _normalize_recipient(recipient_raw)
 
-    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
+    active_agent = (os.environ.get("AGENT_CHAT_AGENT") or "codex").strip().lower()
+    if active_agent == "claude":
+        codex_home = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    elif active_agent == "pi":
+        codex_home = Path(os.environ.get("AGENT_CHAT_PI_HOME", os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))))
+    else:
+        codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     lock_handle = _acquire_single_instance_lock(codex_home=codex_home)
     if lock_handle is None:
         return 0

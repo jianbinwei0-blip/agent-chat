@@ -38,6 +38,13 @@ import agent_chat_dedupe
 import agent_chat_notify as notify
 import agent_chat_outbound_lib as outbound
 import agent_chat_reply_lib as reply
+from agent_chat.adapters import AGENT_ADAPTERS
+from agent_chat.config import parse_transport_list, transport_mode_summary
+from agent_chat.registry import (
+    conversation_key as registry_conversation_key,
+    normalize_conversation_bindings,
+    normalize_runtime_bindings,
+)
 
 _MIN_PYTHON_VERSION = (3, 11)
 _SESSION_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -95,6 +102,7 @@ _CHAT_DB_WARN_INTERVAL_S = 300.0
 _DEFAULT_TELEGRAM_SEND_TIMEOUT_S = 10.0
 _DEFAULT_TELEGRAM_SETUP_BOOTSTRAP_TIMEOUT_S = 90.0
 _DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org"
+_DEFAULT_DISCORD_API_BASE = "https://discord.com/api/v10"
 _DEFAULT_TMUX_NEW_SESSION_NAME = "agent"
 _DEFAULT_TMUX_WINDOW_PREFIX = "agent"
 _DEFAULT_SETUP_PERMISSIONS_TIMEOUT_S = 180.0
@@ -122,6 +130,11 @@ _CLAUDE_BIN_CANDIDATES = (
     "/usr/local/bin/claude",
     "/usr/bin/claude",
 )
+_PI_BIN_CANDIDATES = (
+    "/opt/homebrew/bin/pi",
+    "/usr/local/bin/pi",
+    "/usr/bin/pi",
+)
 _DEFAULT_LAUNCHD_LABEL = "com.agent-chat"
 _INBOUND_DISABLED_LOG_MARKER = "[agent-chat] inbound disabled:"
 _INBOUND_RESTORED_LOG_MARKER = "[agent-chat] inbound chat.db access restored."
@@ -137,7 +150,7 @@ _HELP_TEXT = (
     "- help"
 )
 
-_SUPPORTED_AGENTS = frozenset({"codex", "claude"})
+_SUPPORTED_AGENTS = frozenset(AGENT_ADAPTERS.keys())
 
 _chat_db_last_warning_text: str | None = None
 _chat_db_last_warning_ts: float = 0.0
@@ -219,13 +232,15 @@ def _current_agent() -> str:
 
 def _agent_display_name(*, agent: str | None = None) -> str:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
-    return "Claude" if normalized == "claude" else "Codex"
+    adapter = AGENT_ADAPTERS.get(normalized)
+    return adapter.label if adapter is not None else "Codex"
 
 
 def _agent_from_message_header(*, text: str | None) -> str | None:
     if not isinstance(text, str):
         return None
-    m = re.match(r"^\s*\[(codex|claude)\]\b", text, flags=re.IGNORECASE)
+    pattern = "|".join(sorted(re.escape(item) for item in _SUPPORTED_AGENTS))
+    m = re.match(rf"^\s*\[({pattern})\]\b", text, flags=re.IGNORECASE)
     if not m:
         return None
     return _normalize_agent(agent=m.group(1))
@@ -233,14 +248,29 @@ def _agent_from_message_header(*, text: str | None) -> str | None:
 
 def _agent_command_keyword(*, agent: str | None = None) -> str:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
-    return "claude" if normalized == "claude" else "codex"
+    return normalized
 
 
 def _agent_home_path(*, agent: str | None = None) -> Path:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
-    if normalized == "claude":
-        return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
-    return Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
+    adapter = AGENT_ADAPTERS.get(normalized)
+    if adapter is None:
+        return Path.home() / ".codex"
+
+    env_candidates: list[str] = []
+    if normalized == "codex":
+        env_candidates.extend(["AGENT_CHAT_CODEX_HOME", "AGENT_CHAT_HOME"])
+    elif normalized == "claude":
+        env_candidates.extend(["AGENT_CHAT_CLAUDE_HOME", "CLAUDE_HOME"])
+    elif normalized == "pi":
+        env_candidates.extend(["AGENT_CHAT_PI_HOME", "PI_CODING_AGENT_DIR"])
+    env_candidates.append(adapter.default_home_env)
+
+    for env_name in env_candidates:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return Path(value)
+    return adapter.default_home_factory()
 
 
 def _normalize_fs_path(*, path: Path | str) -> str:
@@ -254,6 +284,11 @@ def _lookup_agent_home_path(*, agent: str, current_home: Path) -> Path:
         if override:
             return Path(override)
         return _agent_home_path(agent="claude")
+    if normalized == "pi":
+        override = os.environ.get("AGENT_CHAT_PI_HOME", "").strip() or os.environ.get("PI_CODING_AGENT_DIR", "").strip()
+        if override:
+            return Path(override)
+        return _agent_home_path(agent="pi")
 
     override = os.environ.get("AGENT_CHAT_CODEX_HOME", "").strip()
     if override:
@@ -268,10 +303,12 @@ def _lookup_agent_home_path(*, agent: str, current_home: Path) -> Path:
         return codex_home
 
     claude_home_env = os.environ.get("CLAUDE_HOME", "").strip()
+    pi_home_env = os.environ.get("AGENT_CHAT_PI_HOME", "").strip() or os.environ.get("PI_CODING_AGENT_DIR", "").strip()
     current_norm = _normalize_fs_path(path=current_home)
     codex_norm = _normalize_fs_path(path=codex_home)
     claude_norm = _normalize_fs_path(path=claude_home_env) if claude_home_env else ""
-    if codex_norm == current_norm or (claude_norm and codex_norm == claude_norm):
+    pi_norm = _normalize_fs_path(path=pi_home_env) if pi_home_env else ""
+    if codex_norm == current_norm or (claude_norm and codex_norm == claude_norm) or (pi_norm and codex_norm == pi_norm):
         return Path.home() / ".codex"
 
     return codex_home
@@ -283,15 +320,22 @@ def _agent_session_root(*, codex_home: Path, agent: str | None = None) -> Path:
         projects_path = os.environ.get("CLAUDE_PROJECTS_PATH", "").strip()
         if projects_path:
             return Path(projects_path)
-        return codex_home / "projects"
-    return codex_home / "sessions"
+    if normalized == "pi":
+        session_dir = os.environ.get("PI_SESSION_DIR", "").strip() or os.environ.get("AGENT_CHAT_PI_SESSION_DIR", "").strip()
+        if session_dir:
+            return Path(session_dir)
+    adapter = AGENT_ADAPTERS.get(normalized)
+    if adapter is None:
+        return codex_home / "sessions"
+    return adapter.session_root_resolver(codex_home)
 
 
 def _session_path_env_keys(*, agent: str | None = None) -> tuple[str, ...]:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
-    if normalized == "claude":
-        return ("CLAUDE_SESSION_PATH", "CLAUDE_TRANSCRIPT_PATH", "CODEX_SESSION_PATH", "CODEX_SESSION_FILE")
-    return ("CODEX_SESSION_PATH", "CODEX_SESSION_FILE")
+    adapter = AGENT_ADAPTERS.get(normalized)
+    if adapter is None:
+        return ("CODEX_SESSION_PATH", "CODEX_SESSION_FILE")
+    return adapter.session_env_keys
 
 
 def _shared_control_state_home(*, codex_home: Path) -> Path:
@@ -445,8 +489,18 @@ def _notify_hook_status_claude(*, codex_home: Path) -> dict[str, Any]:
 
 
 def _notify_hook_status(*, codex_home: Path) -> dict[str, Any]:
-    if _current_agent() == "claude":
+    current = _current_agent()
+    if current == "claude":
         return _notify_hook_status_claude(codex_home=codex_home)
+    if current == "pi":
+        return {
+            "path": None,
+            "exists": True,
+            "top_level_present": True,
+            "mis_scoped_present": False,
+            "error": None,
+            "not_required": True,
+        }
 
     path = _codex_config_path(codex_home=codex_home)
     status: dict[str, Any] = {
@@ -511,8 +565,11 @@ def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
     items.append(f"AGENT_CHAT_AGENT={shlex.quote(agent_text)}")
 
     transport_mode = _transport_mode()
+    transport_list = _transport_list(mode=transport_mode)
     if transport_mode != "imessage":
         items.append(f"AGENT_CHAT_TRANSPORT={shlex.quote(transport_mode)}")
+    if transport_list != ["imessage"]:
+        items.append(f"AGENT_CHAT_TRANSPORTS={shlex.quote(','.join(transport_list))}")
 
     if _transport_telegram_enabled(mode=transport_mode):
         token = _telegram_bot_token()
@@ -529,6 +586,20 @@ def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
         api_base = api_base_raw.strip() if isinstance(api_base_raw, str) else ""
         if api_base:
             items.append(f"AGENT_TELEGRAM_API_BASE={shlex.quote(api_base)}")
+
+    if _transport_discord_enabled(mode=transport_mode):
+        token = _discord_bot_token()
+        channel_id = _discord_channel_id()
+        channel_ids_raw = os.environ.get("AGENT_DISCORD_CHANNEL_IDS", "")
+        owner_ids_raw = os.environ.get("AGENT_DISCORD_OWNER_USER_IDS", "")
+        if token:
+            items.append(f"AGENT_DISCORD_BOT_TOKEN={shlex.quote(token)}")
+        if channel_id:
+            items.append(f"AGENT_DISCORD_CHANNEL_ID={shlex.quote(channel_id)}")
+        if isinstance(channel_ids_raw, str) and channel_ids_raw.strip():
+            items.append(f"AGENT_DISCORD_CHANNEL_IDS={shlex.quote(channel_ids_raw.strip())}")
+        if isinstance(owner_ids_raw, str) and owner_ids_raw.strip():
+            items.append(f"AGENT_DISCORD_OWNER_USER_IDS={shlex.quote(owner_ids_raw.strip())}")
 
     return " ".join(items)
 
@@ -674,10 +745,13 @@ def _run_setup_notify_hook(
 ) -> int:
     agent = _current_agent()
     transport_mode = _transport_mode()
-    telegram_setup_err = _validate_telegram_setup_requirements(transport_mode=transport_mode)
-    if isinstance(telegram_setup_err, str):
-        sys.stdout.write(telegram_setup_err)
-        return 1
+    for setup_err in (
+        _validate_telegram_setup_requirements(transport_mode=transport_mode),
+        _validate_discord_setup_requirements(transport_mode=transport_mode),
+    ):
+        if isinstance(setup_err, str):
+            sys.stdout.write(setup_err)
+            return 1
 
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
     if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
@@ -689,6 +763,14 @@ def _run_setup_notify_hook(
     if not script_abs.exists():
         sys.stdout.write(f"Control-plane script not found: {script_abs}\n")
         return 1
+
+    if agent == "pi":
+        sys.stdout.write(
+            "Pi integration does not install a notify hook; session polling and routing are sufficient.\n"
+        )
+        sys.stdout.write(f"Python binary: {python_text}\n")
+        sys.stdout.write(f"Script: {script_abs}\n")
+        return 0
 
     config_path = _claude_settings_path(codex_home=codex_home) if agent == "claude" else _codex_config_path(
         codex_home=codex_home
@@ -851,22 +933,29 @@ def _queue_path(*, codex_home: Path) -> Path:
     )
 
 
+def _transport_list(*, mode: str | None = None) -> list[str]:
+    if isinstance(mode, str) and mode.strip():
+        return parse_transport_list(mode, None)
+    return parse_transport_list(
+        os.environ.get("AGENT_CHAT_TRANSPORTS"),
+        os.environ.get("AGENT_CHAT_TRANSPORT", "imessage"),
+    )
+
+
 def _transport_mode() -> str:
-    raw = os.environ.get("AGENT_CHAT_TRANSPORT", "imessage")
-    mode = raw.strip().lower() if isinstance(raw, str) else "imessage"
-    if mode in {"imessage", "telegram", "both"}:
-        return mode
-    return "imessage"
+    return transport_mode_summary(_transport_list())
 
 
 def _transport_imessage_enabled(*, mode: str | None = None) -> bool:
-    selected = mode if isinstance(mode, str) else _transport_mode()
-    return selected in {"imessage", "both"}
+    return "imessage" in _transport_list(mode=mode)
 
 
 def _transport_telegram_enabled(*, mode: str | None = None) -> bool:
-    selected = mode if isinstance(mode, str) else _transport_mode()
-    return selected in {"telegram", "both"}
+    return "telegram" in _transport_list(mode=mode)
+
+
+def _transport_discord_enabled(*, mode: str | None = None) -> bool:
+    return "discord" in _transport_list(mode=mode)
 
 
 def _telegram_bot_token() -> str | None:
@@ -1028,6 +1117,23 @@ def _validate_telegram_setup_requirements(*, transport_mode: str) -> str | None:
     if _telegram_bot_token():
         return None
     return _telegram_bot_token_setup_instructions()
+
+
+def _discord_bot_token_setup_instructions() -> str:
+    return (
+        "AGENT_DISCORD_BOT_TOKEN is required when AGENT_CHAT_TRANSPORT includes Discord.\n"
+        "Create a bot in the Discord developer portal, add it to your server, and export:\n"
+        "  AGENT_DISCORD_BOT_TOKEN=\"<bot token>\"\n"
+        "Also set AGENT_DISCORD_CHANNEL_ID or AGENT_DISCORD_CHANNEL_IDS to the channel/thread allowlist.\n"
+    )
+
+
+def _validate_discord_setup_requirements(*, transport_mode: str) -> str | None:
+    if not _transport_discord_enabled(mode=transport_mode):
+        return None
+    if _discord_bot_token():
+        return None
+    return _discord_bot_token_setup_instructions()
 
 
 def _bootstrap_telegram_group_chat_id(
@@ -1306,6 +1412,335 @@ def _fetch_telegram_updates(
     return out
 
 
+def _discord_bot_token() -> str | None:
+    raw = os.environ.get("AGENT_DISCORD_BOT_TOKEN", "")
+    token = raw.strip() if isinstance(raw, str) else ""
+    return token or None
+
+
+def _discord_channel_id() -> str | None:
+    raw = os.environ.get("AGENT_DISCORD_CHANNEL_ID", "")
+    channel_id = raw.strip() if isinstance(raw, str) else ""
+    return channel_id or None
+
+
+def _discord_channel_ids() -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    primary = _discord_channel_id()
+    if isinstance(primary, str) and primary.strip():
+        seen.add(primary.strip())
+        values.append(primary.strip())
+    raw_multi = os.environ.get("AGENT_DISCORD_CHANNEL_IDS", "")
+    if isinstance(raw_multi, str) and raw_multi.strip():
+        for part in raw_multi.split(","):
+            text = part.strip()
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+    return values
+
+
+def _discord_owner_user_ids() -> set[str]:
+    owners: set[str] = set()
+    raw_multi = os.environ.get("AGENT_DISCORD_OWNER_USER_IDS", "")
+    if isinstance(raw_multi, str) and raw_multi.strip():
+        for part in raw_multi.split(","):
+            text = part.strip()
+            if text:
+                owners.add(text)
+    return owners
+
+
+def _discord_sender_is_owner(*, sender_user_id: str | None) -> bool:
+    sender = sender_user_id.strip() if isinstance(sender_user_id, str) else ""
+    return bool(sender) and sender in _discord_owner_user_ids()
+
+
+def _discord_accept_all_channels() -> bool:
+    return _env_enabled("AGENT_DISCORD_ACCEPT_ALL_CHANNELS", default=False)
+
+
+def _discord_api_base() -> str:
+    raw = os.environ.get("AGENT_DISCORD_API_BASE", _DEFAULT_DISCORD_API_BASE)
+    base = raw.strip() if isinstance(raw, str) else _DEFAULT_DISCORD_API_BASE
+    return (base or _DEFAULT_DISCORD_API_BASE).rstrip("/")
+
+
+def _discord_inbound_cursor_path(*, codex_home: Path) -> Path:
+    shared_home = _shared_control_state_home(codex_home=codex_home)
+    return Path(
+        os.environ.get(
+            "AGENT_DISCORD_INBOUND_CURSOR",
+            str(shared_home / "tmp" / "discord_inbound_cursor.json"),
+        )
+    )
+
+
+def _load_discord_inbound_cursor(*, codex_home: Path) -> dict[str, Any]:
+    raw = _read_json(_discord_inbound_cursor_path(codex_home=codex_home))
+    return raw if isinstance(raw, dict) else {"channels": {}, "bot_user_id": None}
+
+
+def _save_discord_inbound_cursor(*, codex_home: Path, state: dict[str, Any]) -> None:
+    payload = {
+        "channels": state.get("channels") if isinstance(state.get("channels"), dict) else {},
+        "bot_user_id": state.get("bot_user_id") if isinstance(state.get("bot_user_id"), str) else None,
+        "ts": int(time.time()),
+    }
+    _write_json(_discord_inbound_cursor_path(codex_home=codex_home), payload)
+
+
+def _discord_request(*, token: str, path: str, method: str = "GET", data: dict[str, Any] | None = None) -> dict[str, Any] | list[Any] | None:
+    token_text = token.strip()
+    if not token_text:
+        return None
+    url = f"{_discord_api_base()}/{path.lstrip('/')}"
+    body: bytes | None = None
+    headers = {
+        "Authorization": f"Bot {token_text}",
+        "User-Agent": "agent-chat/0.1",
+    }
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib_request.Request(url, data=body, headers=headers, method=method.upper())
+    try:
+        with urllib_request.urlopen(request, timeout=_DEFAULT_TELEGRAM_SEND_TIMEOUT_S) as response:
+            raw = response.read()
+    except Exception:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _discord_bot_user_id(*, token: str, codex_home: Path) -> str | None:
+    state = _load_discord_inbound_cursor(codex_home=codex_home)
+    cached = state.get("bot_user_id") if isinstance(state.get("bot_user_id"), str) else None
+    if isinstance(cached, str) and cached.strip():
+        return cached.strip()
+    parsed = _discord_request(token=token, path="users/@me")
+    if not isinstance(parsed, dict):
+        return None
+    user_id = parsed.get("id")
+    if not isinstance(user_id, str) or not user_id.strip():
+        return None
+    state["bot_user_id"] = user_id.strip()
+    _save_discord_inbound_cursor(codex_home=codex_home, state=state)
+    return user_id.strip()
+
+
+def _send_discord_message(*, token: str, channel_id: str, message: str) -> bool:
+    channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
+    if not channel_text:
+        return False
+    parsed = _discord_request(
+        token=token,
+        path=f"channels/{channel_text}/messages",
+        method="POST",
+        data={"content": message},
+    )
+    return isinstance(parsed, dict) and bool(parsed.get("id"))
+
+
+def _fetch_discord_active_thread_ids(*, token: str, channel_id: str) -> list[str]:
+    channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
+    if not channel_text:
+        return []
+    parsed = _discord_request(token=token, path=f"channels/{channel_text}/threads/active")
+    if not isinstance(parsed, dict):
+        return []
+    threads = parsed.get("threads")
+    if not isinstance(threads, list):
+        return []
+    out: list[str] = []
+    for item in threads:
+        if not isinstance(item, dict):
+            continue
+        thread_id = item.get("id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            out.append(thread_id.strip())
+    return out
+
+
+def _discord_poll_channel_ids(*, registry: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for channel_id in _discord_channel_ids():
+        if channel_id not in seen:
+            seen.add(channel_id)
+            out.append(channel_id)
+    bindings = registry.get("conversation_bindings")
+    if isinstance(bindings, dict):
+        for key in bindings.keys():
+            if not isinstance(key, str) or not key.startswith("discord:"):
+                continue
+            _, channel_id, thread_raw = key.split(":", 2)
+            for candidate in (channel_id.strip(), thread_raw.strip() if thread_raw.strip() not in {"", "0"} else ""):
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    out.append(candidate)
+    return out
+
+
+def _fetch_discord_updates(
+    *,
+    token: str,
+    registry: dict[str, Any],
+    codex_home: Path,
+) -> tuple[list[tuple[int, str, str | None, str | None, str, str | None, str | None]], dict[str, Any]]:
+    state = _load_discord_inbound_cursor(codex_home=codex_home)
+    channels_state = state.get("channels") if isinstance(state.get("channels"), dict) else {}
+    bot_user_id = _discord_bot_user_id(token=token, codex_home=codex_home)
+    poll_ids: list[str] = []
+    seen_poll: set[str] = set()
+    for channel_id in _discord_poll_channel_ids(registry=registry):
+        if channel_id not in seen_poll:
+            seen_poll.add(channel_id)
+            poll_ids.append(channel_id)
+        for thread_id in _fetch_discord_active_thread_ids(token=token, channel_id=channel_id):
+            if thread_id not in seen_poll:
+                seen_poll.add(thread_id)
+                poll_ids.append(thread_id)
+
+    out: list[tuple[int, str, str | None, str | None, str, str | None, str | None]] = []
+    for poll_id in poll_ids:
+        after_id = channels_state.get(poll_id)
+        params = "limit=50"
+        if isinstance(after_id, str) and after_id.strip():
+            params += f"&after={urllib_parse.quote(after_id.strip())}"
+        parsed = _discord_request(token=token, path=f"channels/{poll_id}/messages?{params}")
+        if not isinstance(parsed, list):
+            continue
+        for item in reversed(parsed):
+            if not isinstance(item, dict):
+                continue
+            message_id = item.get("id")
+            if not isinstance(message_id, str) or not message_id.strip():
+                continue
+            channels_state[poll_id] = message_id.strip()
+            author = item.get("author") if isinstance(item.get("author"), dict) else {}
+            author_id = author.get("id") if isinstance(author.get("id"), str) else None
+            if bot_user_id and author_id == bot_user_id:
+                continue
+            content = item.get("content") if isinstance(item.get("content"), str) else ""
+            if not content.strip():
+                continue
+            referenced = item.get("referenced_message") if isinstance(item.get("referenced_message"), dict) else None
+            referenced_text = referenced.get("content") if isinstance(referenced, dict) and isinstance(referenced.get("content"), str) else None
+            parent_id = item.get("channel_id") if isinstance(item.get("channel_id"), str) else poll_id
+            out.append((
+                int(message_id),
+                content.strip(),
+                referenced_text.strip() if isinstance(referenced_text, str) and referenced_text.strip() else None,
+                parent_id,
+                poll_id,
+                author_id.strip() if isinstance(author_id, str) and author_id.strip() else None,
+                item.get("guild_id") if isinstance(item.get("guild_id"), str) else None,
+            ))
+    state["channels"] = channels_state
+    if isinstance(bot_user_id, str) and bot_user_id.strip():
+        state["bot_user_id"] = bot_user_id.strip()
+    return out, state
+
+
+def _process_inbound_discord_replies(
+    *,
+    codex_home: Path,
+    recipient: str,
+    after_message_id: int,
+    max_message_chars: int,
+    min_prefix: int,
+    dry_run: bool,
+    resume_timeout_s: float | None,
+    trace: bool,
+) -> int:
+    token = _discord_bot_token()
+    if not isinstance(token, str) or not token.strip():
+        return after_message_id
+
+    registry = _load_registry(codex_home=codex_home)
+    updates, state = _fetch_discord_updates(token=token.strip(), registry=registry, codex_home=codex_home)
+    if not updates:
+        _save_discord_inbound_cursor(codex_home=codex_home, state=state)
+        return after_message_id
+
+    update_context_map: dict[int, dict[str, Any]] = {}
+    update_reply_text_map: dict[int, str] = {}
+    max_seen = after_message_id
+    for message_id, text, reply_text, parent_id, channel_id, sender_user_id, guild_id in updates:
+        if message_id <= after_message_id:
+            continue
+        max_seen = max(max_seen, message_id)
+        update_context_map[message_id] = {
+            "transport": "discord",
+            "discord_parent_channel_id": parent_id,
+            "discord_channel_id": channel_id,
+            "discord_sender_user_id": sender_user_id,
+            "discord_guild_id": guild_id,
+        }
+        if isinstance(reply_text, str) and reply_text.strip():
+            update_reply_text_map[message_id] = reply_text.strip()
+
+    def _fetch_virtual_replies(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> list[tuple[int, str, str | None]]:
+        del conn, handle_ids
+        rows: list[tuple[int, str, str | None]] = []
+        for message_id, text, _, _, _, _, _ in updates:
+            if message_id <= after_rowid:
+                continue
+            rows.append((message_id, text, None))
+        rows.sort(key=lambda item: item[0])
+        return rows
+
+    def _virtual_reference_guids(*, conn: sqlite3.Connection, rowid: int, fallback_guid: str | None) -> list[str]:
+        del conn, rowid, fallback_guid
+        return []
+
+    def _virtual_reference_texts(*, conn: sqlite3.Connection, rowid: int, fallback_guid: str | None) -> list[str] | None:
+        del conn, fallback_guid
+        reply_text = update_reply_text_map.get(int(rowid))
+        if isinstance(reply_text, str) and reply_text.strip():
+            return [reply_text.strip()]
+        return []
+
+    def _virtual_row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, Any]]:
+        del conn, handle_ids
+        return {
+            int(message_id): context
+            for message_id, context in update_context_map.items()
+            if int(message_id) > int(after_rowid)
+        }
+
+    temp_conn = sqlite3.connect(":memory:")
+    try:
+        rowid = _process_inbound_replies(
+            codex_home=codex_home,
+            conn=temp_conn,
+            recipient=recipient,
+            handle_ids=[],
+            after_rowid=after_message_id,
+            max_message_chars=max_message_chars,
+            min_prefix=min_prefix,
+            dry_run=dry_run,
+            resume_timeout_s=resume_timeout_s,
+            trace=trace,
+            fetch_replies_fn=_fetch_virtual_replies,
+            reference_guids_fn=_virtual_reference_guids,
+            reference_texts_fn=_virtual_reference_texts,
+            row_contexts_fn=_virtual_row_contexts,
+        )
+    finally:
+        try:
+            temp_conn.close()
+        except Exception:
+            pass
+
+    _save_discord_inbound_cursor(codex_home=codex_home, state=state)
+    return max(max_seen, rowid)
+
+
 def _attention_index_path(*, codex_home: Path) -> Path:
     return Path(
         os.environ.get(
@@ -1499,6 +1934,7 @@ def _send_message_with_transport(
     recipient: str,
     message: str,
     telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
 ) -> bool:
     if transport == "imessage":
         recipient_text = recipient.strip()
@@ -1518,6 +1954,12 @@ def _send_message_with_transport(
             message=message,
             message_thread_id=telegram_message_thread_id,
         )
+    if transport == "discord":
+        token = _discord_bot_token()
+        channel_id = discord_channel_id.strip() if isinstance(discord_channel_id, str) and discord_channel_id.strip() else recipient.strip()
+        if not token or not channel_id:
+            return False
+        return _send_discord_message(token=token, channel_id=channel_id, message=message)
     return False
 
 
@@ -1528,6 +1970,7 @@ def _deliver_message_across_transports(
     message: str,
     telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
 ) -> bool:
     queue_path = _queue_path(codex_home=codex_home)
     mode = _transport_mode()
@@ -1567,6 +2010,26 @@ def _deliver_message_across_transports(
                     recipient=chat_id_text,
                     message=message,
                     telegram_message_thread_id=telegram_message_thread_id,
+                )
+
+    if _transport_discord_enabled(mode=mode):
+        channel_id = discord_channel_id if isinstance(discord_channel_id, str) and discord_channel_id.strip() else _discord_channel_id()
+        if isinstance(channel_id, str) and channel_id.strip():
+            attempted = True
+            channel_id_text = channel_id.strip()
+            if _send_message_with_transport(
+                transport="discord",
+                recipient=channel_id_text,
+                message=message,
+                discord_channel_id=channel_id_text,
+            ):
+                sent_any = True
+            else:
+                _enqueue_fallback_event(
+                    queue_path=queue_path,
+                    transport="discord",
+                    recipient=channel_id_text,
+                    message=message,
                 )
 
     return sent_any if attempted else False
@@ -2019,6 +2482,8 @@ def _build_launchagent_plist(
         "AGENT_CHAT_AGENT": agent,
         "AGENT_CHAT_NOTIFY_MODE": notify_mode,
         "AGENT_CHAT_LAUNCHD_LABEL": label,
+        "AGENT_CHAT_TRANSPORT": _transport_mode(),
+        "AGENT_CHAT_TRANSPORTS": ",".join(_transport_list()),
         "PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"),
     }
     if recipient_text:
@@ -2026,6 +2491,9 @@ def _build_launchagent_plist(
 
     if agent == "claude":
         env_vars["CLAUDE_HOME"] = str(codex_home)
+    elif agent == "pi":
+        env_vars["AGENT_CHAT_PI_HOME"] = str(codex_home)
+        env_vars["PI_CODING_AGENT_DIR"] = str(codex_home)
 
     passthrough = (
         "CLAUDE_HOME",
@@ -2045,14 +2513,23 @@ def _build_launchagent_plist(
         "AGENT_CHAT_TMUX_WINDOW_PREFIX",
         "AGENT_CHAT_CLAUDE_BIN",
         "AGENT_CHAT_CODEX_BIN",
+        "AGENT_CHAT_PI_BIN",
+        "AGENT_CHAT_PI_HOME",
+        "PI_CODING_AGENT_DIR",
         "AGENT_IMESSAGE_SETUP_PERMISSIONS_TIMEOUT_S",
         "AGENT_IMESSAGE_SETUP_PERMISSIONS_POLL_S",
         "AGENT_CHAT_TRANSPORT",
+        "AGENT_CHAT_TRANSPORTS",
         "AGENT_TELEGRAM_BOT_TOKEN",
         "AGENT_TELEGRAM_CHAT_ID",
         "AGENT_TELEGRAM_CHAT_IDS",
         "AGENT_TELEGRAM_API_BASE",
         "AGENT_TELEGRAM_INBOUND_CURSOR",
+        "AGENT_DISCORD_BOT_TOKEN",
+        "AGENT_DISCORD_CHANNEL_ID",
+        "AGENT_DISCORD_CHANNEL_IDS",
+        "AGENT_DISCORD_OWNER_USER_IDS",
+        "AGENT_DISCORD_INBOUND_CURSOR",
     )
     for key in passthrough:
         raw = os.environ.get(key)
@@ -2235,10 +2712,13 @@ def _run_setup_launchd(
 ) -> int:
     transport_mode = _transport_mode()
     imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
-    telegram_setup_err = _validate_telegram_setup_requirements(transport_mode=transport_mode)
-    if isinstance(telegram_setup_err, str):
-        sys.stdout.write(telegram_setup_err)
-        return 1
+    for setup_err in (
+        _validate_telegram_setup_requirements(transport_mode=transport_mode),
+        _validate_discord_setup_requirements(transport_mode=transport_mode),
+    ):
+        if isinstance(setup_err, str):
+            sys.stdout.write(setup_err)
+            return 1
 
     recipient_text = _normalize_recipient(recipient) if recipient.strip() else ""
     if _transport_imessage_enabled(mode=transport_mode) and not recipient_text:
@@ -2599,9 +3079,13 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     transport_mode = _transport_mode()
     imessage_enabled = _transport_imessage_enabled(mode=transport_mode)
     telegram_enabled = _transport_telegram_enabled(mode=transport_mode)
+    discord_enabled = _transport_discord_enabled(mode=transport_mode)
     telegram_chat_id = _telegram_chat_id()
     telegram_chat_ids = _telegram_chat_ids()
     telegram_token_present = bool(_telegram_bot_token())
+    discord_channel_id = _discord_channel_id()
+    discord_channel_ids = _discord_channel_ids()
+    discord_token_present = bool(_discord_bot_token())
     launchd_label = os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
     launchd_err_log = _launchd_err_log_path()
@@ -2665,6 +3149,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     outbound_cursor_raw = _read_json(_outbound_cursor_path(codex_home=codex_home)) or {}
     inbound_cursor = _load_inbound_cursor(codex_home=codex_home)
     telegram_inbound_cursor = _load_telegram_inbound_cursor(codex_home=codex_home)
+    discord_inbound_cursor = _load_discord_inbound_cursor(codex_home=codex_home)
     reply_cursor_raw = _read_json(
         Path(
             os.environ.get(
@@ -2692,6 +3177,10 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
         health.append("missing Telegram bot token (AGENT_TELEGRAM_BOT_TOKEN)")
     if telegram_enabled and not telegram_chat_ids:
         health.append("missing Telegram chat id (set AGENT_TELEGRAM_CHAT_ID or AGENT_TELEGRAM_CHAT_IDS)")
+    if discord_enabled and not discord_token_present:
+        health.append("missing Discord bot token (AGENT_DISCORD_BOT_TOKEN)")
+    if discord_enabled and not discord_channel_ids:
+        health.append("missing Discord channel id (set AGENT_DISCORD_CHANNEL_ID or AGENT_DISCORD_CHANNEL_IDS)")
     if not launchd_loaded:
         health.append("launchd service not loaded")
     if imessage_enabled and launchd_inbound_warning:
@@ -2724,11 +3213,16 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
         "recipient": recipient_text or None,
         "transport": {
             "mode": transport_mode,
+            "transports": _transport_list(mode=transport_mode),
             "imessage_enabled": imessage_enabled,
             "telegram_enabled": telegram_enabled,
+            "discord_enabled": discord_enabled,
             "telegram_chat_id": telegram_chat_id,
             "telegram_chat_ids": telegram_chat_ids,
             "telegram_token_present": telegram_token_present,
+            "discord_channel_id": discord_channel_id,
+            "discord_channel_ids": discord_channel_ids,
+            "discord_token_present": discord_token_present,
         },
         "launchd": {
             "label": launchd_label,
@@ -2761,6 +3255,7 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
             "alias_count": len(aliases) if isinstance(aliases, dict) else 0,
             "inbound_cursor_rowid": inbound_cursor,
             "telegram_inbound_cursor_update_id": telegram_inbound_cursor,
+            "discord_inbound_cursor": discord_inbound_cursor,
             "outbound_cursor_ts": outbound_cursor_raw.get("ts") if isinstance(outbound_cursor_raw, dict) else None,
             "reply_cursor_rowid": reply_cursor_raw.get("last_rowid") if isinstance(reply_cursor_raw, dict) else None,
             "last_dispatch_error": last_dispatch_error,
@@ -2794,7 +3289,8 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
         "Transport: "
         f"mode={transport.get('mode') or _transport_mode()} "
         f"imessage={bool(transport.get('imessage_enabled'))} "
-        f"telegram={bool(transport.get('telegram_enabled'))}\n"
+        f"telegram={bool(transport.get('telegram_enabled'))} "
+        f"discord={bool(transport.get('discord_enabled'))}\n"
     )
     if bool(transport.get("telegram_enabled")):
         telegram_chat_id = transport.get("telegram_chat_id")
@@ -2806,6 +3302,17 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
                 sys.stdout.write(f"Telegram inbound chats: {rendered_chat_ids}\n")
         sys.stdout.write(
             f"Telegram token: {'configured' if bool(transport.get('telegram_token_present')) else 'missing'}\n"
+        )
+    if bool(transport.get("discord_enabled")):
+        discord_channel_id = transport.get("discord_channel_id")
+        sys.stdout.write(f"Discord channel: {discord_channel_id or '(missing)'}\n")
+        discord_channel_ids = transport.get("discord_channel_ids")
+        if isinstance(discord_channel_ids, list) and discord_channel_ids:
+            rendered_channel_ids = ", ".join(str(item).strip() for item in discord_channel_ids if str(item).strip())
+            if rendered_channel_ids:
+                sys.stdout.write(f"Discord inbound channels: {rendered_channel_ids}\n")
+        sys.stdout.write(
+            f"Discord token: {'configured' if bool(transport.get('discord_token_present')) else 'missing'}\n"
         )
 
     launchd = _coerce_dict(report.get("launchd"))
@@ -2885,10 +3392,14 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
 
 def _default_registry() -> dict[str, Any]:
     return {
+        "schema_version": 2,
         "sessions": {},
         "aliases": {},
         "last_dispatch_error": None,
         "pending_new_session_choice": None,
+        "pending_new_session_choice_by_context": {},
+        "conversation_bindings": {},
+        "conversation_runtime_bindings": {},
         "pending_new_session_choice_by_thread": {},
         "telegram_thread_bindings": {},
         "telegram_thread_tmux_bindings": {},
@@ -2940,6 +3451,33 @@ def _normalize_pending_new_session_choice_by_thread(*, raw: object) -> dict[str,
     return out
 
 
+def _normalize_pending_new_session_choice_by_context(*, raw: object) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        context_key = key.strip() if isinstance(key, str) else ""
+        if not context_key:
+            continue
+        payload = _normalize_pending_new_session_choice_payload(raw=value)
+        if isinstance(payload, dict):
+            out[context_key] = payload
+    return out
+
+
+def _conversation_key(*, transport: str | None, channel_id: str | None, thread_id: int | str | None = None) -> str | None:
+    return registry_conversation_key(transport=transport, channel_id=channel_id, thread_id=thread_id)
+
+
+def _conversation_key_from_telegram_thread_key(*, thread_key: str | None) -> str | None:
+    normalized = _normalize_telegram_thread_key(thread_key=thread_key)
+    if not normalized:
+        return None
+    chat_id = _telegram_thread_chat_id_from_key(thread_key=normalized)
+    thread_id = _telegram_thread_id_from_key(thread_key=normalized)
+    return _conversation_key(transport="telegram", channel_id=chat_id, thread_id=thread_id)
+
+
 def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
@@ -2952,6 +3490,21 @@ def _normalize_telegram_thread_bindings(*, raw: object, sessions: dict[str, Any]
         if sid not in sessions:
             continue
         out[thread_key] = sid
+    return out
+
+
+def _normalize_conversation_bindings_for_registry(
+    *,
+    raw: object,
+    legacy_telegram_raw: object,
+    sessions: dict[str, Any],
+) -> dict[str, str]:
+    out = normalize_conversation_bindings(raw=raw, sessions=sessions)
+    legacy = _normalize_telegram_thread_bindings(raw=legacy_telegram_raw, sessions=sessions)
+    for thread_key, sid in legacy.items():
+        conv_key = _conversation_key_from_telegram_thread_key(thread_key=thread_key)
+        if conv_key and sid not in {""}:
+            out.setdefault(conv_key, sid)
     return out
 
 
@@ -2989,6 +3542,16 @@ def _normalize_telegram_thread_tmux_bindings(*, raw: object) -> dict[str, dict[s
         if isinstance(agent, str) and agent.strip():
             record["agent"] = agent.strip()
         out[thread_key] = record
+    return out
+
+
+def _normalize_conversation_runtime_bindings_for_registry(*, raw: object, legacy_telegram_raw: object) -> dict[str, dict[str, str]]:
+    out = normalize_runtime_bindings(raw)
+    legacy = _normalize_telegram_thread_tmux_bindings(raw=legacy_telegram_raw)
+    for thread_key, record in legacy.items():
+        conv_key = _conversation_key_from_telegram_thread_key(thread_key=thread_key)
+        if conv_key:
+            out.setdefault(conv_key, record)
     return out
 
 
@@ -3061,6 +3624,9 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
         raw=raw.get("pending_new_session_choice_by_thread")
     )
+    pending_new_session_choice_by_context = _normalize_pending_new_session_choice_by_context(
+        raw=raw.get("pending_new_session_choice_by_context")
+    )
     telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions_map,
         raw_bindings=raw.get("telegram_thread_bindings"),
@@ -3068,13 +3634,30 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     telegram_thread_tmux_bindings = _normalize_telegram_thread_tmux_bindings(
         raw=raw.get("telegram_thread_tmux_bindings")
     )
+    conversation_bindings = _normalize_conversation_bindings_for_registry(
+        raw=raw.get("conversation_bindings"),
+        legacy_telegram_raw=telegram_thread_bindings,
+        sessions=sessions_map,
+    )
+    conversation_runtime_bindings = _normalize_conversation_runtime_bindings_for_registry(
+        raw=raw.get("conversation_runtime_bindings"),
+        legacy_telegram_raw=telegram_thread_tmux_bindings,
+    )
+    for thread_key, payload in pending_new_session_choice_by_thread.items():
+        conv_key = _conversation_key_from_telegram_thread_key(thread_key=thread_key)
+        if conv_key:
+            pending_new_session_choice_by_context.setdefault(conv_key, payload)
     if not isinstance(last_dispatch_error, dict):
         last_dispatch_error = None
     out: dict[str, Any] = {
+        "schema_version": int(raw.get("schema_version")) if isinstance(raw.get("schema_version"), int) else 2,
         "sessions": sessions_map,
         "aliases": aliases if isinstance(aliases, dict) else {},
         "last_dispatch_error": last_dispatch_error,
         "pending_new_session_choice": pending_new_session_choice,
+        "pending_new_session_choice_by_context": pending_new_session_choice_by_context,
+        "conversation_bindings": conversation_bindings,
+        "conversation_runtime_bindings": conversation_runtime_bindings,
         "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
         "telegram_thread_bindings": telegram_thread_bindings,
         "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
@@ -3096,16 +3679,56 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     pending_new_session_choice = _normalize_pending_new_session_choice_payload(
         raw=registry.get("pending_new_session_choice")
     )
-    pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
-        raw=registry.get("pending_new_session_choice_by_thread")
+    pending_new_session_choice_by_context = _normalize_pending_new_session_choice_by_context(
+        raw=registry.get("pending_new_session_choice_by_context")
     )
+    conversation_bindings = _normalize_conversation_bindings_for_registry(
+        raw=registry.get("conversation_bindings"),
+        legacy_telegram_raw=registry.get("telegram_thread_bindings"),
+        sessions=sessions,
+    )
+    conversation_runtime_bindings = _normalize_conversation_runtime_bindings_for_registry(
+        raw=registry.get("conversation_runtime_bindings"),
+        legacy_telegram_raw=registry.get("telegram_thread_tmux_bindings"),
+    )
+
     telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions,
         raw_bindings=registry.get("telegram_thread_bindings"),
     )
+    for conv_key, sid in conversation_bindings.items():
+        if not isinstance(conv_key, str) or not conv_key.startswith("telegram:"):
+            continue
+        _, chat_id, thread_raw = conv_key.split(":", 2)
+        thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=_normalize_telegram_thread_id(thread_raw))
+        if thread_key:
+            telegram_thread_bindings[thread_key] = sid
+    telegram_thread_bindings = _canonicalize_telegram_thread_state(
+        sessions=sessions,
+        raw_bindings=telegram_thread_bindings,
+    )
+
     telegram_thread_tmux_bindings = _normalize_telegram_thread_tmux_bindings(
         raw=registry.get("telegram_thread_tmux_bindings")
     )
+    for conv_key, record in conversation_runtime_bindings.items():
+        if not isinstance(conv_key, str) or not conv_key.startswith("telegram:"):
+            continue
+        _, chat_id, thread_raw = conv_key.split(":", 2)
+        thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=_normalize_telegram_thread_id(thread_raw))
+        if thread_key:
+            telegram_thread_tmux_bindings[thread_key] = record
+
+    pending_new_session_choice_by_thread = _normalize_pending_new_session_choice_by_thread(
+        raw=registry.get("pending_new_session_choice_by_thread")
+    )
+    for conv_key, payload in pending_new_session_choice_by_context.items():
+        if not isinstance(conv_key, str) or not conv_key.startswith("telegram:"):
+            continue
+        _, chat_id, thread_raw = conv_key.split(":", 2)
+        thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=_normalize_telegram_thread_id(thread_raw))
+        if thread_key:
+            pending_new_session_choice_by_thread[thread_key] = payload
 
     # Keep only newest sessions by recency keys.
     if len(sessions) > _MAX_REGISTRY_ENTRIES:
@@ -3121,8 +3744,6 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             sortable.append((sid, ts))
         keep = {sid for sid, _ in sorted(sortable, key=lambda item: item[1], reverse=True)[:_MAX_REGISTRY_ENTRIES]}
         sessions = {sid: rec for sid, rec in sessions.items() if sid in keep}
-
-        # Prune aliases to kept sids.
         aliases = {
             alias: sid
             for alias, sid in aliases.items()
@@ -3133,14 +3754,23 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             for thread_key, sid in telegram_thread_bindings.items()
             if isinstance(thread_key, str) and isinstance(sid, str) and sid in sessions
         }
+        conversation_bindings = {
+            key: sid
+            for key, sid in conversation_bindings.items()
+            if isinstance(key, str) and isinstance(sid, str) and sid in sessions
+        }
 
     _write_json(
         _registry_path(codex_home=codex_home),
         {
+            "schema_version": 2,
             "sessions": sessions,
             "aliases": aliases,
             "last_dispatch_error": last_dispatch_error,
             "pending_new_session_choice": pending_new_session_choice,
+            "pending_new_session_choice_by_context": pending_new_session_choice_by_context,
+            "conversation_bindings": conversation_bindings,
+            "conversation_runtime_bindings": conversation_runtime_bindings,
             "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
             "telegram_thread_bindings": telegram_thread_bindings,
             "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
@@ -3257,6 +3887,10 @@ def _get_pending_new_session_choice_by_thread(
     key = thread_key.strip() if isinstance(thread_key, str) else ""
     if not key:
         return None
+    conv_key = _conversation_key_from_telegram_thread_key(thread_key=key)
+    from_context = _get_pending_new_session_choice_by_context(registry=registry, context_key=conv_key)
+    if isinstance(from_context, dict):
+        return from_context
     mapping = registry.get("pending_new_session_choice_by_thread")
     if not isinstance(mapping, dict):
         return None
@@ -3289,6 +3923,18 @@ def _set_pending_new_session_choice_by_thread(
         mapping = {}
         registry["pending_new_session_choice_by_thread"] = mapping
     mapping[key] = payload
+    conv_key = _conversation_key_from_telegram_thread_key(thread_key=key)
+    if conv_key:
+        _set_pending_new_session_choice_by_context(
+            registry=registry,
+            context_key=conv_key,
+            prompt=payload["prompt"],
+            action=payload["action"],
+            source_text=payload["source_text"],
+            source_ref=payload.get("source_ref"),
+            label=payload.get("label"),
+            cwd=payload.get("cwd"),
+        )
     return payload
 
 
@@ -3300,6 +3946,153 @@ def _clear_pending_new_session_choice_by_thread(*, registry: dict[str, Any], thr
     if not isinstance(mapping, dict):
         return
     mapping.pop(key, None)
+    conv_key = _conversation_key_from_telegram_thread_key(thread_key=key)
+    if conv_key:
+        _clear_pending_new_session_choice_by_context(registry=registry, context_key=conv_key)
+
+
+def _get_pending_new_session_choice_by_context(
+    *,
+    registry: dict[str, Any],
+    context_key: str | None,
+) -> dict[str, Any] | None:
+    key = context_key.strip() if isinstance(context_key, str) else ""
+    if not key:
+        return None
+    mapping = registry.get("pending_new_session_choice_by_context")
+    if not isinstance(mapping, dict):
+        return None
+    return _normalize_pending_new_session_choice_payload(raw=mapping.get(key))
+
+
+def _set_pending_new_session_choice_by_context(
+    *,
+    registry: dict[str, Any],
+    context_key: str,
+    prompt: str,
+    action: str,
+    source_text: str,
+    source_ref: str | None = None,
+    label: str | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    key = context_key.strip()
+    payload = _set_pending_new_session_choice(
+        registry={"pending_new_session_choice": None},
+        prompt=prompt,
+        action=action,
+        source_text=source_text,
+        source_ref=source_ref,
+        label=label,
+        cwd=cwd,
+    )
+    mapping = registry.setdefault("pending_new_session_choice_by_context", {})
+    if not isinstance(mapping, dict):
+        mapping = {}
+        registry["pending_new_session_choice_by_context"] = mapping
+    mapping[key] = payload
+    return payload
+
+
+def _clear_pending_new_session_choice_by_context(*, registry: dict[str, Any], context_key: str | None) -> None:
+    key = context_key.strip() if isinstance(context_key, str) else ""
+    if not key:
+        return
+    mapping = registry.get("pending_new_session_choice_by_context")
+    if not isinstance(mapping, dict):
+        return
+    mapping.pop(key, None)
+
+
+def _bind_conversation_to_session(
+    *,
+    registry: dict[str, Any],
+    transport: str,
+    channel_id: str | None,
+    thread_id: int | str | None,
+    session_id: str,
+) -> None:
+    key = _conversation_key(transport=transport, channel_id=channel_id, thread_id=thread_id)
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not key or not sid:
+        return
+    _upsert_session(registry=registry, session_id=sid, fields={})
+    bindings = registry.setdefault("conversation_bindings", {})
+    if not isinstance(bindings, dict):
+        bindings = {}
+        registry["conversation_bindings"] = bindings
+    for existing_key, existing_sid in list(bindings.items()):
+        if existing_key == key:
+            continue
+        if existing_sid == sid:
+            bindings.pop(existing_key, None)
+    bindings[key] = sid
+
+
+def _lookup_session_by_conversation(
+    *,
+    registry: dict[str, Any],
+    transport: str,
+    channel_id: str | None,
+    thread_id: int | str | None,
+) -> str | None:
+    key = _conversation_key(transport=transport, channel_id=channel_id, thread_id=thread_id)
+    if not key:
+        return None
+    bindings = registry.get("conversation_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    sid = bindings.get(key)
+    if not isinstance(sid, str) or not sid.strip():
+        return None
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict) and sid in sessions:
+        return sid
+    return None
+
+
+def _set_conversation_runtime_binding(
+    *,
+    registry: dict[str, Any],
+    transport: str,
+    channel_id: str | None,
+    thread_id: int | str | None,
+    tmux_pane: str,
+    tmux_socket: str | None = None,
+    agent: str | None = None,
+) -> None:
+    key = _conversation_key(transport=transport, channel_id=channel_id, thread_id=thread_id)
+    pane = tmux_pane.strip() if isinstance(tmux_pane, str) else ""
+    if not key or not pane:
+        return
+    bindings = registry.setdefault("conversation_runtime_bindings", {})
+    if not isinstance(bindings, dict):
+        bindings = {}
+        registry["conversation_runtime_bindings"] = bindings
+    record: dict[str, str] = {"tmux_pane": pane}
+    socket_norm = _normalize_tmux_socket(tmux_socket=tmux_socket)
+    if isinstance(socket_norm, str) and socket_norm.strip():
+        record["tmux_socket"] = socket_norm.strip()
+    if isinstance(agent, str) and agent.strip():
+        record["agent"] = _normalize_agent(agent=agent)
+    bindings[key] = record
+
+
+def _lookup_conversation_runtime_binding(
+    *,
+    registry: dict[str, Any],
+    transport: str,
+    channel_id: str | None,
+    thread_id: int | str | None,
+) -> dict[str, str] | None:
+    key = _conversation_key(transport=transport, channel_id=channel_id, thread_id=thread_id)
+    if not key:
+        return None
+    bindings = registry.get("conversation_runtime_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    record = bindings.get(key)
+    return record if isinstance(record, dict) else None
 
 
 def _set_telegram_thread_tmux_binding(
@@ -3327,6 +4120,15 @@ def _set_telegram_thread_tmux_binding(
     if isinstance(agent, str) and agent.strip():
         record["agent"] = _normalize_agent(agent=agent)
     bindings[key] = record
+    _set_conversation_runtime_binding(
+        registry=registry,
+        transport="telegram",
+        channel_id=_telegram_thread_chat_id_from_key(thread_key=key),
+        thread_id=_telegram_thread_id_from_key(thread_key=key),
+        tmux_pane=pane,
+        tmux_socket=socket_norm,
+        agent=agent,
+    )
 
 
 def _lookup_telegram_thread_tmux_binding(
@@ -3338,6 +4140,17 @@ def _lookup_telegram_thread_tmux_binding(
     key = _normalize_telegram_thread_key(thread_key=thread_key)
     if not key:
         return None
+
+    generic_record = _lookup_conversation_runtime_binding(
+        registry=registry,
+        transport="telegram",
+        channel_id=_telegram_thread_chat_id_from_key(thread_key=key),
+        thread_id=_telegram_thread_id_from_key(thread_key=key),
+    )
+    if isinstance(generic_record, dict):
+        pane = generic_record.get("tmux_pane")
+        if isinstance(pane, str) and pane.strip():
+            return generic_record
 
     bindings = _normalize_telegram_thread_tmux_bindings(raw=registry.get("telegram_thread_tmux_bindings"))
     registry["telegram_thread_tmux_bindings"] = bindings
@@ -3462,6 +4275,13 @@ def _bind_telegram_thread_to_session(
         session_id=sid,
         fields={},
     )
+    _bind_conversation_to_session(
+        registry=registry,
+        transport="telegram",
+        channel_id=chat_id,
+        thread_id=message_thread_id,
+        session_id=sid,
+    )
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict):
         sessions = {}
@@ -3509,6 +4329,14 @@ def _lookup_session_by_telegram_thread(
     thread_key = _telegram_thread_key(chat_id=chat_id, thread_id=message_thread_id)
     if not thread_key:
         return None
+    via_generic = _lookup_session_by_conversation(
+        registry=registry,
+        transport="telegram",
+        channel_id=chat_id,
+        thread_id=message_thread_id,
+    )
+    if isinstance(via_generic, str) and via_generic.strip():
+        return via_generic.strip()
     bindings = registry.get("telegram_thread_bindings")
     if not isinstance(bindings, dict):
         return None
@@ -3696,6 +4524,41 @@ def _telegram_chat_id_for_session(*, registry: dict[str, Any], session_id: str |
     return None
 
 
+def _discord_target_channel_id_for_session(*, registry: dict[str, Any], session_id: str | None) -> str | None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return None
+
+    bindings = registry.get("conversation_bindings")
+    if isinstance(bindings, dict):
+        for conv_key, bound_sid in bindings.items():
+            if not isinstance(conv_key, str) or not conv_key.startswith("discord:"):
+                continue
+            if not isinstance(bound_sid, str) or bound_sid != sid:
+                continue
+            _, channel_id, thread_raw = conv_key.split(":", 2)
+            thread_text = thread_raw.strip()
+            if thread_text and thread_text != "0":
+                return thread_text
+            if channel_id.strip():
+                return channel_id.strip()
+
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    bindings_rec = rec.get("bindings") if isinstance(rec.get("bindings"), dict) else None
+    discord_binding = bindings_rec.get("discord") if isinstance(bindings_rec, dict) and isinstance(bindings_rec.get("discord"), dict) else None
+    if isinstance(discord_binding, dict):
+        thread_id = discord_binding.get("thread_id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            return thread_id.strip()
+        channel_id = discord_binding.get("channel_id")
+        if isinstance(channel_id, str) and channel_id.strip():
+            return channel_id.strip()
+    return None
+
+
 def _strip_leading_telegram_mention_for_command(*, text: str) -> str:
     raw = text.strip()
     if not raw.startswith("@"):
@@ -3793,6 +4656,8 @@ def _parse_agent_choice_response(*, text: str) -> str | None:
         return "codex"
     if raw in {"2", "claude", "claude code", "use claude", "claudecode"}:
         return "claude"
+    if raw in {"3", "pi", "pi coding agent", "use pi", "pi-agent", "piagent"}:
+        return "pi"
     return None
 
 
@@ -4191,6 +5056,7 @@ def _send_structured(
     agent: str | None = None,
     telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
 ) -> None:
     normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
     sid = session_id or "unknown"
@@ -4199,7 +5065,10 @@ def _send_structured(
 
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
     resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
-    if isinstance(session_id, str) and session_id.strip() and (resolved_thread_id is None or resolved_chat_id is None):
+    resolved_discord_channel_id = discord_channel_id.strip() if isinstance(discord_channel_id, str) and discord_channel_id.strip() else None
+    if isinstance(session_id, str) and session_id.strip() and (
+        resolved_thread_id is None or resolved_chat_id is None or resolved_discord_channel_id is None
+    ):
         registry = _load_registry(codex_home=codex_home)
         if resolved_thread_id is None:
             resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
@@ -4207,6 +5076,8 @@ def _send_structured(
             resolved_chat_id = _telegram_chat_id_for_session(registry=registry, session_id=session_id)
         if resolved_chat_id is None:
             resolved_chat_id = _infer_single_telegram_chat_id_from_registry(registry=registry)
+        if resolved_discord_channel_id is None:
+            resolved_discord_channel_id = _discord_target_channel_id_for_session(registry=registry, session_id=session_id)
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -4232,6 +5103,7 @@ def _send_structured(
             message=msg,
             telegram_chat_id=resolved_chat_id,
             telegram_message_thread_id=resolved_thread_id,
+            discord_channel_id=resolved_discord_channel_id,
         )
 
 
@@ -4244,6 +5116,19 @@ def _find_all_session_files(*, codex_home: Path, agent: str | None = None) -> li
     for path in sessions_dir.rglob("*.jsonl"):
         out.append(path)
     return out
+
+
+def _agent_for_session_path(*, session_path: Path, current_home: Path) -> str:
+    session_resolved = _normalize_fs_path(path=session_path)
+    for agent_name in sorted(_SUPPORTED_AGENTS):
+        try:
+            root = _agent_session_root(codex_home=_lookup_agent_home_path(agent=agent_name, current_home=current_home), agent=agent_name)
+        except Exception:
+            continue
+        root_norm = _normalize_fs_path(path=root)
+        if session_resolved.startswith(root_norm.rstrip(os.sep) + os.sep) or session_resolved == root_norm:
+            return agent_name
+    return _current_agent()
 
 
 def _process_session_file(
@@ -4274,9 +5159,10 @@ def _process_session_file(
 
     session_id = session_id_cache.get(cache_key)
     session_cwd = outbound._read_session_cwd(session_path=session_path)
+    session_agent = _agent_for_session_path(session_path=session_path, current_home=codex_home)
 
     if isinstance(session_id, str) and session_id.strip():
-        fields: dict[str, Any] = {"session_path": str(session_path), "agent": _current_agent()}
+        fields: dict[str, Any] = {"session_path": str(session_path), "agent": session_agent}
         if isinstance(session_cwd, str) and session_cwd.strip():
             fields["cwd"] = session_cwd.strip()
         _upsert_session(registry=registry, session_id=session_id.strip(), fields=fields)
@@ -4302,105 +5188,128 @@ def _process_session_file(
                 if not isinstance(event, dict):
                     continue
 
-                if event.get("type") != "response_item":
-                    continue
-
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-
                 sid = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
                 if not sid:
                     continue
 
-                tool_call = outbound._extract_tool_call(payload)
-                if tool_call:
-                    kind, text = tool_call
+                text: str | None = None
+                event_type = event.get("type")
 
-                    if kind != "needs_input":
-                        call_id = payload.get("call_id")
-                        name = payload.get("name")
-                        if isinstance(call_id, str) and isinstance(name, str) and call_id.strip() and name.strip():
-                            call_id_to_name[call_id.strip()] = name.strip()
+                if event_type == "response_item":
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
                         continue
 
-                    call_id_raw = payload.get("call_id")
-                    call_id = call_id_raw.strip() if isinstance(call_id_raw, str) and call_id_raw.strip() else None
-                    session_scope = sid
-
-                    if call_id:
-                        dedupe_key = f"{cache_key}:{call_id}"
-                        if dedupe_key in seen_needs_input_call_ids:
-                            continue
-                        call_key = agent_chat_dedupe.build_dedupe_key(
-                            category="needs_input_call_id",
-                            scope=session_scope,
-                            text=call_id,
-                        )
-                        if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
+                    tool_call = outbound._extract_tool_call(payload)
+                    if tool_call:
+                        kind, text = tool_call
+                        if kind != "needs_input":
+                            call_id = payload.get("call_id")
+                            name = payload.get("name")
+                            if isinstance(call_id, str) and isinstance(name, str) and call_id.strip() and name.strip():
+                                call_id_to_name[call_id.strip()] = name.strip()
                             continue
 
-                    semantic_key = agent_chat_dedupe.build_dedupe_key(
-                        category="needs_input",
-                        scope=session_scope,
-                        text=text,
-                    )
-                    if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
-                        continue
+                        call_id_raw = payload.get("call_id")
+                        call_id = call_id_raw.strip() if isinstance(call_id_raw, str) and call_id_raw.strip() else None
+                        session_scope = sid
 
-                    _send_structured(
-                        codex_home=codex_home,
-                        recipient=recipient,
-                        session_id=sid,
-                        kind="needs_input",
-                        text=text,
-                        max_message_chars=max_message_chars,
-                        dry_run=dry_run,
-                        message_index=message_index,
-                    )
-
-                    session_fields: dict[str, Any] = {
-                        "agent": _current_agent(),
-                        "cwd": session_cwd,
-                        "session_path": str(session_path),
-                        "awaiting_input": True,
-                        "pending_completion": True,
-                        "last_attention_ts": int(time.time()),
-                        "last_needs_input": text,
-                    }
-                    pending_request_user_input = outbound._extract_request_user_input_payload(payload)
-                    if isinstance(pending_request_user_input, dict):
-                        session_fields["pending_request_user_input"] = pending_request_user_input
-                    tmux_pane = os.environ.get("TMUX_PANE")
-                    if isinstance(tmux_pane, str) and tmux_pane.strip():
-                        session_fields["tmux_pane"] = tmux_pane.strip()
-                    tmux_socket = _tmux_socket_from_env()
-                    if isinstance(tmux_socket, str) and tmux_socket.strip():
-                        session_fields["tmux_socket"] = tmux_socket.strip()
-
-                    _upsert_session(
-                        registry=registry,
-                        session_id=sid,
-                        fields=session_fields,
-                    )
-
-                    if call_id:
-                        seen_needs_input_call_ids[f"{cache_key}:{call_id}"] = int(time.time())
-                        if len(seen_needs_input_call_ids) > 1024:
-                            pruned = outbound._prune_seen_needs_input_call_ids(
-                                seen_needs_input_call_ids,
-                                now_ts=int(time.time()),
+                        if call_id:
+                            dedupe_key = f"{cache_key}:{call_id}"
+                            if dedupe_key in seen_needs_input_call_ids:
+                                continue
+                            call_key = agent_chat_dedupe.build_dedupe_key(
+                                category="needs_input_call_id",
+                                scope=session_scope,
+                                text=call_id,
                             )
-                            seen_needs_input_call_ids.clear()
-                            seen_needs_input_call_ids.update(pruned)
-                    continue
+                            if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=call_key):
+                                continue
 
-                extracted = outbound._extract_message_text_from_payload(payload)
-                if not extracted:
-                    continue
+                        semantic_key = agent_chat_dedupe.build_dedupe_key(
+                            category="needs_input",
+                            scope=session_scope,
+                            text=text,
+                        )
+                        if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
+                            continue
 
-                role, text = extracted
-                if role != "assistant":
+                        _send_structured(
+                            codex_home=codex_home,
+                            recipient=recipient,
+                            session_id=sid,
+                            kind="needs_input",
+                            text=text,
+                            max_message_chars=max_message_chars,
+                            dry_run=dry_run,
+                            message_index=message_index,
+                        )
+
+                        session_fields: dict[str, Any] = {
+                            "agent": session_agent,
+                            "cwd": session_cwd,
+                            "session_path": str(session_path),
+                            "awaiting_input": True,
+                            "pending_completion": True,
+                            "last_attention_ts": int(time.time()),
+                            "last_needs_input": text,
+                        }
+                        pending_request_user_input = outbound._extract_request_user_input_payload(payload)
+                        if isinstance(pending_request_user_input, dict):
+                            session_fields["pending_request_user_input"] = pending_request_user_input
+                        tmux_pane = os.environ.get("TMUX_PANE")
+                        if isinstance(tmux_pane, str) and tmux_pane.strip():
+                            session_fields["tmux_pane"] = tmux_pane.strip()
+                        tmux_socket = _tmux_socket_from_env()
+                        if isinstance(tmux_socket, str) and tmux_socket.strip():
+                            session_fields["tmux_socket"] = tmux_socket.strip()
+
+                        _upsert_session(
+                            registry=registry,
+                            session_id=sid,
+                            fields=session_fields,
+                        )
+
+                        if call_id:
+                            seen_needs_input_call_ids[f"{cache_key}:{call_id}"] = int(time.time())
+                            if len(seen_needs_input_call_ids) > 1024:
+                                pruned = outbound._prune_seen_needs_input_call_ids(
+                                    seen_needs_input_call_ids,
+                                    now_ts=int(time.time()),
+                                )
+                                seen_needs_input_call_ids.clear()
+                                seen_needs_input_call_ids.update(pruned)
+                        continue
+
+                    extracted = outbound._extract_message_text_from_payload(payload)
+                    if not extracted:
+                        continue
+                    role, text = extracted
+                    if role != "assistant":
+                        continue
+                elif event_type == "message" and session_agent == "pi":
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("role") != "assistant":
+                        continue
+                    parts: list[str] = []
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        parts.append(content.strip())
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("type") != "text":
+                                continue
+                            text_value = item.get("text")
+                            if isinstance(text_value, str) and text_value.strip():
+                                parts.append(text_value.strip())
+                    text = "\n".join(parts).strip() or None
+                    if not text:
+                        continue
+                else:
                     continue
 
                 sessions = registry.get("sessions")
@@ -4459,12 +5368,14 @@ def _render_session_list(*, registry: dict[str, Any]) -> str:
     for _, sid, rec in rows[:12]:
         ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(sid)
         alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
+        agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
         waiting = "waiting" if rec.get("awaiting_input") is True else "idle"
         cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else ""
+        prefix = f"[{_agent_display_name(agent=agent)}] "
         if alias:
-            lines.append(f"- @{ref} ({alias}) — {waiting} — {cwd}")
+            lines.append(f"- {prefix}@{ref} ({alias}) — {waiting} — {cwd}")
         else:
-            lines.append(f"- @{ref} — {waiting} — {cwd}")
+            lines.append(f"- {prefix}@{ref} — {waiting} — {cwd}")
 
     return "\n".join(lines)
 
@@ -4480,6 +5391,7 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
     ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(session_id)
     alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
     waiting = "yes" if rec.get("awaiting_input") is True else "no"
+    agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
     cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else ""
     path = rec.get("session_path") if isinstance(rec.get("session_path"), str) else ""
     pane = rec.get("tmux_pane") if isinstance(rec.get("tmux_pane"), str) else ""
@@ -4489,6 +5401,7 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
         f"Session: {session_id}",
         f"Ref: @{ref}",
         f"Alias: {alias or '-'}",
+        f"Agent: {_agent_display_name(agent=agent)}",
         f"Awaiting input: {waiting}",
         f"CWD: {cwd or '-'}",
         f"Session path: {path or '-'}",
@@ -4925,10 +5838,31 @@ def _resolve_claude_bin() -> str:
     return "claude"
 
 
+def _resolve_pi_bin() -> str:
+    override = os.environ.get("AGENT_CHAT_PI_BIN")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+
+    discovered = shutil.which("pi")
+    if isinstance(discovered, str) and discovered.strip():
+        return discovered.strip()
+
+    for candidate in _PI_BIN_CANDIDATES:
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+
+    return "pi"
+
+
 def _resolve_agent_bin(*, agent: str | None = None) -> str:
     normalized = _normalize_agent(agent=agent if agent is not None else _current_agent())
     if normalized == "claude":
         return _resolve_claude_bin()
+    if normalized == "pi":
+        return _resolve_pi_bin()
     return _resolve_codex_bin()
 
 
@@ -5109,6 +6043,12 @@ def _tmux_start_codex_window(
     agent_bin = _resolve_agent_bin(agent=normalized_agent)
     if normalized_agent == "claude":
         launch_cmd = f"CLAUDE_CHAT_REPLY=1 {shlex.quote(agent_bin)}"
+    elif normalized_agent == "pi":
+        pi_home = _agent_home_path(agent="pi")
+        launch_cmd = (
+            f"AGENT_CHAT_REPLY=1 PI_CODING_AGENT_DIR={shlex.quote(str(pi_home))} "
+            f"{shlex.quote(agent_bin)}"
+        )
     else:
         launch_cmd = f"AGENT_CHAT_REPLY=1 {shlex.quote(agent_bin)} -a never -s danger-full-access"
 
@@ -5890,8 +6830,8 @@ def _recover_session_record_from_disk(
             out.append((agent_name, home))
 
         _add(_current_agent(), current_home)
-        _add("codex", _lookup_agent_home_path(agent="codex", current_home=current_home))
-        _add("claude", _lookup_agent_home_path(agent="claude", current_home=current_home))
+        for agent_name in sorted(_SUPPORTED_AGENTS):
+            _add(agent_name, _lookup_agent_home_path(agent=agent_name, current_home=current_home))
         return out
 
     sid = session_id.strip()
@@ -6026,8 +6966,8 @@ def _lookup_agent_by_session_id_across_homes(
         homes.append((agent_name, home))
 
     _add(_current_agent(), codex_home)
-    _add("codex", _lookup_agent_home_path(agent="codex", current_home=codex_home))
-    _add("claude", _lookup_agent_home_path(agent="claude", current_home=codex_home))
+    for agent_name in sorted(_SUPPORTED_AGENTS):
+        _add(agent_name, _lookup_agent_home_path(agent=agent_name, current_home=codex_home))
 
     ordered_homes = [entry for entry in homes if str(entry[1]) != current_home]
     ordered_homes.extend(entry for entry in homes if str(entry[1]) == current_home)
@@ -6270,6 +7210,8 @@ def _create_new_session(
 
     if normalized_agent == "claude":
         cmd = [_resolve_agent_bin(agent=normalized_agent), "-p", prompt]
+    elif normalized_agent == "pi":
+        cmd = [_resolve_agent_bin(agent=normalized_agent), "-p", prompt]
     else:
         cmd = [
             _resolve_agent_bin(agent=normalized_agent),
@@ -6291,13 +7233,17 @@ def _create_new_session(
         )
 
     try:
+        env = {**os.environ, "AGENT_CHAT_REPLY": "1", "CLAUDE_CHAT_REPLY": "1"}
+        if normalized_agent == "pi":
+            env.setdefault("PI_CODING_AGENT_DIR", str(agent_home))
+            env.setdefault("AGENT_CHAT_PI_HOME", str(agent_home))
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
             text=True,
-            env={**os.environ, "AGENT_CHAT_REPLY": "1", "CLAUDE_CHAT_REPLY": "1"},
+            env=env,
             cwd=cwd.strip() if isinstance(cwd, str) and cwd.strip() else None,
         )
     except Exception:
@@ -6326,7 +7272,7 @@ def _create_new_session(
         return None, None, "Session created but session ID was not found."
 
     response: str | None = None
-    if normalized_agent == "claude":
+    if normalized_agent in {"claude", "pi"}:
         response = proc.stdout.strip() if isinstance(proc.stdout, str) and proc.stdout.strip() else None
     else:
         try:
@@ -6555,6 +7501,43 @@ def _process_inbound_replies(
             else None
         )
         row_thread_key = _telegram_thread_key(chat_id=row_telegram_chat_id, thread_id=row_telegram_thread_id)
+        row_discord_parent_channel_id = (
+            row_context.get("discord_parent_channel_id")
+            if isinstance(row_context.get("discord_parent_channel_id"), str)
+            else None
+        )
+        row_discord_channel_id = (
+            row_context.get("discord_channel_id") if isinstance(row_context.get("discord_channel_id"), str) else None
+        )
+        row_discord_sender_user_id = (
+            row_context.get("discord_sender_user_id")
+            if isinstance(row_context.get("discord_sender_user_id"), str)
+            else None
+        )
+        row_context_key: str | None = None
+        row_context_channel_id: str | None = None
+        row_context_thread_id: int | str | None = None
+        if row_transport == "telegram":
+            row_context_channel_id = row_telegram_chat_id
+            row_context_thread_id = row_telegram_thread_id
+            row_context_key = _conversation_key(
+                transport="telegram",
+                channel_id=row_context_channel_id,
+                thread_id=row_context_thread_id,
+            )
+        elif row_transport == "discord":
+            row_context_channel_id = row_discord_parent_channel_id or row_discord_channel_id
+            row_context_thread_id = (
+                row_discord_channel_id
+                if row_discord_parent_channel_id and row_discord_channel_id and row_discord_parent_channel_id != row_discord_channel_id
+                else 0
+            )
+            row_context_key = _conversation_key(
+                transport="discord",
+                channel_id=row_context_channel_id,
+                thread_id=row_context_thread_id,
+            )
+        row_reply_discord_channel_id = row_discord_channel_id if row_transport == "discord" else None
         _trace(f"inbound rowid={rowid} text={text.strip()[:120]!r}")
         if reference_guids_fn is not None:
             reference_guids = reference_guids_fn(conn=conn, rowid=rowid, fallback_guid=reply_to_guid)
@@ -6576,7 +7559,7 @@ def _process_inbound_replies(
 
         pending_choice_scope = "global"
         pending_choice = _get_pending_new_session_choice(registry=registry)
-        if row_thread_key:
+        if row_transport == "telegram" and row_thread_key:
             pending_choice_for_thread = _get_pending_new_session_choice_by_thread(
                 registry=registry,
                 thread_key=row_thread_key,
@@ -6584,10 +7567,20 @@ def _process_inbound_replies(
             if isinstance(pending_choice_for_thread, dict):
                 pending_choice = pending_choice_for_thread
                 pending_choice_scope = "thread"
+        elif row_context_key:
+            pending_choice_for_context = _get_pending_new_session_choice_by_context(
+                registry=registry,
+                context_key=row_context_key,
+            )
+            if isinstance(pending_choice_for_context, dict):
+                pending_choice = pending_choice_for_context
+                pending_choice_scope = "context"
         if isinstance(pending_choice, dict):
             choice = _parse_agent_choice_response(text=text)
             if choice == "cancel":
-                if pending_choice_scope == "thread":
+                if pending_choice_scope == "context":
+                    _clear_pending_new_session_choice_by_context(registry=registry, context_key=row_context_key)
+                elif pending_choice_scope == "thread":
                     _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
                 else:
                     _clear_pending_new_session_choice(registry=registry)
@@ -6601,13 +7594,16 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
             if choice in _SUPPORTED_AGENTS:
                 requested_prompt = pending_choice.get("prompt")
                 if not isinstance(requested_prompt, str) or not requested_prompt.strip():
-                    if pending_choice_scope == "thread":
+                    if pending_choice_scope == "context":
+                        _clear_pending_new_session_choice_by_context(registry=registry, context_key=row_context_key)
+                    elif pending_choice_scope == "thread":
                         _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
                     else:
                         _clear_pending_new_session_choice(registry=registry)
@@ -6621,7 +7617,8 @@ def _process_inbound_replies(
                         dry_run=dry_run,
                         message_index=message_index,
                         telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                        telegram_chat_id=row_telegram_chat_id,
+                        discord_channel_id=row_reply_discord_channel_id,
                     )
                     continue
 
@@ -6673,6 +7670,7 @@ def _process_inbound_replies(
                         agent=choice,
                         telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
                     )
                     continue
 
@@ -6716,7 +7714,17 @@ def _process_inbound_replies(
                         message_thread_id=row_telegram_thread_id,
                         session_id=sid,
                     )
-                if pending_choice_scope == "thread":
+                elif row_transport == "discord" and row_context_channel_id:
+                    _bind_conversation_to_session(
+                        registry=registry,
+                        transport="discord",
+                        channel_id=row_context_channel_id,
+                        thread_id=row_context_thread_id,
+                        session_id=sid,
+                    )
+                if pending_choice_scope == "context":
+                    _clear_pending_new_session_choice_by_context(registry=registry, context_key=row_context_key)
+                elif pending_choice_scope == "thread":
                     _clear_pending_new_session_choice_by_thread(registry=registry, thread_key=row_thread_key)
                 else:
                     _clear_pending_new_session_choice(registry=registry)
@@ -6742,7 +7750,8 @@ def _process_inbound_replies(
                     message_index=message_index,
                     agent=choice,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
 
@@ -6764,6 +7773,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -6779,6 +7789,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -6796,7 +7807,8 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
 
@@ -6811,6 +7823,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -6826,12 +7839,13 @@ def _process_inbound_replies(
                     recipient=recipient,
                     session_id=None,
                     kind="error",
-                    text="Creating new sessions from iMessage is disabled.",
+                    text="Creating new sessions from inbound messages is disabled.",
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
 
@@ -6849,7 +7863,8 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
 
@@ -6878,6 +7893,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -6896,6 +7912,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -6942,6 +7959,16 @@ def _process_inbound_replies(
                 if isinstance(rebound_sid, str) and rebound_sid.strip():
                     target_sid = rebound_sid.strip()
                     err = None
+            if not target_sid and row_transport == "discord" and row_context_channel_id:
+                bound_sid = _lookup_session_by_conversation(
+                    registry=registry,
+                    transport="discord",
+                    channel_id=row_context_channel_id,
+                    thread_id=row_context_thread_id,
+                )
+                if isinstance(bound_sid, str) and bound_sid.strip():
+                    target_sid = bound_sid.strip()
+                    err = None
         else:
             if action == "implicit" and row_transport == "telegram":
                 bound_sid = _lookup_session_by_telegram_thread(
@@ -6964,6 +7991,20 @@ def _process_inbound_replies(
                     target_sid = _lookup_single_session_by_telegram_chat(
                         registry=registry,
                         chat_id=row_telegram_chat_id,
+                    )
+            elif action == "implicit" and row_transport == "discord" and row_context_channel_id:
+                target_sid = _lookup_session_by_conversation(
+                    registry=registry,
+                    transport="discord",
+                    channel_id=row_context_channel_id,
+                    thread_id=row_context_thread_id,
+                )
+                if not target_sid and _discord_sender_is_owner(sender_user_id=row_discord_sender_user_id):
+                    target_sid = _lookup_session_by_conversation(
+                        registry=registry,
+                        transport="discord",
+                        channel_id=row_context_channel_id,
+                        thread_id=0,
                     )
             if not target_sid:
                 target_sid, err = _resolve_session_from_reply_context(
@@ -7014,6 +8055,17 @@ def _process_inbound_replies(
                         label=auto_create_label,
                         cwd=fallback_cwd,
                     )
+                elif row_context_key:
+                    _set_pending_new_session_choice_by_context(
+                        registry=registry,
+                        context_key=row_context_key,
+                        prompt=prompt,
+                        action=action,
+                        source_text=text,
+                        source_ref=source_ref if isinstance(source_ref, str) and source_ref.strip() else None,
+                        label=auto_create_label,
+                        cwd=fallback_cwd,
+                    )
                 else:
                     _set_pending_new_session_choice(
                         registry=registry,
@@ -7028,7 +8080,8 @@ def _process_inbound_replies(
                     "No matching session found. Choose runtime for a new background session:\n"
                     "1) Codex\n"
                     "2) Claude\n"
-                    "Reply with 1 or 2 (or codex/claude). Reply 'cancel' to abort."
+                    "3) Pi\n"
+                    "Reply with 1, 2, or 3 (or codex/claude/pi). Reply 'cancel' to abort."
                 )
                 _send_structured(
                     codex_home=codex_home,
@@ -7040,7 +8093,8 @@ def _process_inbound_replies(
                     dry_run=dry_run,
                     message_index=message_index,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
                 )
                 continue
 
@@ -7055,6 +8109,7 @@ def _process_inbound_replies(
                 message_index=message_index,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -7063,6 +8118,14 @@ def _process_inbound_replies(
                 registry=registry,
                 chat_id=row_telegram_chat_id,
                 message_thread_id=row_telegram_thread_id,
+                session_id=target_sid,
+            )
+        elif row_transport == "discord" and row_context_channel_id:
+            _bind_conversation_to_session(
+                registry=registry,
+                transport="discord",
+                channel_id=row_context_channel_id,
+                thread_id=row_context_thread_id,
                 session_id=target_sid,
             )
 
@@ -7123,6 +8186,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
         if not prompt_for_dispatch:
@@ -7138,6 +8202,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -7169,6 +8234,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             _upsert_session(
                 registry=registry,
@@ -7201,6 +8267,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             _upsert_session(
                 registry=registry,
@@ -7251,6 +8318,7 @@ def _process_inbound_replies(
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -7293,6 +8361,7 @@ def _process_inbound_replies(
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
                 )
                 _upsert_session(
                     registry=registry,
@@ -7320,6 +8389,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             _upsert_session(
                 registry=registry,
@@ -7350,6 +8420,7 @@ def _process_inbound_replies(
                 agent=session_agent,
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
             )
             continue
 
@@ -7365,6 +8436,7 @@ def _process_inbound_replies(
             agent=session_agent,
             telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
         )
 
         _upsert_session(
@@ -7383,7 +8455,6 @@ def _process_inbound_replies(
     _save_registry(codex_home=codex_home, registry=registry)
     _save_message_index(codex_home=codex_home, index=message_index)
     return last_rowid
-
 
 def _process_inbound_telegram_replies(
     *,
@@ -7488,7 +8559,16 @@ def _process_outbound(
     registry = _load_registry(codex_home=codex_home)
     message_index = _load_message_index(codex_home=codex_home)
 
-    session_paths = _find_all_session_files(codex_home=codex_home)
+    session_paths: list[Path] = []
+    seen_session_paths: set[str] = set()
+    for agent_name in sorted(_SUPPORTED_AGENTS):
+        agent_home = _lookup_agent_home_path(agent=agent_name, current_home=codex_home)
+        for path in _find_all_session_files(codex_home=agent_home, agent=agent_name):
+            path_key = str(path)
+            if path_key in seen_session_paths:
+                continue
+            seen_session_paths.add(path_key)
+            session_paths.append(path)
     session_paths.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0)
 
     session_id_cache: dict[str, str | None] = {}
@@ -7631,7 +8711,7 @@ def main(argv: list[str]) -> int:
             "--agent",
             default=default_agent,
             choices=sorted(_SUPPORTED_AGENTS),
-            help="Agent runtime to integrate (codex or claude)",
+            help="Agent runtime to integrate (codex, claude, or pi)",
         )
 
     run = sub.add_parser("run", help="Run control plane forever")
@@ -7655,7 +8735,7 @@ def main(argv: list[str]) -> int:
     doctor_cmd.add_argument("--json", action="store_true", help="Emit JSON diagnostics")
     setup_notify = sub.add_parser(
         "setup-notify-hook",
-        help="Install/update notify hook for Codex or Claude",
+        help="Install/update notify hook for Codex, Claude, or Pi",
     )
     _add_agent_arg(setup_notify)
     setup_notify.add_argument(
@@ -7887,6 +8967,15 @@ def main(argv: list[str]) -> int:
             handle_ids=handle_ids,
         )
     telegram_update_id = _load_telegram_inbound_cursor(codex_home=codex_home)
+    discord_cursor_state = _load_discord_inbound_cursor(codex_home=codex_home)
+    discord_inbound_rowid = 0
+    discord_channels = discord_cursor_state.get("channels") if isinstance(discord_cursor_state, dict) else {}
+    if isinstance(discord_channels, dict):
+        for value in discord_channels.values():
+            try:
+                discord_inbound_rowid = max(discord_inbound_rowid, int(str(value).strip()))
+            except Exception:
+                continue
 
     inbound_retry_s = 30.0
     env_retry = os.environ.get("AGENT_CHAT_INBOUND_RETRY_S", "").strip()
@@ -7927,7 +9016,7 @@ def main(argv: list[str]) -> int:
         _ensure_inbound_ready(now_monotonic=0.0)
 
     def cycle() -> None:
-        nonlocal files_cursor, seen_needs_input_call_ids, inbound_rowid, telegram_update_id
+        nonlocal files_cursor, seen_needs_input_call_ids, inbound_rowid, telegram_update_id, discord_inbound_rowid
 
         _drain_fallback_queue(
             codex_home=codex_home,
@@ -7989,6 +9078,18 @@ def main(argv: list[str]) -> int:
                     last_update_id=next_telegram_update_id,
                 )
                 telegram_update_id = next_telegram_update_id
+
+        if _transport_discord_enabled(mode=transport_mode):
+            discord_inbound_rowid = _process_inbound_discord_replies(
+                codex_home=codex_home,
+                recipient=recipient,
+                after_message_id=discord_inbound_rowid,
+                max_message_chars=max_message_chars,
+                min_prefix=min_prefix,
+                dry_run=bool(args.dry_run),
+                resume_timeout_s=resume_timeout_s,
+                trace=trace_enabled,
+            )
 
     if args.cmd == "once":
         cycle()

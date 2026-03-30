@@ -48,7 +48,8 @@ _FINAL_STATUS_DEDUPE_TTL_SECONDS = 120
 
 def _find_newest_session_file(*, codex_home: Path) -> Path | None:
     try:
-        sessions_dir = codex_home / "sessions"
+        active_agent = (os.environ.get("AGENT_CHAT_AGENT") or "codex").strip().lower()
+        sessions_dir = codex_home / "projects" if active_agent == "claude" else codex_home / "sessions"
         if not sessions_dir.exists():
             return None
 
@@ -212,6 +213,29 @@ def _read_last_assistant_text_from_session(session_path: Path) -> str | None:
                             chunks.append(text)
                     if chunks:
                         last_text = "".join(chunks).strip()
+                    continue
+
+                if event.get("type") == "message":
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("role") != "assistant":
+                        continue
+                    content = message.get("content")
+                    chunks: list[str] = []
+                    if isinstance(content, str) and content.strip():
+                        chunks.append(content.strip())
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("type") != "text":
+                                continue
+                            text = item.get("text")
+                            if isinstance(text, str) and text.strip():
+                                chunks.append(text.strip())
+                    if chunks:
+                        last_text = "\n".join(chunks).strip()
                     continue
 
                 if event.get("type") == "event_msg":
@@ -919,7 +943,13 @@ def main(argv: list[str]) -> int:
         return 0
     recipient = _normalize_recipient(recipient_raw)
 
-    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
+    active_agent = (os.environ.get("AGENT_CHAT_AGENT") or "codex").strip().lower()
+    if active_agent == "claude":
+        codex_home = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    elif active_agent == "pi":
+        codex_home = Path(os.environ.get("AGENT_CHAT_PI_HOME", os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))))
+    else:
+        codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     history_path = Path(os.environ.get("CODEX_HISTORY_PATH", str(codex_home / "history.jsonl")))
     assistant_response = _read_last_assistant_text(codex_home=codex_home)
     request = assistant_response

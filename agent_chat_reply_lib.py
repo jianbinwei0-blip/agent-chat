@@ -63,7 +63,12 @@ _CLAUDE_BIN_CANDIDATES = (
     "/usr/local/bin/claude",
     "/usr/bin/claude",
 )
-_SUPPORTED_AGENTS = frozenset({"codex", "claude"})
+_PI_BIN_CANDIDATES = (
+    "/opt/homebrew/bin/pi",
+    "/usr/local/bin/pi",
+    "/usr/bin/pi",
+)
+_SUPPORTED_AGENTS = frozenset({"codex", "claude", "pi"})
 
 
 def _normalize_tmux_socket(*, tmux_socket: str | None) -> str | None:
@@ -120,6 +125,24 @@ def _resolve_claude_bin() -> str:
         except Exception:
             continue
     return "claude"
+
+
+def _resolve_pi_bin() -> str:
+    override = os.environ.get("AGENT_CHAT_PI_BIN")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+
+    discovered = shutil.which("pi")
+    if isinstance(discovered, str) and discovered.strip():
+        return discovered.strip()
+
+    for candidate in _PI_BIN_CANDIDATES:
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+    return "pi"
 
 
 def _tmux_cmd(*parts: str, tmux_socket: str | None = None) -> list[str]:
@@ -452,6 +475,39 @@ def _run_codex_resume(
         return None
 
 
+def _run_pi_resume(
+    *,
+    session_id: str,
+    cwd: str | None,
+    prompt: str,
+    codex_home: Path,
+    timeout_s: float | None,
+) -> str | None:
+    cmd: list[str] = [_resolve_pi_bin(), "--session", session_id, "-p", prompt]
+    env = {**os.environ, "AGENT_CHAT_REPLY": "1"}
+    env.setdefault("PI_CODING_AGENT_DIR", str(codex_home))
+    try:
+        timeout = None if timeout_s is None else (None if float(timeout_s) <= 0 else float(timeout_s))
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            cwd=cwd if isinstance(cwd, str) and cwd.strip() else None,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return "(pi --session timed out)"
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() if isinstance(proc.stdout, str) and proc.stdout.strip() else None
+
+
 def _run_agent_resume(
     *,
     agent: str,
@@ -462,6 +518,14 @@ def _run_agent_resume(
     timeout_s: float | None,
 ) -> str | None:
     normalized = _normalize_agent(agent=agent)
+    if normalized == "pi":
+        return _run_pi_resume(
+            session_id=session_id,
+            cwd=cwd,
+            prompt=prompt,
+            codex_home=codex_home,
+            timeout_s=timeout_s,
+        )
     if normalized != "claude":
         return _run_codex_resume(
             session_id=session_id,
@@ -539,6 +603,29 @@ def _read_last_assistant_text_from_session(session_path: Path) -> str | None:
                             chunks.append(text)
                     if chunks:
                         last_text = "".join(chunks).strip()
+                    continue
+
+                if event.get("type") == "message":
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("role") != "assistant":
+                        continue
+                    content = message.get("content")
+                    chunks: list[str] = []
+                    if isinstance(content, str) and content.strip():
+                        chunks.append(content.strip())
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("type") != "text":
+                                continue
+                            text = item.get("text")
+                            if isinstance(text, str) and text.strip():
+                                chunks.append(text.strip())
+                    if chunks:
+                        last_text = "\n".join(chunks).strip()
                     continue
 
                 if event.get("type") == "event_msg":
@@ -795,6 +882,8 @@ def _handle_prompt(
             sys.stdout.write("tmux context mismatch; using CLI resume fallback\n")
         if active_agent == "claude":
             display_cmd = [_resolve_claude_bin(), "-p", "--resume", session_id, prompt]
+        elif active_agent == "pi":
+            display_cmd = [_resolve_pi_bin(), "--session", session_id, "-p", prompt]
         else:
             display_cmd = ["codex", "-a", "never", "-s", "workspace-write"]
             if cwd:
@@ -1209,7 +1298,13 @@ def main(argv: list[str]) -> int:
     recipient = _normalize_recipient(recipient_raw)
     handle_ids = _candidate_handle_ids(recipient)
 
-    codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
+    active_agent = _normalize_agent(agent=os.environ.get("AGENT_CHAT_AGENT"))
+    if active_agent == "claude":
+        codex_home = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    elif active_agent == "pi":
+        codex_home = Path(os.environ.get("AGENT_CHAT_PI_HOME", os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))))
+    else:
+        codex_home = Path(os.environ.get("AGENT_CHAT_HOME", str(Path.home() / ".codex")))
     # Prevent multiple concurrent bridge instances (notify hooks may try to start this repeatedly).
     _lock_handle = _acquire_single_instance_lock(codex_home=codex_home)
     if _lock_handle is None:

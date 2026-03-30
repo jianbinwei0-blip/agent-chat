@@ -2,9 +2,9 @@
 
 ## Overview
 
-`agent-chat` is a local macOS runtime that synchronizes:
-- outbound Codex/Claude notifications -> iMessage and/or Telegram
-- inbound iMessage and Telegram replies -> Codex/Claude sessions
+`agent-chat` is a local macOS-first runtime that synchronizes:
+- outbound Codex/Claude notifications plus Pi session activity -> iMessage, Telegram, and/or Discord
+- inbound iMessage, Telegram, and Discord replies -> Codex/Claude/Pi sessions
 
 The primary daemon is `agent_chat_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
 
@@ -15,6 +15,8 @@ The primary daemon is `agent_chat_control_plane.py`, which consolidates behavior
   - Notify payload ingestion (`notify`)
   - Health diagnostics (`doctor`)
   - Session registry, routing, queue draining, inbound polling
+- `agent_chat/`
+  - package helpers for transport parsing, registry normalization, and agent/transport adapter definitions
 - `agent_chat_notify.py`
   - Best-effort notify formatter/sender
   - Supports `attention` and `route` modes
@@ -39,6 +41,7 @@ Key files include:
 - `agent_chat_control_outbound_cursor.json`
 - `imessage_inbound_cursor.json`
 - `telegram_inbound_cursor.json`
+- `discord_inbound_cursor.json`
 - `agent_chat_queue.jsonl`
 - `agent_chat_dedupe_index.json`
 

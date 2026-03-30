@@ -1,6 +1,6 @@
 # agent-chat
 
-`agent-chat` is a macOS-only runtime that connects Codex or Claude sessions to iMessage and/or Telegram.
+`agent-chat` is a macOS-first runtime that connects Codex, Claude, or Pi sessions to iMessage, Telegram, and/or Discord.
 
 `README.md` is the canonical setup guide for both humans and coding agents.
 `AGENTS.md` is intentionally lightweight and points back here.
@@ -8,10 +8,11 @@
 Canonical naming in this repository now uses `agent-chat` / `agent_chat_*`.
 
 It provides one control-plane process that can:
-- forward Codex/Claude `notify` payloads to iMessage and/or Telegram
+- forward Codex/Claude notify payloads plus Pi session activity to iMessage, Telegram, and/or Discord
 - read inbound iMessage replies from Messages `chat.db`
 - read inbound Telegram bot updates
-- route replies back to the right Codex/Claude session (including tmux-based routing)
+- poll configured Discord channels/active threads for inbound bot interactions
+- route replies back to the right Codex/Claude/Pi session (including tmux-based routing)
 - drain a fallback outbound queue when AppleScript send attempts fail
 
 ## Scope and Non-Goals
@@ -28,14 +29,14 @@ Non-goals:
 
 - macOS (Messages app available and signed in)
 - Python 3.11+ (runtime enforces this)
-- Codex CLI or Claude CLI installed and authenticated
+- Codex CLI, Claude CLI, and/or Pi coding agent installed and authenticated
 - Required: Homebrew (setup auto-installs when missing)
 - Required: tmux (setup auto-installs via Homebrew when missing)
 - Bundled sender script at `scripts/send-imessage.applescript` (no external path required)
 
 Privacy/Security permissions required on macOS:
-- Telegram-only mode (`AGENT_CHAT_TRANSPORT=telegram`): no Full Disk Access required.
-- iMessage mode (`imessage` or `both`): grant `Automation` (Messages control) and `Full Disk Access` (read `~/Library/Messages/chat.db`) to the runtime app/Python target printed by setup.
+- Telegram-only / Discord-only mode (`AGENT_CHAT_TRANSPORT=telegram|discord` or `AGENT_CHAT_TRANSPORTS=telegram,discord` without iMessage): no Full Disk Access required.
+- iMessage mode (`imessage`, `both`, or any `AGENT_CHAT_TRANSPORTS` set that includes `imessage`): grant `Automation` (Messages control) and `Full Disk Access` (read `~/Library/Messages/chat.db`) to the runtime app/Python target printed by setup.
 
 ## Non-Technical Setup (Telegram, Recommended)
 
@@ -419,13 +420,13 @@ Then report updated files and health status.
 
 ```bash
 # Unified control plane
-python3 agent_chat_control_plane.py run [--agent codex|claude] [--poll 0.5] [--dry-run] [--trace]
-python3 agent_chat_control_plane.py once [--agent codex|claude] [--dry-run] [--trace]
-python3 agent_chat_control_plane.py notify [--agent codex|claude] [PAYLOAD_JSON] [--dry-run]
-python3 agent_chat_control_plane.py doctor [--agent codex|claude] [--json]
-python3 agent_chat_control_plane.py setup-notify-hook [--agent codex|claude] [--recipient TO] [--python-bin PATH]
-python3 agent_chat_control_plane.py setup-permissions [--agent codex|claude] [--timeout 180] [--poll 1.0] [--no-open]
-python3 agent_chat_control_plane.py setup-launchd [--agent codex|claude] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
+python3 agent_chat_control_plane.py run [--agent codex|claude|pi] [--poll 0.5] [--dry-run] [--trace]
+python3 agent_chat_control_plane.py once [--agent codex|claude|pi] [--dry-run] [--trace]
+python3 agent_chat_control_plane.py notify [--agent codex|claude|pi] [PAYLOAD_JSON] [--dry-run]
+python3 agent_chat_control_plane.py doctor [--agent codex|claude|pi] [--json]
+python3 agent_chat_control_plane.py setup-notify-hook [--agent codex|claude|pi] [--recipient TO] [--python-bin PATH]
+python3 agent_chat_control_plane.py setup-permissions [--agent codex|claude|pi] [--timeout 180] [--poll 1.0] [--no-open]
+python3 agent_chat_control_plane.py setup-launchd [--agent codex|claude|pi] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
 
 # Notify helper (best-effort)
 python3 agent_chat_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]
@@ -466,9 +467,12 @@ Telegram topic/thread routing behavior:
 
 - `AGENT_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
 - `AGENT_CHAT_HOME`: runtime home directory for Codex state (defaults to `~/.codex`)
+- `CLAUDE_HOME`: runtime home directory for Claude state (defaults to `~/.claude`)
+- `AGENT_CHAT_PI_HOME` / `PI_CODING_AGENT_DIR`: runtime home directory for Pi state (defaults to `~/.pi/agent`)
 - `AGENT_CHAT_NOTIFY_MODE`: `send`, `state_only`, or `route`
-- `AGENT_CHAT_TRANSPORT`: `imessage` (default), `telegram`, or `both`
-- `AGENT_TELEGRAM_BOT_TOKEN`: Telegram bot token (required for `telegram` / `both`)
+- `AGENT_CHAT_TRANSPORT`: legacy single transport selector (`imessage`, `telegram`, `discord`, or `both`)
+- `AGENT_CHAT_TRANSPORTS`: comma-separated transport list (`imessage,telegram,discord`)
+- `AGENT_TELEGRAM_BOT_TOKEN`: Telegram bot token (required when Telegram transport is enabled)
 - `AGENT_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (auto-detected during `setup-launchd` bootstrap when unset)
 - `AGENT_TELEGRAM_CHAT_IDS`: comma-separated allowlist for inbound chat IDs (optional; includes `AGENT_TELEGRAM_CHAT_ID` when set)
 - `AGENT_TELEGRAM_OWNER_USER_IDS`: comma-separated Telegram user IDs treated as owner senders for Telegram owner fallback routing (optional)
@@ -476,6 +480,11 @@ Telegram topic/thread routing behavior:
 - `AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID`: fallback Telegram topic thread id for sessions not bound to a topic (default `1` for `#general`; set `0` to disable fallback)
 - `AGENT_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
 - `AGENT_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
+- `AGENT_DISCORD_BOT_TOKEN`: Discord bot token (required when Discord transport is enabled)
+- `AGENT_DISCORD_CHANNEL_ID`: default Discord channel/thread id for outbound and inbound allowlisting
+- `AGENT_DISCORD_CHANNEL_IDS`: comma-separated allowlist of Discord channels/threads to poll
+- `AGENT_DISCORD_OWNER_USER_IDS`: comma-separated Discord user IDs treated as owner senders for fallback routing
+- `AGENT_DISCORD_INBOUND_CURSOR`: Discord inbound cursor path override
 - `AGENT_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
 - `AGENT_CHAT_QUEUE`: fallback queue JSONL path
 - `AGENT_IMESSAGE_MAX_LEN`: max outgoing message chunk size
