@@ -5,10 +5,10 @@
 - Authoritative long-lived process: launchd label defaults to `com.agent-chat`.
 - Codex/Claude `notify` hooks forward payloads only; they do not spawn daemons. Pi is integrated through session polling plus direct CLI/tmux control.
 - Single process handles:
-  - outbound needs-input notifications to iMessage, Telegram, and/or Discord
+  - outbound needs-input notifications plus Discord session-channel updates
   - inbound iMessage replies from `chat.db`
   - inbound Telegram bot updates
-  - inbound Discord channel/thread polling for bot interactions
+  - inbound Discord control-channel, session-channel, and thread polling for bot interactions
   - session routing (tmux + resume fallback)
   - fallback queue draining
 
@@ -19,8 +19,10 @@
 3. During `run`, control plane tails runtime session JSONL, polls `~/Library/Messages/chat.db` only when transport includes iMessage, fetches Telegram updates when transport includes Telegram, and polls configured Discord channels/threads when transport includes Discord.
 4. Replies are routed by `@ref`, reply context, or missing-session choice flow.
    - when no target session matches, control plane asks for runtime choice (`Codex`/`Claude`/`Pi`) before creating a background session.
-   - for Telegram topics and Discord thread/channel bindings, canonical conversation bindings are checked first for implicit replies.
-5. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
+   - for Telegram topics, canonical conversation bindings are checked first for implicit replies.
+   - for Discord session channels, implicit inbound routing first checks the session record's stored `discord_channel_id`, then falls back to canonical conversation bindings.
+5. When `AGENT_DISCORD_SESSION_CHANNELS=1`, the configured Discord control channel stays unbound; session traffic is routed into auto-created Discord channels bound one-per-session.
+6. Failed outbound sends are queued in `~/.codex/tmp/agent_chat_queue.jsonl`; run loop drains queue on subsequent cycles.
 
 ## Key State Files
 
@@ -67,6 +69,21 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 - `AGENT_CHAT_TRACE` or `run/once --trace`
   - emits per-message routing traces to stderr logs.
 
+## Discord Session-Channel Mode
+
+See `docs/discord.md` for end-to-end Discord setup and operator guidance.
+
+When `AGENT_DISCORD_SESSION_CHANNELS=1`:
+- `AGENT_DISCORD_CONTROL_CHANNEL_ID` (or `AGENT_DISCORD_CHANNEL_ID`) is the control channel for `help`, `list`, `status`, and session creation.
+- the control channel is intentionally not rebound to a session, so it remains usable as a command surface.
+- session output is mirrored to a dedicated Discord channel per session.
+- session channels are created lazily on first meaningful outbound delivery, not eagerly for every discovered session.
+- each session has at most one bound Discord channel, and each bound session channel maps back to exactly one session.
+- plain text in a bound session channel routes back to that session without requiring `@<ref>`.
+- inbound routing resolves the target from stored session-channel metadata first, then falls back to generic conversation bindings.
+- auto-created session channels can be placed under `AGENT_DISCORD_SESSION_CATEGORY_ID` when configured.
+- setup requirements for this mode are: bot token, **Message Content Intent**, access to the control channel, and `Manage Channels` if automatic channel creation is enabled.
+
 ## Missing-Session Choice Flow
 
 When an inbound reply targets a missing session (`@ref ...` or implicit resolution miss), control plane records a pending create request and sends:
@@ -77,15 +94,16 @@ When an inbound reply targets a missing session (`@ref ...` or implicit resoluti
 - `cancel`
 
 Follow-up behavior:
-- `1`/`codex`: create Codex session in background.
-- `2`/`claude`: create Claude session in background.
-- `3`/`pi`: create Pi session in background.
+- `1`/`codex`: create a Codex session in background.
+- `2`/`claude`: create a Claude session in background.
+- `3`/`pi`: create a Pi session in background.
 - `cancel`: clear the pending request.
 
 If tmux creation fails after runtime choice, control plane falls back to direct (non-tmux) session creation.
 Pending choice scope:
 - iMessage / non-threaded: one global pending request; newest unresolved request replaces older state.
 - Telegram topics: one pending request per `chat_id:message_thread_id`.
+- Discord channel/thread inbound: one pending request per canonical Discord conversation key.
 
 When a runtime choice creates a session from Telegram topic input, the topic is bound to that session. Outbound session messages then include `message_thread_id` so updates stay in the same topic.
 Registry migration/load/save keeps Telegram topic bindings canonical (one topic per session, one session per topic), and `telegram_thread_bindings` is treated as the source of truth when it conflicts with per-session topic fields.

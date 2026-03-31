@@ -11,7 +11,7 @@ It provides one control-plane process that can:
 - forward Codex/Claude notify payloads plus Pi session activity to iMessage, Telegram, and/or Discord
 - read inbound iMessage replies from Messages `chat.db`
 - read inbound Telegram bot updates
-- poll configured Discord channels/active threads for inbound bot interactions
+- poll configured Discord control channels, session-bound channels, and active threads for inbound bot interactions
 - route replies back to the right Codex/Claude/Pi session (including tmux-based routing)
 - drain a fallback outbound queue when AppleScript send attempts fail
 
@@ -58,7 +58,7 @@ bash scripts/setup-telegram-easy.sh
 ```
 
 The script will:
-- ask whether you want `codex` or `claude`
+- ask whether you want `Codex` or `Claude`
 - ask for your Telegram bot token
 - save/update `.env.telegram.local`
 - run `setup-notify-hook`, `setup-launchd`, and `doctor`
@@ -201,7 +201,7 @@ export PYTHON_BIN
 # export AGENT_TELEGRAM_CHAT_ID="<chat id>"
 # export AGENT_TELEGRAM_API_BASE="https://api.telegram.org"
 
-# Optional: switch runtime from codex (default) to claude
+# Optional: switch runtime from Codex (default) to Claude
 # export AGENT_CHAT_AGENT="claude"
 # export CLAUDE_HOME="$HOME/.claude"
 ```
@@ -241,7 +241,23 @@ If topic messages are not received after setup:
 - verify no other process is consuming the same bot token via `getUpdates` (look for HTTP `409 Conflict`).
 - if Telegram API returns `group chat was upgraded to a supergroup`, update to `migrate_to_chat_id`, then rerun `setup-launchd` and `doctor`.
 
-4. Configure notify hook for your agent runtime.
+Discord setup (recommended for control channel + per-session channels):
+
+See `docs/discord.md` for the full guide.
+
+High-level checklist:
+- create/invite the bot and enable **Message Content Intent**
+- choose one Discord control channel
+- optionally configure a category for auto-created session channels
+- grant `View Channel`, `Send Messages`, `Read Message History`, and `Manage Channels` when using session-channel mode
+- set `AGENT_DISCORD_BOT_TOKEN`, `AGENT_DISCORD_CONTROL_CHANNEL_ID`, and `AGENT_DISCORD_SESSION_CHANNELS=1` as needed
+
+Behavior summary:
+- the control channel stays unbound and handles commands like `help`, `list`, `status`, and `new ...`
+- session channels are created lazily and bind one channel to one session
+- plain text in a bound session channel routes back to that same session without `@<ref>`
+
+6. Configure notify hook for your agent runtime.
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook \
@@ -252,6 +268,7 @@ If topic messages are not received after setup:
 
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
 When transport includes Telegram, setup requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+When transport includes Discord, setup requires `AGENT_DISCORD_BOT_TOKEN`; if missing, setup exits with Discord token setup guidance.
 `setup-notify-hook` and `setup-launchd` require Homebrew + tmux. If missing, setup first attempts automatic Homebrew install, then runs `brew install tmux`.
 
 This updater is idempotent:
@@ -261,7 +278,7 @@ This updater is idempotent:
 Compatibility note:
 - Current Codex releases parse `notify` as a sequence (array), not a string command.
 
-5. Install and start launchd (recommended).
+7. Install and start launchd (recommended).
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py setup-launchd \
@@ -273,11 +290,12 @@ Compatibility note:
 
 `--recipient` is required only when transport includes iMessage (`AGENT_CHAT_TRANSPORT=imessage|both`).
 When transport includes Telegram, setup requires `AGENT_TELEGRAM_BOT_TOKEN`; if missing, setup prints BotFather steps and exits.
+When transport includes Discord, setup requires `AGENT_DISCORD_BOT_TOKEN`; if missing, setup exits with Discord token setup guidance.
 If Telegram chat IDs are missing, `setup-launchd` now waits for an inbound message from the target group/topic and auto-detects `AGENT_TELEGRAM_CHAT_ID`.
 
 `setup-launchd` writes `~/Library/LaunchAgents/<label>.plist` and bootstraps the service.
 If transport includes iMessage (`imessage`/`both`), setup also runs the `chat.db` Full Disk Access check first using the same runtime binary it configures for launchd.
-If transport is `telegram` only, `chat.db` Full Disk Access setup is skipped.
+If transport is `telegram` or `discord` only, `chat.db` Full Disk Access setup is skipped.
 When the selected Python install provides `Python.app`, setup also prepares a visible target at `~/Applications/AgentChatPython.app` (symlink-first, copy fallback) and uses that app's embedded runtime binary for launchd/FDA guidance.
 
 During permission setup, follow the command output exactly. It prints:
@@ -294,19 +312,19 @@ Grant Full Disk Access to one of those printed targets (prefer the app path when
 `setup-permissions` now flushes and prints the detailed grant target instructions before opening System Settings. It then starts polling `chat.db` and keeps polling until readable or timeout.
 `setup-permissions` is only needed when transport includes iMessage (`imessage`/`both`).
 
-6. Optional: run in foreground instead of launchd.
+8. Optional: run in foreground instead of launchd.
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py run
 ```
 
-7. Optional one-cycle smoke test.
+9. Optional one-cycle smoke test.
 
 ```bash
 "$PYTHON_BIN" agent_chat_control_plane.py once --trace
 ```
 
-8. Optional Telegram diagnostics helper (Codex + Claude setups).
+10. Optional Telegram diagnostics helper (Codex + Claude setups).
 
 ```bash
 scripts/telegram-diagnose.sh
@@ -314,191 +332,7 @@ scripts/telegram-diagnose.sh
 # scripts/telegram-diagnose.sh --pause-launchd
 ```
 
-## First Live Roundtrip (Telegram Aha Check)
-
-After setup succeeds, validate real routing in under a minute:
-
-1. In the target Telegram topic/group, send `list` to inspect active session refs.
-2. Send one explicit bind message: `@<session_ref> hello`.
-3. Expect a routed response in the same topic; this establishes topic/session mapping.
-4. Send plain text (for example `status @<session_ref>` or `continue`) in the same topic.
-5. If no response arrives, run:
-
-```bash
-scripts/telegram-diagnose.sh --pause-launchd
-```
-
-If diagnostics report `HTTP 409 Conflict`, stop the competing `getUpdates` consumer and retry.
-
-## Codex / Claude Assisted Setup
-
-You can ask Codex CLI or Claude CLI to run this setup end-to-end using the same idempotent commands.
-
-### Codex prompt template
-
-From the `agent-chat` repo root, run Codex and provide:
-
-```text
-Read README.md and set up agent-chat for codex.
-Homebrew + tmux are required; if missing, let setup auto-install both.
-Use Python 3.11+ preflight checks.
-Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
-If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
-Unset AGENT_IMESSAGE_TO for telegram-only mode.
-Run:
-- python3 agent_chat_control_plane.py setup-notify-hook --agent codex --python-bin "$(command -v python3)"
-- python3 agent_chat_control_plane.py setup-launchd --agent codex --python-bin "$(command -v python3)"
-- python3 agent_chat_control_plane.py doctor --agent codex --json
-Then report updated files and health status.
-```
-
-### Claude prompt template
-
-From the same repo root, run Claude and provide:
-
-```text
-Read README.md and set up agent-chat for claude.
-Homebrew + tmux are required; if missing, let setup auto-install both.
-Use Python 3.11+ preflight checks.
-Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
-If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
-Unset AGENT_IMESSAGE_TO for telegram-only mode.
-Set CLAUDE_HOME if needed.
-Run:
-- python3 agent_chat_control_plane.py setup-notify-hook --agent claude --python-bin "$(command -v python3)"
-- python3 agent_chat_control_plane.py setup-launchd --agent claude --python-bin "$(command -v python3)"
-- python3 agent_chat_control_plane.py doctor --agent claude --json
-Then report updated files and health status.
-```
-
-## First-Run Failure Modes
-
-`setup-notify-hook` / `setup-launchd` exits with `Require Python 3.11+`:
-- On some macOS hosts, `python3` in `PATH` still points to Apple Python 3.9.
-- Use an explicit 3.11+ binary, then re-run setup:
-  - `PYTHON_BIN=/opt/homebrew/bin/python3.13` (or another installed 3.11+ path)
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-
-`setup-notify-hook` / `setup-launchd` exits with tmux/Homebrew guidance:
-- setup requires Homebrew + tmux; commands auto-install Homebrew first and then run `brew install tmux`.
-- If Homebrew or tmux install fails, run:
-  - install Homebrew (`https://brew.sh/`) and re-run setup, or
-  - install tmux manually and re-run setup.
-
-`doctor` says `notify hook is not configured...` or `unable to parse ~/.codex/config.toml`:
-- Re-run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-notify-hook --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN"`
-
-`setup-launchd` says shell can read `chat.db` but launchd cannot:
-- Grant Full Disk Access to `permission_app` shown by `doctor` (usually `~/Applications/AgentChatPython.app`).
-- Re-run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --skip-permissions`
-  - `"$PYTHON_BIN" agent_chat_control_plane.py doctor`
-- If this keeps repeating after Python upgrades/reinstalls, run:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
-  - This attempts to reset stale TCC Full Disk Access approval for the runtime bundle id and re-runs permission setup.
-
-`setup-launchd` keeps failing with shell/runtime readable but launchd still denied (even after granting FDA):
-- Cause can be stale TCC code requirements for `org.python.python` after Python upgrades/reinstalls.
-- Check for TCC mismatch signals:
-  - `/usr/bin/log show --style syslog --last 15m --predicate 'subsystem == "com.apple.TCC" && eventMessage CONTAINS "kTCCServiceSystemPolicyAllFiles" && eventMessage CONTAINS "org.python.python"'`
-  - look for: `Failed to match existing code requirement for subject org.python.python`
-- Reset stale approvals, then grant again in System Settings:
-  - `tccutil reset SystemPolicyAllFiles org.python.python`
-  - re-enable FDA for `~/Applications/AgentChatPython.app`
-  - re-run `setup-launchd` and `doctor`
-- Shortcut:
-  - `"$PYTHON_BIN" agent_chat_control_plane.py setup-launchd --recipient "$AGENT_IMESSAGE_TO" --python-bin "$PYTHON_BIN" --repair-tcc`
-
-`doctor` transiently shows `control-plane lock PID not alive` immediately after restart:
-- Wait 1-2 seconds and run `doctor` again.
-
-## Public Interfaces
-
-### CLI commands
-
-```bash
-# Unified control plane
-python3 agent_chat_control_plane.py run [--agent codex|claude|pi] [--poll 0.5] [--dry-run] [--trace]
-python3 agent_chat_control_plane.py once [--agent codex|claude|pi] [--dry-run] [--trace]
-python3 agent_chat_control_plane.py notify [--agent codex|claude|pi] [PAYLOAD_JSON] [--dry-run]
-python3 agent_chat_control_plane.py doctor [--agent codex|claude|pi] [--json]
-python3 agent_chat_control_plane.py setup-notify-hook [--agent codex|claude|pi] [--recipient TO] [--python-bin PATH]
-python3 agent_chat_control_plane.py setup-permissions [--agent codex|claude|pi] [--timeout 180] [--poll 1.0] [--no-open]
-python3 agent_chat_control_plane.py setup-launchd [--agent codex|claude|pi] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
-
-# Notify helper (best-effort)
-python3 agent_chat_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]
-python3 agent_chat_notify.py route [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
-
-# Installed console scripts
-agent-chat ...
-agent-chat-notify ...
-agent-chat-outbound ...
-agent-chat-reply ...
-```
-
-### Inbound command grammar (iMessage / Telegram)
-
-When inbound routing is enabled (from iMessage and/or Telegram), reply messages support:
-- `help`
-- `list`
-- `status @<session_ref>`
-- `@<session_ref> <instruction>`
-- `new <label>: <instruction>`
-
-If a target session cannot be resolved, control plane asks which runtime to use before creating a background session:
-- `1` / `codex`
-- `2` / `claude`
-- `cancel`
-
-Pending runtime-choice state is scoped as follows:
-- iMessage / non-threaded inbound: one global pending request (newest unresolved request replaces older state).
-- Telegram topic/thread inbound: one pending request per `chat_id:message_thread_id`.
-
-Telegram topic/thread routing behavior:
-- implicit replies in a bound Telegram topic resolve to the bound session before generic reply-context heuristics.
-- when a session is bound to a Telegram topic, outbound session updates are sent with `message_thread_id` so messages stay in that topic.
-- topic bindings are canonicalized as one-topic-per-session and one-session-per-topic; `telegram_thread_bindings` is authoritative when older per-session metadata disagrees.
-- when a session is not bound to any Telegram topic, outbound session updates default to the `#general` topic thread (id `1` by default), so sessions remain discoverable and can be rebound later via `@<session_id>`.
-
-### Important environment variables
-
-- `AGENT_IMESSAGE_TO`: destination phone number or Apple ID email (required for `imessage` / `both`)
-- `AGENT_CHAT_HOME`: runtime home directory for Codex state (defaults to `~/.codex`)
-- `CLAUDE_HOME`: runtime home directory for Claude state (defaults to `~/.claude`)
-- `AGENT_CHAT_PI_HOME` / `PI_CODING_AGENT_DIR`: runtime home directory for Pi state (defaults to `~/.pi/agent`)
-- `AGENT_CHAT_NOTIFY_MODE`: `send`, `state_only`, or `route`
-- `AGENT_CHAT_TRANSPORT`: legacy single transport selector (`imessage`, `telegram`, `discord`, or `both`)
-- `AGENT_CHAT_TRANSPORTS`: comma-separated transport list (`imessage,telegram,discord`)
-- `AGENT_TELEGRAM_BOT_TOKEN`: Telegram bot token (required when Telegram transport is enabled)
-- `AGENT_TELEGRAM_CHAT_ID`: Telegram chat ID to send to / accept inbound from (auto-detected during `setup-launchd` bootstrap when unset)
-- `AGENT_TELEGRAM_CHAT_IDS`: comma-separated allowlist for inbound chat IDs (optional; includes `AGENT_TELEGRAM_CHAT_ID` when set)
-- `AGENT_TELEGRAM_OWNER_USER_IDS`: comma-separated Telegram user IDs treated as owner senders for Telegram owner fallback routing (optional)
-- `AGENT_TELEGRAM_ACCEPT_ALL_CHATS`: accept inbound updates from any chat (`1` to enable; use only for diagnostics)
-- `AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID`: fallback Telegram topic thread id for sessions not bound to a topic (default `1` for `#general`; set `0` to disable fallback)
-- `AGENT_TELEGRAM_API_BASE`: Telegram API base URL override (optional; default `https://api.telegram.org`)
-- `AGENT_TELEGRAM_INBOUND_CURSOR`: Telegram inbound cursor path override
-- `AGENT_DISCORD_BOT_TOKEN`: Discord bot token (required when Discord transport is enabled)
-- `AGENT_DISCORD_CHANNEL_ID`: default Discord channel/thread id for outbound and inbound allowlisting
-- `AGENT_DISCORD_CHANNEL_IDS`: comma-separated allowlist of Discord channels/threads to poll
-- `AGENT_DISCORD_OWNER_USER_IDS`: comma-separated Discord user IDs treated as owner senders for fallback routing
-- `AGENT_DISCORD_INBOUND_CURSOR`: Discord inbound cursor path override
-- `AGENT_IMESSAGE_CHAT_DB`: override Messages database path (default `~/Library/Messages/chat.db`)
-- `AGENT_CHAT_QUEUE`: fallback queue JSONL path
-- `AGENT_IMESSAGE_MAX_LEN`: max outgoing message chunk size
-- `AGENT_CHAT_INBOUND_POLL_S`: control-plane polling interval for `run`
-- `AGENT_CHAT_STRICT_TMUX`: strict tmux routing mode (`1` default)
-  - strict mode still applies, except for existing sessions with no usable tmux pane mapping (`tmux_stale` no-pane class), which now fall back to `resume`.
-- `AGENT_CHAT_REQUIRE_SESSION_REF`: require explicit `@ref` for ambiguous replies
-- `AGENT_CHAT_TMUX_ACK_TIMEOUT_S`: tmux dispatch acknowledgement timeout
-- `AGENT_CHAT_ROUTE_VIA_TMUX`: route responses through tmux (`1` default)
-- `AGENT_CHAT_ENABLE_NEW_SESSION`: allow creating sessions from inbound messages (`1` default)
-- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`: prompt for runtime choice and then create when no session matches (`1` default)
-- `AGENT_CHAT_LAUNCHD_LABEL`: launchd service label used by `doctor`
-
-## Launchd
+## Launchd and Permissions
 
 Use:
 
@@ -529,6 +363,154 @@ If you are unsure which app to grant, use `doctor` as source of truth:
 Template for manual customization:
 - `examples/com.agent-chat.plist`
 
+## Validate a Live Roundtrip (Telegram)
+
+After setup succeeds, validate real routing in under a minute:
+
+1. In the target Telegram topic/group, send `list` to inspect active session refs.
+2. Send one explicit bind message: `@<session_ref> hello`.
+3. Expect a routed response in the same topic; this establishes topic/session mapping.
+4. Send plain text (for example `status @<session_ref>` or `continue`) in the same topic.
+5. If no response arrives, run:
+
+```bash
+scripts/telegram-diagnose.sh --pause-launchd
+```
+
+If diagnostics report `HTTP 409 Conflict`, stop the competing `getUpdates` consumer and retry.
+
+## Assisted Setup Prompts
+
+You can ask Codex CLI or Claude CLI to run this setup end-to-end using the same idempotent commands.
+
+### Codex prompt template
+
+From the `agent-chat` repo root, run Codex and provide:
+
+```text
+Read README.md and set up agent-chat for Codex.
+Homebrew + tmux are required; if missing, let setup auto-install both.
+Use Python 3.11+ preflight checks.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
+If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
+Unset AGENT_IMESSAGE_TO for telegram-only mode.
+Run:
+- python3 agent_chat_control_plane.py setup-notify-hook --agent codex --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py setup-launchd --agent codex --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py doctor --agent codex --json
+Then report updated files and health status.
+```
+
+### Claude prompt template
+
+From the same repo root, run Claude and provide:
+
+```text
+Read README.md and set up agent-chat for Claude.
+Homebrew + tmux are required; if missing, let setup auto-install both.
+Use Python 3.11+ preflight checks.
+Configure transport=telegram with AGENT_TELEGRAM_BOT_TOKEN from my environment.
+If AGENT_TELEGRAM_CHAT_ID is missing, run setup-launchd bootstrap flow and capture it from inbound group/topic message.
+Unset AGENT_IMESSAGE_TO for telegram-only mode.
+Set CLAUDE_HOME if needed.
+Run:
+- python3 agent_chat_control_plane.py setup-notify-hook --agent claude --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py setup-launchd --agent claude --python-bin "$(command -v python3)"
+- python3 agent_chat_control_plane.py doctor --agent claude --json
+Then report updated files and health status.
+```
+
+## Troubleshooting Shortcuts
+
+For detailed recovery steps, see `docs/troubleshooting.md`.
+
+Most first-run issues reduce to one of these:
+- Python from `PATH` is below `3.11`
+- Homebrew or tmux is missing
+- notify-hook config needs to be re-written
+- launchd has not been granted the right iMessage permissions target
+- Telegram/Discord bot setup is incomplete
+
+Recommended recovery loop:
+
+```bash
+python3 agent_chat_control_plane.py setup-notify-hook --agent "${AGENT_CHAT_AGENT:-codex}" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-launchd --agent "${AGENT_CHAT_AGENT:-codex}" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py doctor --json
+```
+
+If `doctor` still shows problems, jump to:
+- `docs/troubleshooting.md`
+- `docs/control-plane.md`
+- `docs/discord.md` for Discord-specific issues
+
+## Reference
+
+### CLI commands
+
+```bash
+# Unified control plane
+python3 agent_chat_control_plane.py run [--agent codex|claude|pi] [--poll 0.5] [--dry-run] [--trace]
+python3 agent_chat_control_plane.py once [--agent codex|claude|pi] [--dry-run] [--trace]
+python3 agent_chat_control_plane.py notify [--agent codex|claude|pi] [PAYLOAD_JSON] [--dry-run]
+python3 agent_chat_control_plane.py doctor [--agent codex|claude|pi] [--json]
+python3 agent_chat_control_plane.py setup-notify-hook [--agent codex|claude|pi] [--recipient TO] [--python-bin PATH]
+python3 agent_chat_control_plane.py setup-permissions [--agent codex|claude|pi] [--timeout 180] [--poll 1.0] [--no-open]
+python3 agent_chat_control_plane.py setup-launchd [--agent codex|claude|pi] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
+
+# Notify helper (best-effort)
+python3 agent_chat_notify.py attention [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run]
+python3 agent_chat_notify.py route [--cwd DIR] [--need TEXT] [--to RECIPIENT] [--dry-run] [PAYLOAD_JSON]
+
+# Installed console scripts
+agent-chat ...
+agent-chat-notify ...
+agent-chat-outbound ...
+agent-chat-reply ...
+```
+
+### Inbound commands and routing
+
+Common inbound commands:
+- `help`
+- `list`
+- `status @<session_ref>`
+- `@<session_ref> <instruction>`
+- `new <label>: <instruction>`
+
+When no target session can be resolved, agent-chat asks which runtime to create:
+- `1` / `codex`
+- `2` / `claude`
+- `3` / `pi`
+- `cancel`
+
+For the full routing contract, pending-choice scoping, Telegram topic behavior, and Discord session-channel behavior, see:
+- `docs/control-plane.md`
+- `docs/discord.md`
+
+### Important environment variables
+
+Most setups only need a small subset:
+- `AGENT_CHAT_AGENT`
+- `AGENT_CHAT_TRANSPORT` or `AGENT_CHAT_TRANSPORTS`
+- `AGENT_CHAT_HOME`
+- `AGENT_IMESSAGE_TO` for iMessage
+- `AGENT_TELEGRAM_BOT_TOKEN` and optionally `AGENT_TELEGRAM_CHAT_ID` for Telegram
+- `AGENT_DISCORD_BOT_TOKEN` and `AGENT_DISCORD_CONTROL_CHANNEL_ID` for Discord
+
+Frequently used advanced overrides:
+- `AGENT_CHAT_STRICT_TMUX`
+- `AGENT_CHAT_REQUIRE_SESSION_REF`
+- `AGENT_CHAT_TMUX_ACK_TIMEOUT_S`
+- `AGENT_CHAT_ROUTE_VIA_TMUX`
+- `AGENT_CHAT_ENABLE_NEW_SESSION`
+- `AGENT_CHAT_AUTO_CREATE_ON_MISSING`
+- `AGENT_CHAT_LAUNCHD_LABEL`
+
+For the full environment reference, see:
+- `docs/control-plane.md`
+- `docs/discord.md` for Discord-specific variables
+
 ## Cleanup / Uninstall
 
 To remove integration from a host machine (launchd + app bundle + hook wiring + runtime state), follow:
@@ -545,6 +527,7 @@ To remove integration from a host machine (launchd + app bundle + hook wiring + 
 - `docs/architecture.md`
 - `docs/cleanup.md`
 - `docs/control-plane.md`
+- `docs/discord.md`
 - `docs/exec-plans/README.md`
 - `docs/exec-plans/tech-debt-tracker.md`
 - `docs/security.md`

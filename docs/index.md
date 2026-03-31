@@ -16,6 +16,7 @@ docs/
 ├── index.md
 ├── architecture.md
 ├── control-plane.md
+├── discord.md
 ├── troubleshooting.md
 ├── cleanup.md
 ├── security.md
@@ -30,6 +31,7 @@ docs/
 
 - Runtime architecture: `docs/architecture.md`
 - Control-plane behavior and command surface: `docs/control-plane.md`
+- Discord setup and session/channel routing: `docs/discord.md`
 - Failure recovery and diagnosis: `docs/troubleshooting.md`
 - Host cleanup and uninstall flow: `docs/cleanup.md`
 - Security model and boundaries: `docs/security.md`

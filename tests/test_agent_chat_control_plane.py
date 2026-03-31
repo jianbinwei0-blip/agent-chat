@@ -1171,6 +1171,69 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertTrue(matches)
 
+    def test_tmux_discover_pi_pane_for_session_uses_session_id_even_when_current_command_is_node(self) -> None:
+        sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
+        rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
+        pane_listing = "\n".join([
+            "%11\tnode\t/",
+            "%12\tzsh\t/Users/jwei/Documents/agent-chat",
+        ])
+
+        with mock.patch(
+            "subprocess.run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout=pane_listing),
+                mock.Mock(returncode=0, stdout=f"... {sid} ..."),
+                mock.Mock(returncode=0, stdout="... no match ..."),
+            ],
+        ):
+            pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
+                session_rec=rec,
+                session_id=sid,
+                tmux_socket="/tmp/tmux-501/default",
+                agent="pi",
+            )
+
+        self.assertEqual(pane, "%11")
+        self.assertEqual(socket, "/tmp/tmux-501/default")
+
+    def test_tmux_pane_matches_pi_session_when_session_id_is_visible_even_if_command_is_node(self) -> None:
+        sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
+        rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
+        with (
+            mock.patch.object(cp, "_tmux_read_pane_context", return_value=("node", "/")),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=True),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%11",
+                session_rec=rec,
+                session_id=sid,
+                agent="pi",
+            )
+
+        self.assertTrue(matches)
+
+    def test_tmux_discover_pi_pane_for_session_uses_pi_screen_when_uuid_is_not_visible(self) -> None:
+        rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
+        pane_listing = "\n".join([
+            "%11\tnode\t/",
+            "%12\tzsh\t/Users/jwei/Documents/agent-chat",
+        ])
+
+        with (
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=pane_listing)),
+            mock.patch.object(cp, "_tmux_pane_looks_like_pi", side_effect=lambda **kwargs: kwargs.get("pane") == "%11"),
+        ):
+            pane, socket = cp._tmux_discover_codex_pane_for_session(  # type: ignore[attr-defined]
+                session_rec=rec,
+                session_id="ecd1dcd9-4763-49d7-b35e-bf744d5a11cc",
+                tmux_socket="/tmp/tmux-501/default",
+                agent="pi",
+            )
+
+        self.assertEqual(pane, "%11")
+        self.assertEqual(socket, "/tmp/tmux-501/default")
+
     def test_tmux_discover_codex_pane_for_session_uses_explicit_agent_not_runtime(self) -> None:
         rec = {"cwd": "/Users/testuser"}
         pane_listing = "\n".join(
@@ -2647,6 +2710,89 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 301)
         resolve_context_mock.assert_not_called()
         self.assertTrue(any(msg.get("session_id") == "sid-123" for msg in sent))
+
+    def test_lookup_session_by_discord_channel_id_prefers_session_metadata(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-discord": {
+                    "session_id": "sid-discord",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        sid = cp._lookup_session_by_discord_channel_id(  # type: ignore[attr-defined]
+            registry=registry,
+            channel_id="chan-123",
+        )
+
+        self.assertEqual(sid, "sid-discord")
+
+    def test_process_inbound_replies_implicit_discord_session_channel_resolves_target_from_session_metadata(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-discord": {
+                    "session_id": "sid-discord",
+                    "ref": "sid-disc",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "awaiting_input": False,
+                }
+            },
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                351: {
+                    "transport": "discord",
+                    "discord_channel_id": "chan-123",
+                    "discord_parent_channel_id": "chan-123",
+                    "discord_sender_user_id": "user-1",
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(351, "hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context") as resolve_context_mock,
+            mock.patch.object(cp, "_resolve_session_agent", return_value="pi"),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux", None)),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+            mock.patch.object(cp, "_discord_sender_is_owner", return_value=False),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="discord-recipient",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 351)
+        resolve_context_mock.assert_not_called()
+        self.assertTrue(any(msg.get("session_id") == "sid-discord" for msg in sent))
 
     def test_process_inbound_replies_implicit_telegram_infers_single_bound_thread_when_missing(self) -> None:
         registry: dict[str, object] = {
@@ -5856,7 +6002,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         setup_mock.assert_not_called()
-        self.assertIn("chat.db permission check: not required for telegram-only transport", out.getvalue())
+        self.assertIn("chat.db permission check: not required when iMessage transport is disabled.", out.getvalue())
 
     def test_run_setup_launchd_fails_when_bootstrap_cannot_resolve_telegram_chat_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:

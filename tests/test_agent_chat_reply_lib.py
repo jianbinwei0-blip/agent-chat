@@ -70,6 +70,24 @@ class TestAgentChatReplyBridge(unittest.TestCase):
         submit_keys = [run_mock.call_args_list[1].args[0][-1], run_mock.call_args_list[2].args[0][-1]]
         self.assertEqual(submit_keys, ["C-m", "Enter"])
 
+    def test_read_last_user_text_from_session_supports_pi_message_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            session_path = Path(td) / "pi-session.jsonl"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        '{"type":"session","id":"pi-sid","cwd":"/tmp/project"}',
+                        '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello from discord"}]}}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = bridge._read_last_user_text_from_session(session_path)  # type: ignore[attr-defined]
+
+        self.assertEqual(result, "hello from discord")
+
     def test_handle_prompt_dry_run_prints_command(self) -> None:
         stdout = io.StringIO()
         with mock.patch("sys.stdout", stdout):

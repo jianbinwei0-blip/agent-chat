@@ -30,3 +30,4 @@ htmlcov/
 # Local logs/runtime artifacts
 *.log
 tmp/
+.pi/

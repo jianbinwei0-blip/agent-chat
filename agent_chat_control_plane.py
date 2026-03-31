@@ -596,10 +596,21 @@ def _notify_hook_env_prefix(*, recipient: str, agent: str) -> str:
             items.append(f"AGENT_DISCORD_BOT_TOKEN={shlex.quote(token)}")
         if channel_id:
             items.append(f"AGENT_DISCORD_CHANNEL_ID={shlex.quote(channel_id)}")
+        control_channel_raw = os.environ.get("AGENT_DISCORD_CONTROL_CHANNEL_ID", "")
+        session_category_raw = os.environ.get("AGENT_DISCORD_SESSION_CATEGORY_ID", "")
+        session_prefix_raw = os.environ.get("AGENT_DISCORD_SESSION_CHANNEL_PREFIX", "")
         if isinstance(channel_ids_raw, str) and channel_ids_raw.strip():
             items.append(f"AGENT_DISCORD_CHANNEL_IDS={shlex.quote(channel_ids_raw.strip())}")
         if isinstance(owner_ids_raw, str) and owner_ids_raw.strip():
             items.append(f"AGENT_DISCORD_OWNER_USER_IDS={shlex.quote(owner_ids_raw.strip())}")
+        if _discord_session_channels_enabled():
+            items.append("AGENT_DISCORD_SESSION_CHANNELS=1")
+        if isinstance(control_channel_raw, str) and control_channel_raw.strip():
+            items.append(f"AGENT_DISCORD_CONTROL_CHANNEL_ID={shlex.quote(control_channel_raw.strip())}")
+        if isinstance(session_category_raw, str) and session_category_raw.strip():
+            items.append(f"AGENT_DISCORD_SESSION_CATEGORY_ID={shlex.quote(session_category_raw.strip())}")
+        if isinstance(session_prefix_raw, str) and session_prefix_raw.strip():
+            items.append(f"AGENT_DISCORD_SESSION_CHANNEL_PREFIX={shlex.quote(session_prefix_raw.strip())}")
 
     return " ".join(items)
 
@@ -1441,6 +1452,41 @@ def _discord_channel_ids() -> list[str]:
     return values
 
 
+def _discord_session_channels_enabled() -> bool:
+    return _env_enabled("AGENT_DISCORD_SESSION_CHANNELS", default=False)
+
+
+def _discord_control_channel_id() -> str | None:
+    raw = os.environ.get("AGENT_DISCORD_CONTROL_CHANNEL_ID", "")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return _discord_channel_id()
+
+
+def _discord_control_channel_ids() -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    primary = _discord_control_channel_id()
+    if isinstance(primary, str) and primary.strip():
+        seen.add(primary.strip())
+        values.append(primary.strip())
+    for channel_id in _discord_channel_ids():
+        if channel_id not in seen:
+            seen.add(channel_id)
+            values.append(channel_id)
+    return values
+
+
+def _discord_session_category_id() -> str | None:
+    raw = os.environ.get("AGENT_DISCORD_SESSION_CATEGORY_ID", "")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _discord_session_channel_prefix() -> str | None:
+    raw = os.environ.get("AGENT_DISCORD_SESSION_CHANNEL_PREFIX", "")
+    return raw.strip().lower() if isinstance(raw, str) and raw.strip() else None
+
+
 def _discord_owner_user_ids() -> set[str]:
     owners: set[str] = set()
     raw_multi = os.environ.get("AGENT_DISCORD_OWNER_USER_IDS", "")
@@ -1532,6 +1578,209 @@ def _discord_bot_user_id(*, token: str, codex_home: Path) -> str | None:
     return user_id.strip()
 
 
+def _discord_get_channel(*, token: str, channel_id: str) -> dict[str, Any] | None:
+    channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
+    if not channel_text:
+        return None
+    parsed = _discord_request(token=token, path=f"channels/{channel_text}")
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _discord_sanitize_channel_name(*, value: str) -> str:
+    raw = value.strip().lower() if isinstance(value, str) else ""
+    raw = re.sub(r"[^a-z0-9-]+", "-", raw)
+    raw = re.sub(r"-+", "-", raw).strip("-")
+    if not raw:
+        raw = "session"
+    return raw[:90].rstrip("-") or "session"
+
+
+def _discord_session_channel_name(*, registry: dict[str, Any], session_id: str) -> str:
+    sid = session_id.strip()
+    sessions = registry.get("sessions") if isinstance(registry.get("sessions"), dict) else {}
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    alias = rec.get("alias") if isinstance(rec, dict) and isinstance(rec.get("alias"), str) else None
+    cwd = rec.get("cwd") if isinstance(rec, dict) and isinstance(rec.get("cwd"), str) else None
+    agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec, dict) and isinstance(rec.get("agent"), str) else None)
+
+    label = alias.strip() if isinstance(alias, str) and alias.strip() else ""
+    if not label and isinstance(cwd, str) and cwd.strip():
+        label = Path(cwd.strip()).name or "session"
+    if not label:
+        label = "session"
+
+    pieces: list[str] = []
+    prefix = _discord_session_channel_prefix()
+    if isinstance(prefix, str) and prefix.strip():
+        pieces.append(prefix.strip())
+    pieces.extend([agent, label, _session_ref(sid)])
+    return _discord_sanitize_channel_name(value="-".join(piece for piece in pieces if piece))
+
+
+def _discord_create_text_channel(
+    *,
+    token: str,
+    guild_id: str,
+    name: str,
+    parent_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    guild_text = guild_id.strip() if isinstance(guild_id, str) else ""
+    channel_name = _discord_sanitize_channel_name(value=name)
+    if not guild_text or not channel_name:
+        return None, None
+    payload: dict[str, Any] = {"name": channel_name, "type": 0}
+    if isinstance(parent_id, str) and parent_id.strip():
+        payload["parent_id"] = parent_id.strip()
+    parsed = _discord_request(
+        token=token,
+        path=f"guilds/{guild_text}/channels",
+        method="POST",
+        data=payload,
+    )
+    if not isinstance(parsed, dict):
+        _warn_stderr(
+            "[agent-chat] Discord session channel create failed. "
+            "Check bot permissions (Manage Channels) and category access."
+        )
+        return None, None
+    channel_id = parsed.get("id") if isinstance(parsed.get("id"), str) else None
+    created_name = parsed.get("name") if isinstance(parsed.get("name"), str) else channel_name
+    if not isinstance(channel_id, str) or not channel_id.strip():
+        _warn_stderr(
+            "[agent-chat] Discord session channel create returned no channel id. "
+            "Check bot permissions (Manage Channels) and category access."
+        )
+        return None, None
+    return channel_id.strip(), created_name
+
+
+def _discord_store_session_channel_metadata(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    channel_id: str,
+    channel_name: str | None,
+    parent_id: str | None = None,
+    guild_id: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {"discord_channel_id": channel_id.strip()}
+    if isinstance(channel_name, str) and channel_name.strip():
+        fields["discord_channel_name"] = channel_name.strip()
+    if isinstance(parent_id, str) and parent_id.strip():
+        fields["discord_channel_parent_id"] = parent_id.strip()
+    if isinstance(guild_id, str) and guild_id.strip():
+        fields["discord_guild_id"] = guild_id.strip()
+    _upsert_session(registry=registry, session_id=session_id, fields=fields)
+
+
+def _discord_session_channel_for_session(*, registry: dict[str, Any], session_id: str | None) -> str | None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return None
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    channel_id = rec.get("discord_channel_id")
+    if isinstance(channel_id, str) and channel_id.strip():
+        return channel_id.strip()
+    return None
+
+
+def _lookup_session_by_discord_channel_id(*, registry: dict[str, Any], channel_id: str | None) -> str | None:
+    channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
+    if not channel_text or _discord_is_control_channel(channel_id=channel_text):
+        return None
+    sessions = registry.get("sessions")
+    if isinstance(sessions, dict):
+        for sid, rec in sessions.items():
+            if not isinstance(sid, str) or not isinstance(rec, dict):
+                continue
+            bound_channel_id = rec.get("discord_channel_id")
+            if isinstance(bound_channel_id, str) and bound_channel_id.strip() == channel_text:
+                return sid
+    return _lookup_session_by_conversation(
+        registry=registry,
+        transport="discord",
+        channel_id=channel_text,
+        thread_id=0,
+    )
+
+
+def _discord_is_control_channel(*, channel_id: str | None) -> bool:
+    channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
+    if not channel_text:
+        return False
+    return channel_text in set(_discord_control_channel_ids())
+
+
+def _should_bind_discord_context(*, channel_id: str | None, thread_id: str | None) -> bool:
+    if isinstance(thread_id, str) and thread_id.strip():
+        return True
+    if _discord_session_channels_enabled() and _discord_is_control_channel(channel_id=channel_id):
+        return False
+    return True
+
+
+def _discord_ensure_session_channel(
+    *,
+    codex_home: Path,
+    registry: dict[str, Any],
+    session_id: str,
+) -> tuple[str | None, str | None]:
+    sid = session_id.strip()
+    if not sid:
+        return None, None
+    existing = _discord_session_channel_for_session(registry=registry, session_id=sid)
+    if isinstance(existing, str) and existing.strip() and not _discord_is_control_channel(channel_id=existing):
+        return existing.strip(), None
+
+    token = _discord_bot_token()
+    control_channel_id = _discord_control_channel_id()
+    if not isinstance(token, str) or not token.strip() or not isinstance(control_channel_id, str) or not control_channel_id.strip():
+        return None, None
+
+    control_channel = _discord_get_channel(token=token.strip(), channel_id=control_channel_id.strip())
+    if not isinstance(control_channel, dict):
+        _warn_stderr("[agent-chat] Discord control channel lookup failed; cannot create session channel.")
+        return None, None
+    guild_id = control_channel.get("guild_id") if isinstance(control_channel.get("guild_id"), str) else None
+    if not isinstance(guild_id, str) or not guild_id.strip():
+        return None, None
+
+    parent_id = _discord_session_category_id()
+    if not isinstance(parent_id, str) or not parent_id.strip():
+        parent_id = control_channel.get("parent_id") if isinstance(control_channel.get("parent_id"), str) else None
+
+    channel_name = _discord_session_channel_name(registry=registry, session_id=sid)
+    created_channel_id, created_name = _discord_create_text_channel(
+        token=token.strip(),
+        guild_id=guild_id.strip(),
+        name=channel_name,
+        parent_id=parent_id,
+    )
+    if not isinstance(created_channel_id, str) or not created_channel_id.strip():
+        return None, None
+
+    _bind_conversation_to_session(
+        registry=registry,
+        transport="discord",
+        channel_id=created_channel_id.strip(),
+        thread_id=None,
+        session_id=sid,
+    )
+    _discord_store_session_channel_metadata(
+        registry=registry,
+        session_id=sid,
+        channel_id=created_channel_id.strip(),
+        channel_name=created_name,
+        parent_id=parent_id,
+        guild_id=guild_id,
+    )
+    _save_registry(codex_home=codex_home, registry=registry)
+    return created_channel_id.strip(), created_name
+
+
 def _send_discord_message(*, token: str, channel_id: str, message: str) -> bool:
     channel_text = channel_id.strip() if isinstance(channel_id, str) else ""
     if not channel_text:
@@ -1568,7 +1817,7 @@ def _fetch_discord_active_thread_ids(*, token: str, channel_id: str) -> list[str
 def _discord_poll_channel_ids(*, registry: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
-    for channel_id in _discord_channel_ids():
+    for channel_id in _discord_control_channel_ids():
         if channel_id not in seen:
             seen.add(channel_id)
             out.append(channel_id)
@@ -2530,6 +2779,10 @@ def _build_launchagent_plist(
         "AGENT_DISCORD_CHANNEL_IDS",
         "AGENT_DISCORD_OWNER_USER_IDS",
         "AGENT_DISCORD_INBOUND_CURSOR",
+        "AGENT_DISCORD_CONTROL_CHANNEL_ID",
+        "AGENT_DISCORD_SESSION_CHANNELS",
+        "AGENT_DISCORD_SESSION_CATEGORY_ID",
+        "AGENT_DISCORD_SESSION_CHANNEL_PREFIX",
     )
     for key in passthrough:
         raw = os.environ.get(key)
@@ -2974,7 +3227,7 @@ def _run_setup_launchd(
         )
     else:
         sys.stdout.write(
-            "chat.db permission check: not required for telegram-only transport.\n"
+            "chat.db permission check: not required when iMessage transport is disabled.\n"
         )
     return 0
 
@@ -3085,6 +3338,9 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
     telegram_token_present = bool(_telegram_bot_token())
     discord_channel_id = _discord_channel_id()
     discord_channel_ids = _discord_channel_ids()
+    discord_control_channel_id = _discord_control_channel_id()
+    discord_session_channels = _discord_session_channels_enabled()
+    discord_session_category_id = _discord_session_category_id()
     discord_token_present = bool(_discord_bot_token())
     launchd_label = os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL).strip() or _DEFAULT_LAUNCHD_LABEL
     launchd_loaded, launchd_detail = _launchd_service_loaded(label=launchd_label)
@@ -3222,6 +3478,9 @@ def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]
             "telegram_token_present": telegram_token_present,
             "discord_channel_id": discord_channel_id,
             "discord_channel_ids": discord_channel_ids,
+            "discord_control_channel_id": discord_control_channel_id,
+            "discord_session_channels": discord_session_channels,
+            "discord_session_category_id": discord_session_category_id,
             "discord_token_present": discord_token_present,
         },
         "launchd": {
@@ -3311,6 +3570,14 @@ def _run_doctor(*, codex_home: Path, recipient: str | None, as_json: bool) -> in
             rendered_channel_ids = ", ".join(str(item).strip() for item in discord_channel_ids if str(item).strip())
             if rendered_channel_ids:
                 sys.stdout.write(f"Discord inbound channels: {rendered_channel_ids}\n")
+        discord_control_channel_id = transport.get("discord_control_channel_id")
+        if isinstance(discord_control_channel_id, str) and discord_control_channel_id.strip():
+            sys.stdout.write(f"Discord control channel: {discord_control_channel_id.strip()}\n")
+        if bool(transport.get("discord_session_channels")):
+            sys.stdout.write("Discord session channels: enabled\n")
+            discord_session_category_id = transport.get("discord_session_category_id")
+            if isinstance(discord_session_category_id, str) and discord_session_category_id.strip():
+                sys.stdout.write(f"Discord session category: {discord_session_category_id.strip()}\n")
         sys.stdout.write(
             f"Discord token: {'configured' if bool(transport.get('discord_token_present')) else 'missing'}\n"
         )
@@ -4529,6 +4796,10 @@ def _discord_target_channel_id_for_session(*, registry: dict[str, Any], session_
     if not sid:
         return None
 
+    direct = _discord_session_channel_for_session(registry=registry, session_id=sid)
+    if isinstance(direct, str) and direct.strip() and not _discord_is_control_channel(channel_id=direct):
+        return direct.strip()
+
     bindings = registry.get("conversation_bindings")
     if isinstance(bindings, dict):
         for conv_key, bound_sid in bindings.items():
@@ -4540,13 +4811,16 @@ def _discord_target_channel_id_for_session(*, registry: dict[str, Any], session_
             thread_text = thread_raw.strip()
             if thread_text and thread_text != "0":
                 return thread_text
-            if channel_id.strip():
+            if channel_id.strip() and not _discord_is_control_channel(channel_id=channel_id.strip()):
                 return channel_id.strip()
 
     sessions = registry.get("sessions")
     rec = sessions.get(sid) if isinstance(sessions, dict) else None
     if not isinstance(rec, dict):
         return None
+    channel_id = rec.get("discord_channel_id")
+    if isinstance(channel_id, str) and channel_id.strip() and not _discord_is_control_channel(channel_id=channel_id.strip()):
+        return channel_id.strip()
     bindings_rec = rec.get("bindings") if isinstance(rec.get("bindings"), dict) else None
     discord_binding = bindings_rec.get("discord") if isinstance(bindings_rec, dict) and isinstance(bindings_rec.get("discord"), dict) else None
     if isinstance(discord_binding, dict):
@@ -5057,6 +5331,7 @@ def _send_structured(
     telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
     discord_channel_id: str | None = None,
+    registry: dict[str, Any] | None = None,
 ) -> None:
     normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
     sid = session_id or "unknown"
@@ -5066,18 +5341,30 @@ def _send_structured(
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
     resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
     resolved_discord_channel_id = discord_channel_id.strip() if isinstance(discord_channel_id, str) and discord_channel_id.strip() else None
+    active_registry = registry if isinstance(registry, dict) else None
     if isinstance(session_id, str) and session_id.strip() and (
         resolved_thread_id is None or resolved_chat_id is None or resolved_discord_channel_id is None
     ):
-        registry = _load_registry(codex_home=codex_home)
+        if active_registry is None:
+            active_registry = _load_registry(codex_home=codex_home)
+        if active_registry is None:
+            active_registry = {}
         if resolved_thread_id is None:
-            resolved_thread_id = _telegram_thread_id_for_session(registry=registry, session_id=session_id)
+            resolved_thread_id = _telegram_thread_id_for_session(registry=active_registry, session_id=session_id)
         if resolved_chat_id is None:
-            resolved_chat_id = _telegram_chat_id_for_session(registry=registry, session_id=session_id)
+            resolved_chat_id = _telegram_chat_id_for_session(registry=active_registry, session_id=session_id)
         if resolved_chat_id is None:
-            resolved_chat_id = _infer_single_telegram_chat_id_from_registry(registry=registry)
+            resolved_chat_id = _infer_single_telegram_chat_id_from_registry(registry=active_registry)
         if resolved_discord_channel_id is None:
-            resolved_discord_channel_id = _discord_target_channel_id_for_session(registry=registry, session_id=session_id)
+            resolved_discord_channel_id = _discord_target_channel_id_for_session(registry=active_registry, session_id=session_id)
+        if resolved_discord_channel_id is None and _discord_session_channels_enabled():
+            created_channel_id, _ = _discord_ensure_session_channel(
+                codex_home=codex_home,
+                registry=active_registry,
+                session_id=session_id,
+            )
+            if isinstance(created_channel_id, str) and created_channel_id.strip():
+                resolved_discord_channel_id = created_channel_id.strip()
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -5243,6 +5530,7 @@ def _process_session_file(
                             max_message_chars=max_message_chars,
                             dry_run=dry_run,
                             message_index=message_index,
+                            registry=registry,
                         )
 
                         session_fields: dict[str, Any] = {
@@ -5313,35 +5601,54 @@ def _process_session_file(
                     continue
 
                 sessions = registry.get("sessions")
-                if not isinstance(sessions, dict):
-                    continue
-                rec = sessions.get(sid)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("pending_completion") is not True:
-                    continue
+                rec = sessions.get(sid) if isinstance(sessions, dict) else None
+                pending_completion = isinstance(rec, dict) and rec.get("pending_completion") is True
+                should_emit_update = _transport_discord_enabled() and _discord_session_channels_enabled()
 
-                _send_structured(
-                    codex_home=codex_home,
-                    recipient=recipient,
-                    session_id=sid,
-                    kind="responded",
-                    text=text,
-                    max_message_chars=max_message_chars,
-                    dry_run=dry_run,
-                    message_index=message_index,
-                )
+                if pending_completion:
+                    _send_structured(
+                        codex_home=codex_home,
+                        recipient=recipient,
+                        session_id=sid,
+                        kind="responded",
+                        text=text,
+                        max_message_chars=max_message_chars,
+                        dry_run=dry_run,
+                        message_index=message_index,
+                        agent=session_agent,
+                        registry=registry,
+                    )
 
-                _upsert_session(
-                    registry=registry,
-                    session_id=sid,
-                    fields={
-                        "awaiting_input": False,
-                        "pending_completion": False,
-                        "last_response_ts": int(time.time()),
-                        "pending_request_user_input": None,
-                    },
-                )
+                    _upsert_session(
+                        registry=registry,
+                        session_id=sid,
+                        fields={
+                            "awaiting_input": False,
+                            "pending_completion": False,
+                            "last_response_ts": int(time.time()),
+                            "pending_request_user_input": None,
+                        },
+                    )
+                elif should_emit_update:
+                    _send_structured(
+                        codex_home=codex_home,
+                        recipient=recipient,
+                        session_id=sid,
+                        kind="update",
+                        text=text,
+                        max_message_chars=max_message_chars,
+                        dry_run=dry_run,
+                        message_index=message_index,
+                        agent=session_agent,
+                        registry=registry,
+                    )
+                    _upsert_session(
+                        registry=registry,
+                        session_id=sid,
+                        fields={
+                            "last_response_ts": int(time.time()),
+                        },
+                    )
 
         return offset
     except Exception:
@@ -6248,19 +6555,31 @@ def _tmux_pane_matches_session(
     agent: str | None = None,
 ) -> bool:
     command, pane_path = _tmux_read_pane_context(pane=pane, tmux_socket=tmux_socket)
-    if not (isinstance(command, str) and _is_agent_command(command, agent=agent)):
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else None)
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    pane_mentions_sid = False
+    if sid:
+        pane_mentions_sid = _tmux_pane_mentions_session_id(
+            pane=pane,
+            session_id=sid,
+            tmux_socket=tmux_socket,
+        )
+
+    if not (isinstance(command, str) and _is_agent_command(command, agent=normalized_agent)):
+        if normalized_agent == "pi" and pane_mentions_sid:
+            return True
+        if normalized_agent == "pi" and isinstance(command, str) and command.strip().lower() in {"node", "pi"} and _tmux_pane_looks_like_pi(pane=pane, tmux_socket=tmux_socket):
+            return True
         return False
+
+    if normalized_agent == "pi" and (pane_mentions_sid or _tmux_pane_looks_like_pi(pane=pane, tmux_socket=tmux_socket)):
+        return True
 
     rec_cwd = session_rec.get("cwd") if isinstance(session_rec.get("cwd"), str) else None
     target_cwd = _normalize_path_for_match(rec_cwd)
     if not target_cwd:
-        sid = session_id.strip() if isinstance(session_id, str) else ""
         if sid:
-            return _tmux_pane_mentions_session_id(
-                pane=pane,
-                session_id=sid,
-                tmux_socket=tmux_socket,
-            )
+            return pane_mentions_sid
         return True
 
     pane_path_norm = _normalize_path_for_match(pane_path)
@@ -6327,6 +6646,44 @@ def _tmux_pane_mentions_session_id(
     if not haystack:
         return False
     return sid in haystack
+
+
+def _tmux_pane_looks_like_pi(
+    *,
+    pane: str,
+    tmux_socket: str | None = None,
+) -> bool:
+    target = pane.strip()
+    if not target:
+        return False
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "capture-pane",
+                "-p",
+                "-t",
+                target,
+                "-S",
+                "-80",
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    haystack = (proc.stdout or "").lower()
+    if not haystack:
+        return False
+    return (
+        "pi v" in haystack
+        or "pi can explain its own features" in haystack
+        or "[skills]" in haystack and "[extensions]" in haystack
+    )
 
 
 def _tmux_latest_session_id_from_pane(
@@ -6430,6 +6787,8 @@ def _tmux_discover_codex_pane_for_session(
     if proc.returncode != 0:
         return None, None
 
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else None)
+    all_panes: list[tuple[str, str, str]] = []
     candidates: list[tuple[str, str]] = []
     for raw in proc.stdout.splitlines():
         parts = raw.split("\t")
@@ -6440,9 +6799,28 @@ def _tmux_discover_codex_pane_for_session(
         current_path = parts[2].strip()
         if not pane_id:
             continue
+        all_panes.append((pane_id, current_cmd, current_path))
         if not _is_agent_command(current_cmd, agent=agent):
             continue
         candidates.append((pane_id, current_path))
+
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if normalized_agent == "pi":
+        if sid:
+            sid_matches = _tmux_filter_panes_by_session_id(
+                pane_ids=[pane_id for pane_id, _, _ in all_panes],
+                session_id=sid,
+                tmux_socket=tmux_socket,
+            )
+            if len(sid_matches) == 1:
+                return sid_matches[0], _normalize_tmux_socket(tmux_socket=tmux_socket)
+        pi_panes = [
+            pane_id
+            for pane_id, current_cmd, _ in all_panes
+            if current_cmd in {"node", "pi"} and _tmux_pane_looks_like_pi(pane=pane_id, tmux_socket=tmux_socket)
+        ]
+        if len(pi_panes) == 1:
+            return pi_panes[0], _normalize_tmux_socket(tmux_socket=tmux_socket)
 
     if not candidates:
         return None, None
@@ -7707,6 +8085,14 @@ def _process_inbound_replies(
                     if re.match(r"^[A-Za-z0-9._-]+$", alias):
                         _set_alias(registry=registry, session_id=sid, label=alias)
 
+                session_channel_id: str | None = None
+                if row_transport == "discord" and _discord_session_channels_enabled():
+                    session_channel_id, _ = _discord_ensure_session_channel(
+                        codex_home=codex_home,
+                        registry=registry,
+                        session_id=sid,
+                    )
+
                 if row_thread_key and row_transport == "telegram":
                     _bind_telegram_thread_to_session(
                         registry=registry,
@@ -7714,7 +8100,10 @@ def _process_inbound_replies(
                         message_thread_id=row_telegram_thread_id,
                         session_id=sid,
                     )
-                elif row_transport == "discord" and row_context_channel_id:
+                elif row_transport == "discord" and row_context_channel_id and _should_bind_discord_context(
+                    channel_id=row_context_channel_id,
+                    thread_id=row_context_thread_id,
+                ):
                     _bind_conversation_to_session(
                         registry=registry,
                         transport="discord",
@@ -7739,6 +8128,8 @@ def _process_inbound_replies(
                         f"Started new {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
                         "without tmux."
                     )
+                if isinstance(session_channel_id, str) and session_channel_id.strip() and not _discord_is_control_channel(channel_id=session_channel_id):
+                    text_out += f" Session channel: <#{session_channel_id.strip()}>."
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
@@ -7882,12 +8273,24 @@ def _process_inbound_replies(
             if label:
                 _set_alias(registry=registry, session_id=sid, label=label)
 
+            session_channel_id: str | None = None
+            if row_transport == "discord" and _discord_session_channels_enabled():
+                session_channel_id, _ = _discord_ensure_session_channel(
+                    codex_home=codex_home,
+                    registry=registry,
+                    session_id=sid,
+                )
+
+            created_text = f"Created session @{_session_ref(sid)} ({label})."
+            if isinstance(session_channel_id, str) and session_channel_id.strip() and not _discord_is_control_channel(channel_id=session_channel_id):
+                created_text += f" Session channel: <#{session_channel_id.strip()}>."
+
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=sid,
                 kind="accepted",
-                text=f"Created session @{_session_ref(sid)} ({label}).",
+                text=created_text,
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -7959,13 +8362,18 @@ def _process_inbound_replies(
                 if isinstance(rebound_sid, str) and rebound_sid.strip():
                     target_sid = rebound_sid.strip()
                     err = None
-            if not target_sid and row_transport == "discord" and row_context_channel_id:
-                bound_sid = _lookup_session_by_conversation(
+            if not target_sid and row_transport == "discord":
+                bound_sid = _lookup_session_by_discord_channel_id(
                     registry=registry,
-                    transport="discord",
-                    channel_id=row_context_channel_id,
-                    thread_id=row_context_thread_id,
+                    channel_id=row_discord_channel_id,
                 )
+                if not bound_sid and row_context_channel_id:
+                    bound_sid = _lookup_session_by_conversation(
+                        registry=registry,
+                        transport="discord",
+                        channel_id=row_context_channel_id,
+                        thread_id=row_context_thread_id,
+                    )
                 if isinstance(bound_sid, str) and bound_sid.strip():
                     target_sid = bound_sid.strip()
                     err = None
@@ -7992,14 +8400,19 @@ def _process_inbound_replies(
                         registry=registry,
                         chat_id=row_telegram_chat_id,
                     )
-            elif action == "implicit" and row_transport == "discord" and row_context_channel_id:
-                target_sid = _lookup_session_by_conversation(
+            elif action == "implicit" and row_transport == "discord":
+                target_sid = _lookup_session_by_discord_channel_id(
                     registry=registry,
-                    transport="discord",
-                    channel_id=row_context_channel_id,
-                    thread_id=row_context_thread_id,
+                    channel_id=row_discord_channel_id,
                 )
-                if not target_sid and _discord_sender_is_owner(sender_user_id=row_discord_sender_user_id):
+                if not target_sid and row_context_channel_id:
+                    target_sid = _lookup_session_by_conversation(
+                        registry=registry,
+                        transport="discord",
+                        channel_id=row_context_channel_id,
+                        thread_id=row_context_thread_id,
+                    )
+                if not target_sid and row_context_channel_id and _discord_sender_is_owner(sender_user_id=row_discord_sender_user_id):
                     target_sid = _lookup_session_by_conversation(
                         registry=registry,
                         transport="discord",
@@ -8120,7 +8533,10 @@ def _process_inbound_replies(
                 message_thread_id=row_telegram_thread_id,
                 session_id=target_sid,
             )
-        elif row_transport == "discord" and row_context_channel_id:
+        elif row_transport == "discord" and row_context_channel_id and _should_bind_discord_context(
+            channel_id=row_context_channel_id,
+            thread_id=row_context_thread_id,
+        ):
             _bind_conversation_to_session(
                 registry=registry,
                 transport="discord",
@@ -8910,7 +9326,11 @@ def main(argv: list[str]) -> int:
         )
         return 0
 
-    if not recipient and not _transport_telegram_enabled(mode=transport_mode):
+    if (
+        not recipient
+        and not _transport_telegram_enabled(mode=transport_mode)
+        and not _transport_discord_enabled(mode=transport_mode)
+    ):
         return 0
 
     lock_handle = _acquire_single_instance_lock(codex_home=codex_home)

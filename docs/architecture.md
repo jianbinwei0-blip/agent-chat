@@ -4,7 +4,7 @@
 
 `agent-chat` is a local macOS-first runtime that synchronizes:
 - outbound Codex/Claude notifications plus Pi session activity -> iMessage, Telegram, and/or Discord
-- inbound iMessage, Telegram, and Discord replies -> Codex/Claude/Pi sessions
+- inbound iMessage, Telegram, and Discord control/session-channel replies -> Codex/Claude/Pi sessions
 
 The primary daemon is `agent_chat_control_plane.py`, which consolidates behavior that historically lived in separate outbound/reply bridges.
 
@@ -52,10 +52,11 @@ Inbound reads default to:
 
 1. Codex or Claude emits a notify payload.
 2. Runtime ingests payload via `notify` path and updates attention/session metadata.
-3. Outbound messages are sent through iMessage and/or Telegram depending on transport mode.
-4. Inbound replies are polled from iMessage `chat.db` and Telegram updates.
-5. Routing selects a target session using explicit `@ref`, reply linkage, and registry context.
-6. Dispatch proceeds via tmux + agent resume paths according to routing flags.
+3. Outbound messages are sent through the enabled transport set; Discord session-channel mode can lazily auto-create and bind one channel per session.
+4. Inbound replies are polled from iMessage `chat.db`, Telegram updates, and Discord control/session channels.
+5. Routing selects a target session using explicit `@ref`, reply linkage, registry context, and Discord session-channel metadata.
+6. In Discord session-channel mode, the control channel remains unbound while each session channel is treated as a stable one-session-to-one-channel mapping.
+7. Dispatch proceeds via tmux + agent resume paths according to routing flags.
 
 ## Routing Semantics
 
@@ -74,6 +75,14 @@ Key controls:
 - `AGENT_CHAT_ROUTE_VIA_TMUX`
 - `AGENT_CHAT_ENABLE_NEW_SESSION`
 - `AGENT_CHAT_AUTO_CREATE_ON_MISSING`
+- `AGENT_DISCORD_CONTROL_CHANNEL_ID`
+- `AGENT_DISCORD_SESSION_CHANNELS`
+- `AGENT_DISCORD_SESSION_CATEGORY_ID`
+
+Discord-specific setup requirements:
+- enable **Message Content Intent** for the bot so plain-text inbound messages are visible
+- grant control-channel access for command polling
+- grant `Manage Channels` when using auto-created session channels
 
 ## Operational Model
 

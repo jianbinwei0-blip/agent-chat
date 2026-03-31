@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -72,6 +73,189 @@ class TestMultiAgentExpansion(unittest.TestCase):
         self.assertEqual(sent[0][0], "discord-token")
         self.assertEqual(sent[0][1], "thread-9")
         self.assertIn("hello discord", sent[0][2])
+
+    def test_send_structured_auto_creates_discord_session_channel_when_enabled(self) -> None:
+        sent: list[tuple[str, str, str]] = []
+        registry = {
+            "sessions": {
+                "pi-sid": {
+                    "session_id": "pi-sid",
+                    "agent": "pi",
+                    "cwd": "/tmp/project",
+                }
+            },
+            "aliases": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+            "telegram_thread_bindings": {},
+        }
+
+        def _capture(*, token: str, channel_id: str, message: str) -> bool:
+            sent.append((token, channel_id, message))
+            return True
+
+        with (
+            mock.patch.dict(
+                cp.os.environ,
+                {
+                    "AGENT_CHAT_TRANSPORTS": "discord",
+                    "AGENT_DISCORD_BOT_TOKEN": "discord-token",
+                    "AGENT_DISCORD_CHANNEL_ID": "control-1",
+                    "AGENT_DISCORD_CONTROL_CHANNEL_ID": "control-1",
+                    "AGENT_DISCORD_SESSION_CHANNELS": "1",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(
+                cp,
+                "_discord_get_channel",
+                return_value={"id": "control-1", "guild_id": "guild-1", "parent_id": "cat-1"},
+            ),
+            mock.patch.object(cp, "_discord_create_text_channel", return_value=("chan-9", "pi-project-pi-sid")),
+            mock.patch.object(cp, "_send_discord_message", side_effect=_capture),
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                session_id="pi-sid",
+                kind="update",
+                text="assistant output",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={"messages": []},
+                agent="pi",
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        self.assertEqual(sent[0][1], "chan-9")
+        self.assertIn("assistant output", sent[0][2])
+        self.assertEqual(registry["conversation_bindings"].get("discord:chan-9:0"), "pi-sid")
+        self.assertEqual(registry["sessions"]["pi-sid"].get("discord_channel_id"), "chan-9")
+
+    def test_process_inbound_replies_control_channel_does_not_bind_session_when_session_channels_enabled(self) -> None:
+        sid = "pi-sid-12345678"
+        ref = cp._session_ref(sid)  # type: ignore[attr-defined]
+        registry = {
+            "sessions": {sid: {"session_id": sid, "agent": "pi"}},
+            "aliases": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+            "telegram_thread_bindings": {},
+        }
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.dict(
+                cp.os.environ,
+                {
+                    "AGENT_CHAT_TRANSPORTS": "discord",
+                    "AGENT_DISCORD_SESSION_CHANNELS": "1",
+                    "AGENT_DISCORD_CONTROL_CHANNEL_ID": "control-1",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(204, f"@{ref} continue", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value={"messages": []}),
+            mock.patch.object(cp, "_load_attention_index", return_value={}),
+            mock.patch.object(cp, "_load_last_attention_state", return_value=None),
+            mock.patch.object(cp, "_resolve_session_agent", return_value="pi"),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("resume", "ok")),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=lambda **_: {
+                    204: {
+                        "transport": "discord",
+                        "discord_parent_channel_id": "control-1",
+                        "discord_channel_id": "control-1",
+                        "discord_sender_user_id": "owner-1",
+                    }
+                },
+            )
+
+        self.assertEqual(rowid, 204)
+        self.assertEqual(registry["conversation_bindings"], {})
+        self.assertTrue(any(msg.get("session_id") == sid for msg in sent))
+
+    def test_process_session_file_emits_discord_update_for_pi_assistant_message(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            session_path = codex_home / "sessions" / "sample.jsonl"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "session", "id": "pi-sid", "cwd": "/tmp/project"}),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "hello from pi"}],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            registry = {
+                "sessions": {"pi-sid": {"session_id": "pi-sid", "agent": "pi", "pending_completion": False}},
+                "aliases": {},
+                "conversation_bindings": {},
+            }
+            sent: list[dict[str, object]] = []
+
+            with (
+                mock.patch.dict(
+                    cp.os.environ,
+                    {"AGENT_CHAT_TRANSPORTS": "discord", "AGENT_DISCORD_SESSION_CHANNELS": "1"},
+                    clear=False,
+                ),
+                mock.patch.object(cp, "_agent_for_session_path", return_value="pi"),
+                mock.patch.object(cp, "_send_structured", side_effect=lambda **kwargs: sent.append(dict(kwargs))),
+            ):
+                offset = cp._process_session_file(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    session_path=session_path,
+                    offset=0,
+                    recipient="+15551234567",
+                    max_message_chars=1800,
+                    dry_run=False,
+                    registry=registry,
+                    message_index={"messages": []},
+                    session_id_cache={},
+                    call_id_to_name={},
+                    seen_needs_input_call_ids={},
+                )
+
+        self.assertGreater(offset, 0)
+        self.assertTrue(any(msg.get("kind") == "update" and msg.get("session_id") == "pi-sid" for msg in sent))
 
     def test_process_inbound_replies_implicit_discord_binding_resolves_target_first(self) -> None:
         registry = {

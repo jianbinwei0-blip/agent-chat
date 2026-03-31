@@ -1,0 +1,187 @@
+# Discord Setup and Routing
+
+Use this page when `agent-chat` is running with Discord transport enabled.
+It covers bot setup, required permissions, control-channel vs session-channel behavior, and how session-to-channel mapping works.
+
+## What Discord Mode Does
+
+With Discord transport enabled, the control plane can:
+- send outbound session updates to Discord
+- poll Discord for inbound plain-text messages
+- route replies back to Codex, Claude, or Pi sessions
+- optionally create one dedicated Discord channel per session
+
+Discord can be used by itself or alongside iMessage and/or Telegram.
+
+## Minimum Setup
+
+### 1. Create or open a Discord bot
+
+In the Discord Developer Portal:
+- create or select your application
+- create or select the bot user
+- copy the bot token for `AGENT_DISCORD_BOT_TOKEN`
+- enable **Message Content Intent**
+
+`Message Content Intent` is required for the current inbound model. Without it, the bot may see messages with empty `content`, so plain-text routing will not work.
+
+### 2. Invite the bot to your server
+
+Give it access to:
+- one control channel
+- optionally, one category for auto-created session channels
+
+Enable Developer Mode in Discord so you can copy IDs.
+
+### 3. Grant required permissions
+
+Required for normal control-channel operation:
+- `View Channel`
+- `Send Messages`
+- `Read Message History`
+
+Required for session-channel mode (`AGENT_DISCORD_SESSION_CHANNELS=1`):
+- `Manage Channels`
+- access to the configured category when `AGENT_DISCORD_SESSION_CATEGORY_ID` is set
+
+## Recommended Environment
+
+### Control-channel-only mode
+
+```bash
+export AGENT_CHAT_TRANSPORT="discord"
+export AGENT_DISCORD_BOT_TOKEN="<discord bot token>"
+export AGENT_DISCORD_CHANNEL_ID="<control channel id>"
+# optional:
+# export AGENT_DISCORD_CHANNEL_IDS="<control channel id>,<extra allowed thread or channel id>"
+```
+
+### Control channel + session channels
+
+```bash
+export AGENT_CHAT_TRANSPORT="discord"
+export AGENT_DISCORD_BOT_TOKEN="<discord bot token>"
+export AGENT_DISCORD_CONTROL_CHANNEL_ID="<control channel id>"
+export AGENT_DISCORD_CHANNEL_ID="$AGENT_DISCORD_CONTROL_CHANNEL_ID"
+export AGENT_DISCORD_SESSION_CHANNELS=1
+# optional:
+# export AGENT_DISCORD_SESSION_CATEGORY_ID="<category id>"
+# export AGENT_DISCORD_SESSION_CHANNEL_PREFIX="pi-agent-chat"
+# export AGENT_DISCORD_CHANNEL_IDS="$AGENT_DISCORD_CONTROL_CHANNEL_ID"
+```
+
+Notes:
+- `AGENT_DISCORD_CHANNEL_ID` remains the default channel identifier.
+- In session-channel mode, it should point at the control channel, not a per-session channel.
+- `AGENT_DISCORD_CHANNEL_IDS` is usually just the control-channel allowlist; bound session channels are discovered from registry state.
+
+## Control Channel vs Session Channels
+
+When `AGENT_DISCORD_SESSION_CHANNELS=1`, Discord has two roles.
+
+### Control channel
+
+The control channel:
+- stays intentionally unbound to any one session
+- is used for `help`, `list`, `status`, `new ...`, and missing-session runtime-choice prompts
+- is the only Discord channel you must configure manually
+
+Plain text in the control channel is treated as control-plane input, not as a reply to a specific existing session.
+
+### Session channels
+
+A session channel:
+- is bound one-to-one with exactly one session
+- receives outbound session updates, needs-input prompts, and follow-up replies
+- accepts plain-text inbound replies that route back to that same session
+
+Session channels are created lazily on the first meaningful outbound delivery for a session. `agent-chat` does not eagerly create channels for every discovered session.
+
+## Session <-> Channel Mapping Behavior
+
+`agent-chat` persists Discord session-channel mappings in the registry.
+
+Behavioral rules:
+- one session has at most one bound Discord session channel
+- one bound Discord session channel maps back to exactly one session
+- the control channel is never rebound as a session channel in session-channel mode
+- you do **not** manually configure per-session channel IDs
+
+Inbound routing for a bound session channel works like this:
+1. resolve the channel id from the inbound Discord message
+2. check whether an existing session record already stores that `discord_channel_id`
+3. if not found, fall back to generic conversation bindings
+4. route the plain-text message to the resolved session
+
+That metadata-first lookup keeps an existing session channel sticky across restarts and registry normalization.
+
+## Typical User Flow
+
+### From the control channel
+
+Use commands like:
+- `help`
+- `list`
+- `status @abcd1234`
+- `new bugfix: investigate failing test`
+
+If no target session can be resolved, the control plane asks which runtime to start:
+- `1` / `codex` for Codex
+- `2` / `claude` for Claude
+- `3` / `pi` for Pi
+- `cancel`
+
+### From a bound session channel
+
+Just send plain text, for example:
+- `continue`
+- `summarize current state`
+- `fix the failing test`
+
+You do not need `@<ref>` in a bound session channel.
+
+## Launchd Notes
+
+Use the normal setup flow:
+
+```bash
+python3 agent_chat_control_plane.py setup-notify-hook --agent "${AGENT_CHAT_AGENT:-codex}" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py setup-launchd --agent "${AGENT_CHAT_AGENT:-codex}" --python-bin "$(command -v python3)"
+python3 agent_chat_control_plane.py doctor --json
+```
+
+Discord-only mode does not require Messages `chat.db` access or Full Disk Access.
+
+## Troubleshooting
+
+### Discord messages appear but agent-chat does nothing
+
+Check:
+- `AGENT_DISCORD_BOT_TOKEN` is valid
+- **Message Content Intent** is enabled
+- the bot can see the control channel
+- `doctor --json` shows `transport.discord_enabled: true`
+- `doctor --json` shows the expected `transport.discord_channel_ids`
+
+### Session channel reply creates a new session instead of using the existing one
+
+Check:
+- you replied in the bound session channel, not the control channel
+- the session record in `~/.codex/tmp/agent_chat_session_registry.json` has the expected `discord_channel_id`
+- `AGENT_DISCORD_CONTROL_CHANNEL_ID` points only at the control channel
+- the control channel was not reused as a session channel
+
+### Session channels are not created
+
+Check:
+- `AGENT_DISCORD_SESSION_CHANNELS=1`
+- the bot has `Manage Channels`
+- the bot can access the configured `AGENT_DISCORD_SESSION_CATEGORY_ID`
+- the control channel lookup succeeds and belongs to the expected guild
+
+## Related Docs
+
+- `README.md`
+- `docs/control-plane.md`
+- `docs/architecture.md`
+- `docs/troubleshooting.md`

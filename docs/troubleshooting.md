@@ -275,11 +275,26 @@ Symptoms:
 - `doctor --json` shows Discord transport enabled, but no new Discord cursor progress appears
 
 Checks:
-- verify `AGENT_DISCORD_BOT_TOKEN` is valid and the bot has access to the target channel/thread
-- set `AGENT_DISCORD_CHANNEL_ID` or `AGENT_DISCORD_CHANNEL_IDS` to the channel/thread allowlist you expect the poller to watch
+- verify `AGENT_DISCORD_BOT_TOKEN` is valid and the bot has access to the target control channel/thread
+- enable **Message Content Intent** for the bot; without it, Discord messages may be visible to the gateway/API but arrive with empty `content`
+- set `AGENT_DISCORD_CHANNEL_ID` or `AGENT_DISCORD_CHANNEL_IDS` to the control-channel allowlist you expect the poller to watch
+- if `AGENT_DISCORD_SESSION_CHANNELS=1`, also verify the bot has permission to create channels (`Manage Channels`) and, when used, access to `AGENT_DISCORD_SESSION_CATEGORY_ID`
 - if you are using threads, send one explicit bind message first (`@<session_ref> hello`) so the control plane stores a canonical conversation binding
 - enable trace and inspect launchd stderr for Discord polling failures
 - run `doctor --json` and verify `transport.discord_enabled`, `transport.discord_token_present`, and `transport.discord_channel_ids`
+
+### Discord session-channel reply creates a new session instead of resuming the existing one
+
+Symptoms:
+- plain text posted in an existing Discord session channel triggers the missing-session runtime-choice flow
+- a brand new session/channel is created instead of routing back to the existing session
+
+Checks:
+- confirm you replied in the bound session channel, not the control channel
+- inspect `~/.codex/tmp/agent_chat_session_registry.json` and verify the target session record has `discord_channel_id` set to that channel id
+- verify `AGENT_DISCORD_CONTROL_CHANNEL_ID` points only at the control channel; do not reuse the control channel id as a session channel id
+- if session-channel mode is enabled, remember that the control channel intentionally stays unbound and plain text there is treated as control-surface input, not session input
+- after recent fixes, inbound Discord routing resolves existing session channels from session metadata first and only then falls back to generic conversation bindings; if behavior still regresses, capture `doctor --json` plus the relevant session record and stderr trace lines
 
 ### Ambiguous replies or wrong target session
 

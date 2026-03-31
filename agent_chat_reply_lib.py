@@ -691,6 +691,29 @@ def _read_last_user_text_from_session(session_path: Path) -> str | None:
                         last_text = "".join(chunks).strip()
                     continue
 
+                if event.get("type") == "message":
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("role") != "user":
+                        continue
+                    content = message.get("content")
+                    chunks: list[str] = []
+                    if isinstance(content, str) and content.strip():
+                        chunks.append(content.strip())
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("type") != "text":
+                                continue
+                            text = item.get("text")
+                            if isinstance(text, str) and text.strip():
+                                chunks.append(text.strip())
+                    if chunks:
+                        last_text = "\n".join(chunks).strip()
+                    continue
+
                 if event.get("type") == "event_msg":
                     payload = event.get("payload")
                     if not isinstance(payload, dict):
