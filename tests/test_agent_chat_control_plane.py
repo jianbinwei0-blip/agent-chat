@@ -1171,7 +1171,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertTrue(matches)
 
-    def test_tmux_discover_pi_pane_for_session_uses_session_id_even_when_current_command_is_node(self) -> None:
+    def test_tmux_discover_pi_pane_for_session_uses_status_line_session_id_even_when_current_command_is_node(self) -> None:
         sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
         rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
         pane_listing = "\n".join([
@@ -1183,7 +1183,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             "subprocess.run",
             side_effect=[
                 mock.Mock(returncode=0, stdout=pane_listing),
-                mock.Mock(returncode=0, stdout=f"... {sid} ..."),
+                mock.Mock(returncode=0, stdout=f"… · {sid} · …"),
                 mock.Mock(returncode=0, stdout="... no match ..."),
             ],
         ):
@@ -1197,12 +1197,13 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(pane, "%11")
         self.assertEqual(socket, "/tmp/tmux-501/default")
 
-    def test_tmux_pane_matches_pi_session_when_session_id_is_visible_even_if_command_is_node(self) -> None:
+    def test_tmux_pane_matches_pi_session_when_status_line_is_visible_even_if_command_is_node(self) -> None:
         sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
         rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
         with (
             mock.patch.object(cp, "_tmux_read_pane_context", return_value=("node", "/")),
-            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=False),
+            mock.patch.object(cp, "_tmux_status_line_session_id_from_pane", return_value=sid),
         ):
             matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
                 pane="%11",
@@ -1212,6 +1213,24 @@ class TestAgentChatControlPlane(unittest.TestCase):
             )
 
         self.assertTrue(matches)
+
+    def test_tmux_pane_matches_pi_session_ignores_generic_uuid_mentions_without_status_line(self) -> None:
+        sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
+        rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
+        with (
+            mock.patch.object(cp, "_tmux_read_pane_context", return_value=("node", "/")),
+            mock.patch.object(cp, "_tmux_pane_mentions_session_id", return_value=True),
+            mock.patch.object(cp, "_tmux_status_line_session_id_from_pane", return_value=None),
+            mock.patch.object(cp, "_tmux_pane_looks_like_pi", return_value=False),
+        ):
+            matches = cp._tmux_pane_matches_session(  # type: ignore[attr-defined]
+                pane="%11",
+                session_rec=rec,
+                session_id=sid,
+                agent="pi",
+            )
+
+        self.assertFalse(matches)
 
     def test_tmux_discover_pi_pane_for_session_uses_pi_screen_when_uuid_is_not_visible(self) -> None:
         rec = {"cwd": "/Users/jwei/Documents/agent-chat", "agent": "pi"}
@@ -1307,6 +1326,63 @@ class TestAgentChatControlPlane(unittest.TestCase):
             tmux_socket="/tmp/tmux-501/default",
         )
         resume_mock.assert_not_called()
+
+    def test_dispatch_prompt_to_session_pi_resume_unconfirmed_when_session_ack_arrives_without_stdout(self) -> None:
+        sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
+        rec = {
+            "agent": "pi",
+            "cwd": "/Users/jwei/Documents/agent-chat",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "tmux_pane": "",
+        }
+
+        with (
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value=None),
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
+            mock.patch.object(cp.reply, "_read_last_assistant_text_from_session", return_value=None),
+            mock.patch.object(cp.reply, "_wait_for_new_user_text", return_value="after"),
+            mock.patch.object(cp.reply, "_wait_for_new_assistant_text", return_value=None),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/pi-home"),
+                agent="pi",
+            )
+
+        self.assertEqual(mode, "resume_unconfirmed")
+        self.assertIsNone(response)
+
+    def test_dispatch_prompt_to_session_pi_resume_uses_pi_home_not_current_runtime_home(self) -> None:
+        sid = "ecd1dcd9-4763-49d7-b35e-bf744d5a11cc"
+        rec = {
+            "agent": "pi",
+            "cwd": "/Users/jwei/Documents/agent-chat",
+            "session_path": f"/tmp/sessions/{sid}.jsonl",
+            "tmux_pane": "",
+        }
+
+        with (
+            mock.patch.object(cp, "_current_agent", return_value="codex"),
+            mock.patch.object(cp, "_lookup_agent_home_path", return_value=Path("/tmp/pi-home")) as home_mock,
+            mock.patch.object(cp.reply, "_run_agent_resume", return_value="ok") as resume_mock,
+            mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value=None),
+            mock.patch.object(cp.reply, "_read_last_assistant_text_from_session", return_value=None),
+        ):
+            mode, response = cp._dispatch_prompt_to_session(  # type: ignore[attr-defined]
+                target_sid=sid,
+                prompt="continue",
+                session_rec=rec,
+                codex_home=Path("/tmp/codex-home"),
+                agent="pi",
+            )
+
+        self.assertEqual(mode, "resume")
+        self.assertEqual(response, "ok")
+        home_mock.assert_called_once_with(agent="pi", current_home=Path("/tmp/codex-home"))
+        resume_mock.assert_called_once()
+        self.assertEqual(resume_mock.call_args.kwargs.get("codex_home"), Path("/tmp/pi-home"))
 
     def test_tmux_pane_mentions_session_id_uses_latest_session_id_in_capture(self) -> None:
         old_sid = "019c891f-cfa2-7e43-a60e-df1d683e6fe5"
@@ -2650,6 +2726,54 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rec.get("tmux_pane"), "%9")
         self.assertFalse(any(msg.get("kind") == "needs_input" for msg in sent))
         self.assertTrue(any(msg.get("kind") == "accepted" and msg.get("session_id") == sid for msg in sent))
+
+    def test_process_inbound_replies_resume_unconfirmed_sends_accepted(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "sid-pi",
+                    "agent": "pi",
+                    "session_path": "/tmp/sessions/sid-pi.jsonl",
+                    "cwd": "/tmp/project",
+                }
+            },
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(106, "@sid-pi hello", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_agent", return_value="pi"),
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("resume_unconfirmed", None)),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+            )
+
+        self.assertEqual(rowid, 106)
+        self.assertTrue(any(msg.get("kind") == "accepted" and msg.get("session_id") == "sid-pi" for msg in sent))
+        self.assertFalse(any(msg.get("kind") == "error" for msg in sent))
 
     def test_process_inbound_replies_implicit_telegram_thread_binding_resolves_target_first(self) -> None:
         registry: dict[str, object] = {

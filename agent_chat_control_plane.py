@@ -6558,21 +6558,27 @@ def _tmux_pane_matches_session(
     normalized_agent = _normalize_agent(agent=agent if agent is not None else None)
     sid = session_id.strip() if isinstance(session_id, str) else ""
     pane_mentions_sid = False
+    pane_status_sid_matches = False
     if sid:
         pane_mentions_sid = _tmux_pane_mentions_session_id(
             pane=pane,
             session_id=sid,
             tmux_socket=tmux_socket,
         )
+        pane_status_sid = _tmux_status_line_session_id_from_pane(
+            pane=pane,
+            tmux_socket=tmux_socket,
+        )
+        pane_status_sid_matches = isinstance(pane_status_sid, str) and pane_status_sid.strip().lower() == sid.lower()
 
     if not (isinstance(command, str) and _is_agent_command(command, agent=normalized_agent)):
-        if normalized_agent == "pi" and pane_mentions_sid:
+        if normalized_agent == "pi" and pane_status_sid_matches:
             return True
         if normalized_agent == "pi" and isinstance(command, str) and command.strip().lower() in {"node", "pi"} and _tmux_pane_looks_like_pi(pane=pane, tmux_socket=tmux_socket):
             return True
         return False
 
-    if normalized_agent == "pi" and (pane_mentions_sid or _tmux_pane_looks_like_pi(pane=pane, tmux_socket=tmux_socket)):
+    if normalized_agent == "pi" and (pane_status_sid_matches or _tmux_pane_looks_like_pi(pane=pane, tmux_socket=tmux_socket)):
         return True
 
     rec_cwd = session_rec.get("cwd") if isinstance(session_rec.get("cwd"), str) else None
@@ -6604,6 +6610,49 @@ def _tmux_pane_matches_session(
         session_id=sid,
         tmux_socket=tmux_socket,
     )
+
+
+def _tmux_status_line_session_id_from_pane(
+    *,
+    pane: str,
+    tmux_socket: str | None = None,
+) -> str | None:
+    target = pane.strip()
+    if not target:
+        return None
+
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "capture-pane",
+                "-p",
+                "-t",
+                target,
+                "-S",
+                "-200",
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    haystack = proc.stdout or ""
+    if not haystack:
+        return None
+
+    latest_status_sid: str | None = None
+    for line in haystack.splitlines():
+        status_match = _SESSION_STATUS_LINE_UUID_RE.search(line)
+        if status_match:
+            latest_status_sid = status_match.group(1)
+    return latest_status_sid
 
 
 def _tmux_pane_mentions_session_id(
@@ -6807,11 +6856,14 @@ def _tmux_discover_codex_pane_for_session(
     sid = session_id.strip() if isinstance(session_id, str) else ""
     if normalized_agent == "pi":
         if sid:
-            sid_matches = _tmux_filter_panes_by_session_id(
-                pane_ids=[pane_id for pane_id, _, _ in all_panes],
-                session_id=sid,
-                tmux_socket=tmux_socket,
-            )
+            sid_matches = [
+                pane_id
+                for pane_id, _, _ in all_panes
+                if (
+                    (_tmux_status_line_session_id_from_pane(pane=pane_id, tmux_socket=tmux_socket) or "").strip().lower()
+                    == sid.lower()
+                )
+            ]
             if len(sid_matches) == 1:
                 return sid_matches[0], _normalize_tmux_socket(tmux_socket=tmux_socket)
         pi_panes = [
@@ -6861,6 +6913,74 @@ def _tmux_discover_codex_pane_for_session(
 def _tmux_routing_enabled() -> bool:
     raw = os.environ.get("AGENT_CHAT_ROUTE_VIA_TMUX", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def _dispatch_resume_to_session(
+    *,
+    target_sid: str,
+    prompt: str,
+    session_rec: dict[str, Any] | None,
+    codex_home: Path,
+    resume_timeout_s: float | None = None,
+    agent: str | None = None,
+) -> tuple[str, str | None]:
+    rec_agent: str | None = None
+    if isinstance(session_rec, dict):
+        raw_agent = session_rec.get("agent")
+        if isinstance(raw_agent, str) and raw_agent.strip():
+            rec_agent = raw_agent
+    effective_agent = _normalize_agent(agent=agent if agent is not None else rec_agent)
+    cwd = session_rec.get("cwd") if isinstance(session_rec, dict) and isinstance(session_rec.get("cwd"), str) else None
+    session_path = session_rec.get("session_path") if isinstance(session_rec, dict) and isinstance(session_rec.get("session_path"), str) else None
+    session_path_obj = Path(session_path.strip()) if isinstance(session_path, str) and session_path.strip() else None
+
+    before_user_text: str | None = None
+    before_assistant_text: str | None = None
+    if effective_agent == "pi" and isinstance(session_path_obj, Path):
+        before_user_text = reply._read_last_user_text_from_session(session_path_obj)
+        before_assistant_text = reply._read_last_assistant_text_from_session(session_path_obj)
+
+    resume_home = codex_home if effective_agent == _current_agent() else _lookup_agent_home_path(
+        agent=effective_agent,
+        current_home=codex_home,
+    )
+    response = reply._run_agent_resume(
+        agent=effective_agent,
+        session_id=target_sid,
+        cwd=cwd,
+        prompt=prompt,
+        codex_home=resume_home,
+        timeout_s=resume_timeout_s,
+    )
+    if response:
+        return "resume", response
+
+    if effective_agent != "pi" or not isinstance(session_path_obj, Path):
+        return "resume", response
+
+    ack_timeout = float(_tmux_ack_timeout_s())
+    observed_user = reply._wait_for_new_user_text(
+        session_path=session_path_obj,
+        before=before_user_text,
+        timeout_s=ack_timeout,
+    )
+
+    assistant_wait_s = 1.0
+    if resume_timeout_s is not None:
+        try:
+            assistant_wait_s = max(0.0, min(float(resume_timeout_s), 1.0))
+        except Exception:
+            assistant_wait_s = 1.0
+    observed_assistant = reply._wait_for_new_assistant_text(
+        session_path=session_path_obj,
+        before=before_assistant_text,
+        timeout_s=assistant_wait_s,
+    )
+    if observed_assistant:
+        return "resume", observed_assistant
+    if observed_user is not None:
+        return "resume_unconfirmed", None
+    return "resume", response
 
 
 def _dispatch_prompt_to_session(
@@ -7063,15 +7183,14 @@ def _dispatch_prompt_to_session(
     if strict_tmux and tmux_enabled and tmux_identity_present:
         return "tmux_stale", None
 
-    response = reply._run_agent_resume(
-        agent=effective_agent,
-        session_id=target_sid,
-        cwd=cwd,
+    return _dispatch_resume_to_session(
+        target_sid=target_sid,
         prompt=prompt,
+        session_rec=session_rec,
         codex_home=codex_home,
-        timeout_s=resume_timeout_s,
+        resume_timeout_s=resume_timeout_s,
+        agent=effective_agent,
     )
-    return "resume", response
 
 
 def _resolve_session_from_reply_context(
@@ -8756,14 +8875,47 @@ def _process_inbound_replies(
                 rec_pane = rec.get("tmux_pane")
                 if isinstance(rec_pane, str):
                     preserved_pane = rec_pane
-            response = reply._run_agent_resume(
-                agent=session_agent,
-                session_id=target_sid,
-                cwd=fallback_cwd,
+            resume_mode, response = _dispatch_resume_to_session(
+                target_sid=target_sid,
                 prompt=prompt_for_dispatch,
+                session_rec=rec if isinstance(rec, dict) else None,
                 codex_home=codex_home,
-                timeout_s=resume_timeout_s,
+                resume_timeout_s=resume_timeout_s,
+                agent=session_agent,
             )
+            if resume_mode == "resume_unconfirmed":
+                _clear_last_dispatch_error(registry=registry)
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=target_sid,
+                    kind="accepted",
+                    text=(
+                        f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
+                        "Waiting for session output."
+                    ),
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    agent=session_agent,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                _upsert_session(
+                    registry=registry,
+                    session_id=target_sid,
+                    fields={
+                        "agent": session_agent,
+                        "tmux_pane": preserved_pane,
+                        "awaiting_input": False,
+                        "pending_completion": True,
+                        "last_resume_ts": int(time.time()),
+                        "pending_request_user_input": None,
+                        "last_dispatch_reason": dispatch_reason,
+                    },
+                )
+                continue
             if not response:
                 _send_structured(
                     codex_home=codex_home,
@@ -8823,6 +8975,37 @@ def _process_inbound_replies(
             continue
 
         _clear_last_dispatch_error(registry=registry)
+        if dispatch_mode == "resume_unconfirmed":
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=target_sid,
+                kind="accepted",
+                text=(
+                    f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
+                    "Waiting for session output."
+                ),
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+            )
+            _upsert_session(
+                registry=registry,
+                session_id=target_sid,
+                fields={
+                    "agent": session_agent,
+                    "awaiting_input": False,
+                    "pending_completion": True,
+                    "last_resume_ts": int(time.time()),
+                    "pending_request_user_input": None,
+                    "last_dispatch_reason": None,
+                },
+            )
+            continue
         if not response:
             _send_structured(
                 codex_home=codex_home,
