@@ -144,6 +144,12 @@ If you need to move the current channel/thread to another session, send `bind @<
 If you want the current channel/thread explained back to you, send `where` or `context`.
 On first use, agent-chat also appends a one-time quick-start hint so users can learn the control/session channel model in-context.
 
+When Pi is blocked waiting on you, Discord now uses a clearer waiting-state message shape:
+- the message explicitly says Pi is waiting for your input on `@<session_ref>`
+- the active question/request is repeated in a cleaner plain-text block
+- the message ends with obvious next-step suggestions such as `continue`, `summarize`, `yes`, `no`, or numeric choices when Pi provided options
+- in a bound session channel, the message reminds you that plain text in that same channel continues the same session
+
 ## Launchd Notes
 
 Use the normal setup flow:

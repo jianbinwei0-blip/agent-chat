@@ -6102,17 +6102,15 @@ def _send_structured(
     discord_channel_id: str | None = None,
     registry: dict[str, Any] | None = None,
 ) -> None:
-    normalized_agent = _normalize_agent(agent=agent if agent is not None else _current_agent())
-    sid = session_id or "unknown"
-    header = f"[{_agent_display_name(agent=normalized_agent)}] {sid} — {kind} — {outbound._now_local_iso()}"
-    body = outbound._redact(text.rstrip()) + "\n"
-
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
     resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
     resolved_discord_channel_id = discord_channel_id.strip() if isinstance(discord_channel_id, str) and discord_channel_id.strip() else None
     active_registry = registry if isinstance(registry, dict) else None
     if isinstance(session_id, str) and session_id.strip() and (
-        resolved_thread_id is None or resolved_chat_id is None or resolved_discord_channel_id is None
+        active_registry is None
+        or resolved_thread_id is None
+        or resolved_chat_id is None
+        or resolved_discord_channel_id is None
     ):
         if active_registry is None:
             active_registry = _load_registry(codex_home=codex_home)
@@ -6134,6 +6132,31 @@ def _send_structured(
             )
             if isinstance(created_channel_id, str) and created_channel_id.strip():
                 resolved_discord_channel_id = created_channel_id.strip()
+
+    session_rec: dict[str, Any] | None = None
+    if isinstance(session_id, str) and session_id.strip() and isinstance(active_registry, dict):
+        sessions = active_registry.get("sessions")
+        candidate = sessions.get(session_id) if isinstance(sessions, dict) else None
+        session_rec = candidate if isinstance(candidate, dict) else None
+
+    inferred_agent = None
+    if isinstance(session_rec, dict):
+        rec_agent = session_rec.get("agent")
+        if isinstance(rec_agent, str) and rec_agent.strip():
+            inferred_agent = rec_agent.strip()
+    normalized_agent = _normalize_agent(agent=agent if agent is not None else inferred_agent or _current_agent())
+    sid = session_id or "unknown"
+    header = f"[{_agent_display_name(agent=normalized_agent)}] {sid} — {kind} — {outbound._now_local_iso()}"
+    rendered_text = text.rstrip()
+    if kind == "needs_input" and normalized_agent == "pi" and isinstance(session_id, str) and session_id.strip():
+        rendered_text = _format_pi_needs_input_text(
+            session_id=session_id,
+            registry=active_registry if isinstance(active_registry, dict) else {},
+            session_rec=session_rec,
+            text=rendered_text,
+            discord_channel_id=resolved_discord_channel_id,
+        )
+    body = outbound._redact(rendered_text) + "\n"
 
     try:
         messages = outbound._split_message(header, body, max_message_chars=max_message_chars)
@@ -6522,6 +6545,103 @@ def _session_binding_descriptions(*, registry: dict[str, Any], session_id: str) 
 
 
 
+def _session_state_label(*, session_rec: dict[str, Any] | None) -> str:
+    if not isinstance(session_rec, dict):
+        return "active"
+    if _session_is_waiting_for_input(session_rec=session_rec):
+        agent = _normalize_agent(
+            agent=session_rec.get("agent") if isinstance(session_rec.get("agent"), str) else None
+        )
+        if agent == "pi":
+            return "waiting on you"
+        return "waiting"
+    return "active"
+
+
+
+def _brief_text(*, text: str | None, max_chars: int = 140) -> str | None:
+    if not isinstance(text, str):
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    first = lines[0]
+    if len(first) <= max(16, int(max_chars)):
+        return first
+    return first[: max(16, int(max_chars)) - 1].rstrip() + "…"
+
+
+
+def _pi_pending_questions(*, session_rec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(session_rec, dict):
+        return []
+    pending = session_rec.get("pending_request_user_input")
+    if not isinstance(pending, dict):
+        return []
+    raw_questions = pending.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    return [q for q in raw_questions if isinstance(q, dict)]
+
+
+
+def _pi_needs_input_suggestion_text(*, session_rec: dict[str, Any] | None, text: str) -> str:
+    questions = _pi_pending_questions(session_rec=session_rec)
+    if len(questions) == 1:
+        raw_options = questions[0].get("options")
+        option_count = len([opt for opt in raw_options if isinstance(opt, dict)]) if isinstance(raw_options, list) else 0
+        if option_count >= 2:
+            return "Try: `1`, `2`, `summarize`, or your own instructions."
+        if option_count == 1:
+            return "Try: `1`, `summarize`, or your own instructions."
+    if len(questions) > 1:
+        has_options = any(
+            isinstance(q.get("options"), list) and any(isinstance(opt, dict) for opt in q.get("options", []))
+            for q in questions
+        )
+        if has_options:
+            return "Use `<question>.<option>` such as `1.2`, or send `summarize`."
+
+    lowered = text.strip().lower()
+    if any(token in lowered for token in ("approve", "approval", "ready to apply", "apply changes", "ready to edit")):
+        return "Try: `approve`, `revise`, `summarize`, or your own instructions."
+    if any(token in lowered for token in ("yes or no", "yes/no", "should i", "should we", "do you want", "confirm")):
+        return "Try: `yes`, `no`, `summarize`, or your own instructions."
+    return "Try: `continue`, `summarize`, `yes`, or `no`."
+
+
+
+def _format_pi_needs_input_text(
+    *,
+    session_id: str,
+    registry: dict[str, Any],
+    session_rec: dict[str, Any] | None,
+    text: str,
+    discord_channel_id: str | None = None,
+) -> str:
+    rec = session_rec if isinstance(session_rec, dict) else None
+    ref = rec.get("ref") if isinstance(rec, dict) and isinstance(rec.get("ref"), str) else _session_ref(session_id)
+    prompt_text = text.strip()
+    questions = _pi_pending_questions(session_rec=rec)
+    rendered_questions = outbound._render_request_user_input_questions(questions) if questions else None
+    prompt_body = rendered_questions.strip() if isinstance(rendered_questions, str) and rendered_questions.strip() else prompt_text
+    if not prompt_body:
+        prompt_body = "Pi needs more information before it can continue."
+
+    has_bound_surface = bool(_session_binding_descriptions(registry=registry, session_id=session_id))
+    if not has_bound_surface and isinstance(discord_channel_id, str) and discord_channel_id.strip():
+        has_bound_surface = True
+
+    lines = [f"Pi is waiting for your input on @{ref}.", "", prompt_body, ""]
+    if has_bound_surface:
+        lines.append(f"Reply here with plain text to continue @{ref}.")
+    else:
+        lines.append(f"Reply with `@{ref} <instruction>` to continue this session.")
+    lines.append(_pi_needs_input_suggestion_text(session_rec=rec, text=prompt_body))
+    return "\n".join(lines).strip()
+
+
+
 def _render_session_identity(*, registry: dict[str, Any], session_id: str) -> str:
     sessions = registry.get("sessions")
     rec = sessions.get(session_id) if isinstance(sessions, dict) else None
@@ -6553,16 +6673,16 @@ def _render_session_list(*, registry: dict[str, Any]) -> str:
         ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(sid)
         alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
         agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
-        waiting = "waiting" if _session_is_waiting_for_input(session_rec=rec) else "active"
+        state = _session_state_label(session_rec=rec)
         last_active = _format_relative_age(ts=_session_last_active_ts(session_rec=rec))
         bindings = _session_binding_descriptions(registry=registry, session_id=sid)
         binding_summary = bindings[0] if bindings else "unbound"
         if alias:
             lines.append(
-                f"- [{_agent_display_name(agent=agent)}] @{ref} ({alias}) — {waiting} — {last_active} — {binding_summary}"
+                f"- [{_agent_display_name(agent=agent)}] @{ref} ({alias}) — {state} — {last_active} — {binding_summary}"
             )
         else:
-            lines.append(f"- [{_agent_display_name(agent=agent)}] @{ref} — {waiting} — {last_active} — {binding_summary}")
+            lines.append(f"- [{_agent_display_name(agent=agent)}] @{ref} — {state} — {last_active} — {binding_summary}")
 
     return "\n".join(lines)
 
@@ -6579,6 +6699,7 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
     ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(session_id)
     alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
     waiting = "yes" if _session_is_waiting_for_input(session_rec=rec) else "no"
+    state = _session_state_label(session_rec=rec)
     agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
     cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else ""
     path = rec.get("session_path") if isinstance(rec.get("session_path"), str) else ""
@@ -6587,11 +6708,19 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
     bindings = _session_binding_descriptions(registry=registry, session_id=session_id)
     last_active = _format_relative_age(ts=_session_last_active_ts(session_rec=rec))
 
+    next_text = f"reply in a bound topic/channel, or send `@{ref} <instruction>` from any control surface."
+    if agent == "pi" and _session_is_waiting_for_input(session_rec=rec):
+        if bindings:
+            next_text = "reply in the bound topic/channel, or send `summarize`."
+        else:
+            next_text = f"send `@{ref} <instruction>` or `summarize`."
+
     lines = [
         f"Session: {session_id}",
         f"Ref: @{ref}",
         f"Alias: {alias or '-'}",
         f"Agent: {_agent_display_name(agent=agent)}",
+        f"State: {state}",
         f"Awaiting input: {waiting}",
         f"Last active: {last_active}",
         f"Bindings: {', '.join(bindings) if bindings else '-'}",
@@ -6599,8 +6728,12 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
         f"Session path: {path or '-'}",
         f"Tmux pane: {pane or '-'}",
         f"Tmux socket: {socket_value or '-'}",
-        f"Next: reply in a bound topic/channel, or send @{ref} <instruction> from any control surface.",
     ]
+    if agent == "pi" and _session_is_waiting_for_input(session_rec=rec):
+        last_request = _brief_text(text=rec.get("last_needs_input") if isinstance(rec.get("last_needs_input"), str) else None)
+        if isinstance(last_request, str) and last_request:
+            lines.append(f"Last Pi request: {last_request}")
+    lines.append(f"Next: {next_text}")
     return "\n".join(lines)
 
 

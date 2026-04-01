@@ -223,6 +223,52 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertIn("5m ago", rendered)
         self.assertIn("Telegram topic 123456:99", rendered)
 
+    def test_render_session_status_uses_waiting_on_you_for_pi(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "awaiting_input": True,
+                    "last_needs_input": "Should I patch the mock or update the assertion?",
+                    "discord_channel_id": "chan-123",
+                    "last_attention_ts": 900,
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        with mock.patch.object(cp.time, "time", return_value=1000):
+            rendered = cp._render_session_status(session_id="sid-pi", registry=registry)  # type: ignore[attr-defined]
+
+        self.assertIn("State: waiting on you", rendered)
+        self.assertIn("Awaiting input: yes", rendered)
+        self.assertIn("Last Pi request: Should I patch the mock or update the assertion?", rendered)
+        self.assertIn("Next: reply in the bound topic/channel, or send `summarize`.", rendered)
+
+    def test_render_session_list_uses_waiting_on_you_for_pi(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "awaiting_input": True,
+                    "last_attention_ts": 950,
+                    "discord_channel_id": "chan-123",
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        with mock.patch.object(cp.time, "time", return_value=1000):
+            rendered = cp._render_session_list(registry=registry)  # type: ignore[attr-defined]
+
+        self.assertIn("@abcd1234", rendered)
+        self.assertIn("waiting on you", rendered)
+        self.assertIn("Discord channel chan-123", rendered)
+
     def test_render_context_status_for_bound_telegram_topic(self) -> None:
         registry: dict[str, object] = {
             "sessions": {
@@ -4837,6 +4883,73 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertGreaterEqual(len(sent), 1)
         self.assertIn("[Claude] sid-123 — responded — ", sent[0])
+
+    def test_send_structured_formats_pi_needs_input_for_bound_discord_session(self) -> None:
+        sent_discord: list[tuple[str, str, str]] = []
+        registry = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "pending_request_user_input": {
+                        "questions": [
+                            {
+                                "question": "Which fix should Pi apply?",
+                                "options": [
+                                    {"label": "Patch the mock"},
+                                    {"label": "Update the assertion"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        def _capture_discord(*, token: str, channel_id: str, message: str) -> bool:
+            sent_discord.append((token, channel_id, message))
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "AGENT_CHAT_TRANSPORT": "discord",
+                    "AGENT_DISCORD_BOT_TOKEN": "discord-token",
+                    "AGENT_DISCORD_CHANNEL_ID": "control-chan",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_send_discord_message", side_effect=_capture_discord),
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="discord-recipient",
+                session_id="sid-pi",
+                kind="needs_input",
+                text="Which fix should Pi apply?",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        self.assertGreaterEqual(len(sent_discord), 1)
+        self.assertEqual(sent_discord[0][0], "discord-token")
+        self.assertEqual(sent_discord[0][1], "chan-123")
+        self.assertIn("[Pi] sid-pi — needs_input — ", sent_discord[0][2])
+        self.assertIn("Pi is waiting for your input on @abcd1234.", sent_discord[0][2])
+        self.assertIn("1) Which fix should Pi apply?", sent_discord[0][2])
+        self.assertIn("1. Patch the mock", sent_discord[0][2])
+        self.assertIn("2. Update the assertion", sent_discord[0][2])
+        self.assertIn("Reply here with plain text to continue @abcd1234.", sent_discord[0][2])
+        self.assertIn("Try: `1`, `2`, `summarize`, or your own instructions.", sent_discord[0][2])
 
     def test_send_structured_uses_telegram_transport_when_enabled(self) -> None:
         sent_telegram: list[tuple[str, str, str, int | None]] = []

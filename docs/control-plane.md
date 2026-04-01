@@ -75,6 +75,10 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - `quiet`: suppress automatic completion/progress notifications from session activity
   - `default`: keep automatic completion notifications and Discord session-channel progress updates
   - `verbose`: emit automatic progress updates across enabled transports, not just Discord session channels
+- Pi waiting-state UX in Discord
+  - Pi `needs_input` deliveries now explicitly say Pi is waiting for the user on `@<session_ref>`
+  - waiting messages append suggested plain-text replies such as `continue`, `summarize`, `yes`, `no`, or numeric option hints when Pi supplied structured choices
+  - when the session is bound to a Discord session channel, the waiting message reinforces that replying there with plain text continues the same session
 
 ## Discord Session-Channel Mode
 
@@ -87,6 +91,7 @@ When `AGENT_DISCORD_SESSION_CHANNELS=1`:
 - session channels are created lazily on first meaningful outbound delivery, not eagerly for every discovered session.
 - each session has at most one bound Discord channel, and each bound session channel maps back to exactly one session.
 - plain text in a bound session channel routes back to that session without requiring `@<ref>`.
+- Pi waiting-state messages in bound Discord session channels now include explicit reply guidance so the user knows Pi is blocked on them, not merely sending a passive update.
 - inbound routing resolves the target from stored session-channel metadata first, then falls back to generic conversation bindings.
 - auto-created session channels can be placed under `AGENT_DISCORD_SESSION_CATEGORY_ID` when configured.
 - setup requirements for this mode are: bot token, **Message Content Intent**, access to the control channel, and `Manage Channels` if automatic channel creation is enabled.
