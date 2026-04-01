@@ -103,6 +103,7 @@ _DEFAULT_TELEGRAM_SEND_TIMEOUT_S = 10.0
 _DEFAULT_TELEGRAM_SETUP_BOOTSTRAP_TIMEOUT_S = 90.0
 _DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org"
 _DEFAULT_DISCORD_API_BASE = "https://discord.com/api/v10"
+_DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 _DEFAULT_TMUX_NEW_SESSION_NAME = "agent"
 _DEFAULT_TMUX_WINDOW_PREFIX = "agent"
 _DEFAULT_SETUP_PERMISSIONS_TIMEOUT_S = 180.0
@@ -1564,6 +1565,214 @@ def _discord_request(*, token: str, path: str, method: str = "GET", data: dict[s
         return None
 
 
+def _discord_attachment_max_bytes() -> int:
+    raw = os.environ.get("AGENT_CHAT_DISCORD_ATTACHMENT_MAX_BYTES", "").strip()
+    if not raw:
+        return _DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES
+    try:
+        return max(1024, int(raw))
+    except Exception:
+        return _DEFAULT_DISCORD_ATTACHMENT_MAX_BYTES
+
+
+
+def _discord_attachment_root(*, codex_home: Path) -> Path:
+    shared_home = _shared_control_state_home(codex_home=codex_home)
+    override = os.environ.get("AGENT_CHAT_DISCORD_ATTACHMENT_DIR", "").strip()
+    if override:
+        return Path(override)
+    return shared_home / "tmp" / "discord_attachments"
+
+
+
+def _sanitize_discord_attachment_filename(filename: str | None) -> str:
+    raw = filename.strip() if isinstance(filename, str) else ""
+    candidate = Path(raw).name if raw else "attachment.bin"
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "_", candidate).strip("._") or "attachment.bin"
+    return candidate[:160]
+
+
+
+def _normalize_discord_attachment_payloads(raw: object) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id") if isinstance(item.get("id"), str) and item.get("id").strip() else f"attachment-{idx}"
+        attachment_id = str(attachment_id).strip()
+        if attachment_id in seen_ids:
+            continue
+        url = item.get("url") if isinstance(item.get("url"), str) and item.get("url").strip() else None
+        proxy_url = item.get("proxy_url") if isinstance(item.get("proxy_url"), str) and item.get("proxy_url").strip() else None
+        download_url = proxy_url or url
+        if not isinstance(download_url, str) or not download_url.strip():
+            continue
+        filename = _sanitize_discord_attachment_filename(
+            item.get("filename") if isinstance(item.get("filename"), str) else None
+        )
+        size = item.get("size") if isinstance(item.get("size"), int) and int(item.get("size")) >= 0 else None
+        content_type = item.get("content_type") if isinstance(item.get("content_type"), str) and item.get("content_type").strip() else None
+        out.append(
+            {
+                "id": attachment_id,
+                "filename": filename,
+                "url": download_url.strip(),
+                "size": size,
+                "content_type": content_type.strip() if isinstance(content_type, str) else None,
+            }
+        )
+        seen_ids.add(attachment_id)
+    return out
+
+
+
+def _download_discord_attachment(*, url: str, destination: Path, max_bytes: int) -> tuple[int | None, str | None]:
+    request = urllib_request.Request(url.strip(), headers={"User-Agent": "agent-chat/0.1"})
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_suffix(destination.suffix + ".tmp")
+    try:
+        with urllib_request.urlopen(request, timeout=_DEFAULT_TELEGRAM_SEND_TIMEOUT_S) as response:
+            content_length_raw = response.headers.get("Content-Length")
+            if isinstance(content_length_raw, str) and content_length_raw.strip():
+                try:
+                    if int(content_length_raw.strip()) > int(max_bytes):
+                        return None, f"exceeds max size {int(max_bytes)} bytes"
+                except Exception:
+                    pass
+            total = 0
+            with tmp_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > int(max_bytes):
+                        handle.close()
+                        try:
+                            tmp_path.unlink()
+                        except Exception:
+                            pass
+                        return None, f"exceeds max size {int(max_bytes)} bytes"
+                    handle.write(chunk)
+        tmp_path.replace(destination)
+        return total, None
+    except Exception as exc:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+
+def _store_discord_attachments_for_session(
+    *,
+    codex_home: Path,
+    session_id: str,
+    message_id: int,
+    attachments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    sid = session_id.strip()
+    if not sid or not attachments:
+        return [], []
+
+    root = _discord_attachment_root(codex_home=codex_home) / sid / str(int(message_id))
+    max_bytes = _discord_attachment_max_bytes()
+    saved: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for idx, attachment in enumerate(attachments, start=1):
+        filename = _sanitize_discord_attachment_filename(
+            attachment.get("filename") if isinstance(attachment.get("filename"), str) else None
+        )
+        size = attachment.get("size") if isinstance(attachment.get("size"), int) else None
+        if isinstance(size, int) and size > int(max_bytes):
+            errors.append(f"{filename}: exceeds max size {int(max_bytes)} bytes")
+            continue
+        download_url = attachment.get("url") if isinstance(attachment.get("url"), str) else None
+        if not isinstance(download_url, str) or not download_url.strip():
+            errors.append(f"{filename}: missing download url")
+            continue
+        dest = root / f"{idx:02d}-{filename}"
+        downloaded_size, err = _download_discord_attachment(
+            url=download_url,
+            destination=dest,
+            max_bytes=max_bytes,
+        )
+        if err:
+            errors.append(f"{filename}: {err}")
+            continue
+        saved.append(
+            {
+                "filename": filename,
+                "path": str(dest),
+                "size": downloaded_size if isinstance(downloaded_size, int) else size,
+                "content_type": attachment.get("content_type") if isinstance(attachment.get("content_type"), str) else None,
+            }
+        )
+    return saved, errors
+
+
+
+def _augment_prompt_with_discord_attachments(
+    *,
+    prompt: str,
+    saved_attachments: list[dict[str, Any]],
+    attachment_errors: list[str],
+) -> str:
+    if not saved_attachments and not attachment_errors:
+        return prompt.strip()
+
+    lines = ["Discord attachment handoff:"]
+    if saved_attachments:
+        lines.append("The user attached file(s) in Discord. Inspect them before continuing:")
+        for attachment in saved_attachments:
+            filename = attachment.get("filename") if isinstance(attachment.get("filename"), str) else "attachment"
+            path = attachment.get("path") if isinstance(attachment.get("path"), str) else "-"
+            size = attachment.get("size") if isinstance(attachment.get("size"), int) else None
+            content_type = attachment.get("content_type") if isinstance(attachment.get("content_type"), str) else None
+            details: list[str] = []
+            if isinstance(size, int):
+                details.append(f"{size} bytes")
+            if isinstance(content_type, str) and content_type.strip():
+                details.append(content_type.strip())
+            suffix = f" ({', '.join(details)})" if details else ""
+            lines.append(f"- {filename}{suffix}: {path}")
+    if attachment_errors:
+        lines.append("Attachment download issues:")
+        for err in attachment_errors[:5]:
+            lines.append(f"- {err}")
+
+    user_prompt = prompt.strip()
+    lines.append("")
+    if user_prompt:
+        lines.append("User message:")
+        lines.append(user_prompt)
+    else:
+        lines.append("User message: Please inspect the attached files and continue.")
+    return "\n".join(lines).strip()
+
+
+
+def _discord_attachment_notice_text(*, saved_attachments: list[dict[str, Any]], attachment_errors: list[str]) -> str:
+    if not saved_attachments and not attachment_errors:
+        return ""
+    parts: list[str] = []
+    if saved_attachments:
+        count = len(saved_attachments)
+        noun = "file" if count == 1 else "files"
+        parts.append(f"Attached {count} {noun}.")
+    if attachment_errors:
+        count = len(attachment_errors)
+        noun = "attachment" if count == 1 else "attachments"
+        parts.append(f"{count} {noun} could not be downloaded.")
+    return " ".join(parts)
+
+
+
 def _discord_bot_user_id(*, token: str, codex_home: Path) -> str | None:
     state = _load_discord_inbound_cursor(codex_home=codex_home)
     cached = state.get("bot_user_id") if isinstance(state.get("bot_user_id"), str) else None
@@ -1841,7 +2050,7 @@ def _fetch_discord_updates(
     token: str,
     registry: dict[str, Any],
     codex_home: Path,
-) -> tuple[list[tuple[int, str, str | None, str | None, str, str | None, str | None]], dict[str, Any]]:
+) -> tuple[list[tuple[int, str, str | None, str | None, str, str | None, str | None, list[dict[str, Any]]]], dict[str, Any]]:
     state = _load_discord_inbound_cursor(codex_home=codex_home)
     channels_state = state.get("channels") if isinstance(state.get("channels"), dict) else {}
     bot_user_id = _discord_bot_user_id(token=token, codex_home=codex_home)
@@ -1856,7 +2065,7 @@ def _fetch_discord_updates(
                 seen_poll.add(thread_id)
                 poll_ids.append(thread_id)
 
-    out: list[tuple[int, str, str | None, str | None, str, str | None, str | None]] = []
+    out: list[tuple[int, str, str | None, str | None, str, str | None, str | None, list[dict[str, Any]]]] = []
     for poll_id in poll_ids:
         after_id = channels_state.get(poll_id)
         params = "limit=50"
@@ -1877,7 +2086,8 @@ def _fetch_discord_updates(
             if bot_user_id and author_id == bot_user_id:
                 continue
             content = item.get("content") if isinstance(item.get("content"), str) else ""
-            if not content.strip():
+            attachments = _normalize_discord_attachment_payloads(item.get("attachments"))
+            if not content.strip() and not attachments:
                 continue
             referenced = item.get("referenced_message") if isinstance(item.get("referenced_message"), dict) else None
             referenced_text = referenced.get("content") if isinstance(referenced, dict) and isinstance(referenced.get("content"), str) else None
@@ -1890,6 +2100,7 @@ def _fetch_discord_updates(
                 poll_id,
                 author_id.strip() if isinstance(author_id, str) and author_id.strip() else None,
                 item.get("guild_id") if isinstance(item.get("guild_id"), str) else None,
+                attachments,
             ))
     state["channels"] = channels_state
     if isinstance(bot_user_id, str) and bot_user_id.strip():
@@ -1921,7 +2132,7 @@ def _process_inbound_discord_replies(
     update_context_map: dict[int, dict[str, Any]] = {}
     update_reply_text_map: dict[int, str] = {}
     max_seen = after_message_id
-    for message_id, text, reply_text, parent_id, channel_id, sender_user_id, guild_id in updates:
+    for message_id, text, reply_text, parent_id, channel_id, sender_user_id, guild_id, attachments in updates:
         if message_id <= after_message_id:
             continue
         max_seen = max(max_seen, message_id)
@@ -1931,6 +2142,7 @@ def _process_inbound_discord_replies(
             "discord_channel_id": channel_id,
             "discord_sender_user_id": sender_user_id,
             "discord_guild_id": guild_id,
+            "discord_attachments": attachments,
         }
         if isinstance(reply_text, str) and reply_text.strip():
             update_reply_text_map[message_id] = reply_text.strip()
@@ -1938,10 +2150,13 @@ def _process_inbound_discord_replies(
     def _fetch_virtual_replies(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> list[tuple[int, str, str | None]]:
         del conn, handle_ids
         rows: list[tuple[int, str, str | None]] = []
-        for message_id, text, _, _, _, _, _ in updates:
+        for message_id, text, _, _, _, _, _, attachments in updates:
             if message_id <= after_rowid:
                 continue
-            rows.append((message_id, text, None))
+            effective_text = text if isinstance(text, str) else ""
+            if not effective_text.strip() and isinstance(attachments, list) and attachments:
+                effective_text = "continue"
+            rows.append((message_id, effective_text, None))
         rows.sort(key=lambda item: item[0])
         return rows
 
@@ -9271,6 +9486,10 @@ def _process_inbound_replies(
             if isinstance(row_context.get("discord_sender_user_id"), str)
             else None
         )
+        row_discord_attachments = _normalize_discord_attachment_payloads(row_context.get("discord_attachments"))
+        discord_attachments_only = bool(row_transport == "discord" and row_discord_attachments and not text.strip())
+        if discord_attachments_only:
+            text = "continue"
         row_context_key: str | None = None
         row_context_channel_id: str | None = None
         row_context_thread_id: int | str | None = None
@@ -9892,7 +10111,9 @@ def _process_inbound_replies(
         target_sid: str | None = None
         err: str | None = None
         prompt = cmd.get("prompt", "").strip()
-        if not prompt:
+        if discord_attachments_only and action == "implicit":
+            prompt = ""
+        if not prompt and not row_discord_attachments:
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
@@ -10022,6 +10243,24 @@ def _process_inbound_replies(
         _trace(f"resolved target_sid={target_sid or '-'} err={err or '-'}")
 
         if not target_sid:
+            if row_transport == "discord" and row_discord_attachments:
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=None,
+                    kind="error",
+                    text=(
+                        "Discord attachment handoff currently needs an existing target session. "
+                        "Bind this channel first, or send `@<session_ref> <instruction>` with the attachment."
+                    ),
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
             # Keep strict mode for ambiguous implicit routing, but still allow the
             # runtime-choice flow when there is no active implicit target at all.
             implicit_missing_without_ambiguity = (
@@ -10208,6 +10447,65 @@ def _process_inbound_replies(
                 discord_channel_id=row_reply_discord_channel_id,
             )
             continue
+        if not prompt_for_dispatch and not row_discord_attachments:
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=target_sid,
+                kind="error",
+                text="No instruction text was provided.",
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+            )
+            continue
+
+        attachment_notice_text = ""
+        if row_transport == "discord" and row_discord_attachments and session_agent == "pi":
+            saved_attachments, attachment_errors = _store_discord_attachments_for_session(
+                codex_home=codex_home,
+                session_id=target_sid,
+                message_id=int(rowid),
+                attachments=row_discord_attachments,
+            )
+            attachment_notice_text = _discord_attachment_notice_text(
+                saved_attachments=saved_attachments,
+                attachment_errors=attachment_errors,
+            )
+            if saved_attachments:
+                prompt_for_dispatch = _augment_prompt_with_discord_attachments(
+                    prompt=prompt_for_dispatch or "",
+                    saved_attachments=saved_attachments,
+                    attachment_errors=attachment_errors,
+                )
+                if isinstance(rec, dict):
+                    first_saved = saved_attachments[0].get("path") if isinstance(saved_attachments[0], dict) else None
+                    if isinstance(first_saved, str) and first_saved.strip():
+                        rec["last_discord_attachment_dir"] = str(Path(first_saved).parent)
+            elif attachment_errors and not (isinstance(prompt_for_dispatch, str) and prompt_for_dispatch.strip()):
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=target_sid,
+                    kind="error",
+                    text=(
+                        "I couldn't use the Discord attachment(s). "
+                        + "; ".join(attachment_errors[:3])
+                    ),
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    agent=session_agent,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
+
         if not prompt_for_dispatch:
             _send_structured(
                 codex_home=codex_home,
@@ -10244,6 +10542,7 @@ def _process_inbound_replies(
             discord_channel_id=row_discord_channel_id,
             discord_parent_channel_id=row_discord_parent_channel_id,
         )
+        attachment_notice_prefix = f"{attachment_notice_text} " if attachment_notice_text else ""
 
         def _session_surface_text(base_text: str) -> str:
             return _append_surface_onboarding_hint(
@@ -10266,7 +10565,7 @@ def _process_inbound_replies(
                 session_id=target_sid,
                 kind="accepted",
                 text=_session_surface_text(
-                    f"Sent to tmux pane for @{_session_ref(target_sid)}. "
+                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
                     f"Check progress on your Mac.{context_followup_text}"
                 ),
                 max_message_chars=max_message_chars,
@@ -10299,7 +10598,7 @@ def _process_inbound_replies(
                 session_id=target_sid,
                 kind="accepted",
                 text=_session_surface_text(
-                    f"Sent to tmux pane for @{_session_ref(target_sid)}. "
+                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
                     f"Execution may be delayed; check the pane on your Mac.{context_followup_text}"
                 ),
                 max_message_chars=max_message_chars,
@@ -10397,7 +10696,7 @@ def _process_inbound_replies(
                     session_id=target_sid,
                     kind="accepted",
                     text=_session_surface_text(
-                        f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
+                        f"{attachment_notice_prefix}Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
                         f"Waiting for output.{context_followup_text}"
                     ),
                     max_message_chars=max_message_chars,
@@ -10488,7 +10787,7 @@ def _process_inbound_replies(
                 session_id=target_sid,
                 kind="accepted",
                 text=_session_surface_text(
-                    f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
+                    f"{attachment_notice_prefix}Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
                     f"Waiting for output.{context_followup_text}"
                 ),
                 max_message_chars=max_message_chars,

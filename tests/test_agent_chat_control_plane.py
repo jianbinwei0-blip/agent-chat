@@ -1553,6 +1553,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         }
 
         with (
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=(None, None)),
             mock.patch.object(cp.reply, "_run_agent_resume", return_value=None),
             mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value="before"),
             mock.patch.object(cp.reply, "_read_last_assistant_text_from_session", return_value=None),
@@ -1581,6 +1582,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         with (
             mock.patch.object(cp, "_current_agent", return_value="codex"),
+            mock.patch.object(cp, "_tmux_discover_codex_pane_for_session", return_value=(None, None)),
             mock.patch.object(cp, "_lookup_agent_home_path", return_value=Path("/tmp/pi-home")) as home_mock,
             mock.patch.object(cp.reply, "_run_agent_resume", return_value="ok") as resume_mock,
             mock.patch.object(cp.reply, "_read_last_user_text_from_session", return_value=None),
@@ -3309,6 +3311,165 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 351)
         resolve_context_mock.assert_not_called()
         self.assertTrue(any(msg.get("session_id") == "sid-discord" for msg in sent))
+
+    def test_process_inbound_replies_discord_attachment_only_routes_to_bound_pi_session(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-discord": {
+                    "session_id": "sid-discord",
+                    "ref": "sid-disc",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "awaiting_input": False,
+                }
+            },
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                352: {
+                    "transport": "discord",
+                    "discord_channel_id": "chan-123",
+                    "discord_parent_channel_id": "chan-123",
+                    "discord_sender_user_id": "user-1",
+                    "discord_attachments": [
+                        {
+                            "id": "att-1",
+                            "filename": "error.log",
+                            "url": "https://cdn.example/error.log",
+                            "size": 42,
+                            "content_type": "text/plain",
+                        }
+                    ],
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(352, "", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_resolve_session_from_reply_context") as resolve_context_mock,
+            mock.patch.object(cp, "_resolve_session_agent", return_value="pi"),
+            mock.patch.object(
+                cp,
+                "_store_discord_attachments_for_session",
+                return_value=(
+                    [
+                        {
+                            "filename": "error.log",
+                            "path": "/tmp/discord_attachments/sid-discord/352/01-error.log",
+                            "size": 42,
+                            "content_type": "text/plain",
+                        }
+                    ],
+                    [],
+                ),
+            ) as store_mock,
+            mock.patch.object(cp, "_dispatch_prompt_to_session", return_value=("tmux", None)) as dispatch_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+            mock.patch.object(cp, "_discord_sender_is_owner", return_value=False),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="discord-recipient",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 352)
+        resolve_context_mock.assert_not_called()
+        store_mock.assert_called_once()
+        dispatch_mock.assert_called_once()
+        routed_prompt = dispatch_mock.call_args.kwargs.get("prompt")
+        self.assertIsInstance(routed_prompt, str)
+        self.assertIn("Discord attachment handoff:", routed_prompt or "")
+        self.assertIn("error.log", routed_prompt or "")
+        self.assertIn("/tmp/discord_attachments/sid-discord/352/01-error.log", routed_prompt or "")
+        self.assertIn("Please inspect the attached files and continue.", routed_prompt or "")
+        self.assertTrue(any("Attached 1 file." in str(msg.get("text", "")) for msg in sent))
+
+    def test_process_inbound_replies_discord_attachment_without_bound_session_returns_guidance(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                353: {
+                    "transport": "discord",
+                    "discord_channel_id": "control-chan",
+                    "discord_parent_channel_id": "control-chan",
+                    "discord_sender_user_id": "user-1",
+                    "discord_attachments": [
+                        {
+                            "id": "att-1",
+                            "filename": "error.log",
+                            "url": "https://cdn.example/error.log",
+                            "size": 42,
+                            "content_type": "text/plain",
+                        }
+                    ],
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(353, "", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+            mock.patch.object(cp, "_discord_sender_is_owner", return_value=False),
+            mock.patch.object(cp, "_resolve_session_from_reply_context", return_value=(None, "No tracked sessions yet.")),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="discord-recipient",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 353)
+        self.assertTrue(any(msg.get("kind") == "error" for msg in sent))
+        self.assertTrue(any("currently needs an existing target session" in str(msg.get("text", "")) for msg in sent))
 
     def test_process_inbound_replies_implicit_telegram_infers_single_bound_thread_when_missing(self) -> None:
         registry: dict[str, object] = {

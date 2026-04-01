@@ -94,6 +94,7 @@ A session channel:
 - is bound one-to-one with exactly one session
 - receives outbound session updates, needs-input prompts, and follow-up replies
 - accepts plain-text inbound replies that route back to that same session
+- can hand off Discord file attachments to an existing bound Pi session in the first-pass attachment workflow
 
 Session channels are created lazily on the first meaningful outbound delivery for a session. `agent-chat` does not eagerly create channels for every discovered session.
 
@@ -149,6 +150,29 @@ When Pi is blocked waiting on you, Discord now uses a clearer waiting-state mess
 - the active question/request is repeated in a cleaner plain-text block
 - the message ends with obvious next-step suggestions such as `continue`, `summarize`, `yes`, `no`, or numeric choices when Pi provided options
 - in a bound session channel, the message reminds you that plain text in that same channel continues the same session
+
+### Discord attachment handoff (first pass)
+
+For existing Discord-bound Pi sessions, you can now attach files directly in Discord.
+
+Current first-pass behavior:
+- works best in a bound Discord session channel or thread that already resolves to an existing session
+- downloads supported Discord attachments into local control-plane storage before routing the message to Pi
+- appends a prompt block telling Pi which local files were attached and where they were saved
+- if you also include text, that text is routed alongside the attachment handoff
+- if the attachment message has no text, agent-chat treats it like a follow-up request to inspect the attached files and continue
+
+Storage:
+- default local storage root: `~/.codex/tmp/discord_attachments/`
+- session/message-specific subdirectories are created under that root
+- optional overrides:
+  - `AGENT_CHAT_DISCORD_ATTACHMENT_DIR`
+  - `AGENT_CHAT_DISCORD_ATTACHMENT_MAX_BYTES`
+
+Current limitations:
+- first pass is intended for existing bound sessions, not attachment-only new-session creation from the control channel
+- downloads that exceed the configured size limit are skipped and reported back in Discord
+- only Discord file attachments are handled; embeds and external link previews are not treated as files
 
 ## Launchd Notes
 

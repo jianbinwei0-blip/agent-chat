@@ -79,6 +79,10 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - Pi `needs_input` deliveries now explicitly say Pi is waiting for the user on `@<session_ref>`
   - waiting messages append suggested plain-text replies such as `continue`, `summarize`, `yes`, `no`, or numeric option hints when Pi supplied structured choices
   - when the session is bound to a Discord session channel, the waiting message reinforces that replying there with plain text continues the same session
+- Discord attachment handoff
+  - inbound Discord session replies can now include file attachments for existing Pi-bound sessions
+  - attachments are downloaded into local control-plane storage and appended to the routed Pi prompt as local file paths
+  - attachment-only Discord replies are treated as a request to inspect the files and continue, but only when the current Discord context already resolves to an existing session
 
 ## Discord Session-Channel Mode
 
@@ -95,6 +99,7 @@ When `AGENT_DISCORD_SESSION_CHANNELS=1`:
 - inbound routing resolves the target from stored session-channel metadata first, then falls back to generic conversation bindings.
 - auto-created session channels can be placed under `AGENT_DISCORD_SESSION_CATEGORY_ID` when configured.
 - setup requirements for this mode are: bot token, **Message Content Intent**, access to the control channel, and `Manage Channels` if automatic channel creation is enabled.
+- bound Discord session replies can also carry file attachments into Pi; files are stored locally under the control-plane state directory unless overridden by env.
 
 ## Missing-Session Choice Flow
 

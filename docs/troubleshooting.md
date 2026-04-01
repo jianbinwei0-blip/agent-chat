@@ -304,6 +304,20 @@ Checks:
 - if session-channel mode is enabled, remember that the control channel intentionally stays unbound and plain text there is treated as control-surface input, not session input
 - after recent fixes, inbound Discord routing resolves existing session channels from session metadata first and only then falls back to generic conversation bindings; if behavior still regresses, capture `doctor --json` plus the relevant session record and stderr trace lines
 
+### Discord attachments do not reach Pi
+
+Symptoms:
+- a file was attached in a bound Discord session channel, but Pi behaved as if it never saw it
+- Discord reports that the attachment could not be used or downloaded
+
+Checks:
+- confirm the Discord message was sent in a channel/thread already bound to an existing session
+- for attachment-only replies, confirm the current Discord surface already resolves to the target session; first-pass attachment handoff does not create a brand new session from a control-channel file upload alone
+- check the local storage root (default `~/.codex/tmp/discord_attachments/`) for the session/message subdirectory
+- verify the file does not exceed `AGENT_CHAT_DISCORD_ATTACHMENT_MAX_BYTES`
+- inspect launchd stderr for download failures (network/HTTP/permission errors)
+- if the channel is not bound, send `where` or `bind @<session_ref>` first and retry
+
 ### Ambiguous replies or wrong target session
 
 Checks:
