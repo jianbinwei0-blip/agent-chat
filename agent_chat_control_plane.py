@@ -5246,6 +5246,55 @@ def _bind_conversation_to_session(
     bindings[key] = sid
 
 
+
+def _bind_discord_context_to_session(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    discord_channel_id: str | None,
+    discord_parent_channel_id: str | None = None,
+) -> None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    current_channel = discord_channel_id.strip() if isinstance(discord_channel_id, str) else ""
+    parent_channel = discord_parent_channel_id.strip() if isinstance(discord_parent_channel_id, str) else ""
+    if not sid:
+        return
+
+    if parent_channel and current_channel and parent_channel != current_channel:
+        _bind_conversation_to_session(
+            registry=registry,
+            transport="discord",
+            channel_id=parent_channel,
+            thread_id=current_channel,
+            session_id=sid,
+        )
+        _discord_store_session_channel_metadata(
+            registry=registry,
+            session_id=sid,
+            channel_id=current_channel,
+            channel_name=None,
+            parent_id=parent_channel,
+        )
+        return
+
+    target_channel = current_channel or parent_channel
+    if not target_channel:
+        return
+    _bind_conversation_to_session(
+        registry=registry,
+        transport="discord",
+        channel_id=target_channel,
+        thread_id=0,
+        session_id=sid,
+    )
+    _discord_store_session_channel_metadata(
+        registry=registry,
+        session_id=sid,
+        channel_id=target_channel,
+        channel_name=None,
+    )
+
+
 def _lookup_session_by_conversation(
     *,
     registry: dict[str, Any],
@@ -9896,12 +9945,11 @@ def _process_inbound_replies(
                 channel_id=row_context_channel_id,
                 thread_id=row_context_thread_id,
             ):
-                _bind_conversation_to_session(
+                _bind_discord_context_to_session(
                     registry=registry,
-                    transport="discord",
-                    channel_id=row_context_channel_id,
-                    thread_id=row_context_thread_id,
                     session_id=sid,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
                 )
                 bound = True
 
@@ -10063,12 +10111,11 @@ def _process_inbound_replies(
                 channel_id=row_context_channel_id,
                 thread_id=row_context_thread_id,
             ):
-                _bind_conversation_to_session(
+                _bind_discord_context_to_session(
                     registry=registry,
-                    transport="discord",
-                    channel_id=row_context_channel_id,
-                    thread_id=row_context_thread_id,
                     session_id=sid,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
                 )
 
             created_label = f" ({label})" if label else ""
@@ -10379,12 +10426,11 @@ def _process_inbound_replies(
             channel_id=row_context_channel_id,
             thread_id=row_context_thread_id,
         ):
-            _bind_conversation_to_session(
+            _bind_discord_context_to_session(
                 registry=registry,
-                transport="discord",
-                channel_id=row_context_channel_id,
-                thread_id=row_context_thread_id,
                 session_id=target_sid,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
             )
 
         sessions = registry.get("sessions")

@@ -5112,6 +5112,70 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertIn("Reply here with plain text to continue @abcd1234.", sent_discord[0][2])
         self.assertIn("Try: `1`, `2`, `summarize`, or your own instructions.", sent_discord[0][2])
 
+    def test_bind_discord_context_to_session_updates_metadata_for_channel_reuse(self) -> None:
+        registry = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "old-chan",
+                }
+            },
+            "conversation_bindings": {
+                "discord:old-chan:0": "sid-pi",
+            },
+        }
+        sent_discord: list[tuple[str, str, str]] = []
+
+        def _capture_discord(*, token: str, channel_id: str, message: str) -> bool:
+            sent_discord.append((token, channel_id, message))
+            return True
+
+        cp._bind_discord_context_to_session(  # type: ignore[attr-defined]
+            registry=registry,
+            session_id="sid-pi",
+            discord_channel_id="existing-chan",
+            discord_parent_channel_id="existing-chan",
+        )
+
+        self.assertEqual(registry["sessions"]["sid-pi"]["discord_channel_id"], "existing-chan")  # type: ignore[index]
+        self.assertEqual(registry["conversation_bindings"].get("discord:existing-chan:0"), "sid-pi")  # type: ignore[index]
+        self.assertNotEqual(registry["sessions"]["sid-pi"]["discord_channel_id"], "old-chan")  # type: ignore[index]
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                cp.os.environ,  # type: ignore[attr-defined]
+                {
+                    "AGENT_CHAT_TRANSPORT": "discord",
+                    "AGENT_DISCORD_BOT_TOKEN": "discord-token",
+                    "AGENT_DISCORD_CHANNEL_ID": "control-chan",
+                    "AGENT_DISCORD_SESSION_CHANNELS": "1",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cp, "_send_discord_message", side_effect=_capture_discord),
+            mock.patch.object(cp, "_discord_ensure_session_channel") as ensure_mock,
+            mock.patch.object(cp.outbound, "_send_imessage") as imessage_send,
+        ):
+            cp._send_structured(  # type: ignore[attr-defined]
+                codex_home=Path(td),
+                recipient="discord-recipient",
+                session_id="sid-pi",
+                kind="responded",
+                text="done",
+                max_message_chars=1800,
+                dry_run=False,
+                message_index={},
+                registry=registry,
+            )
+
+        self.assertEqual(imessage_send.call_count, 0)
+        ensure_mock.assert_not_called()
+        self.assertGreaterEqual(len(sent_discord), 1)
+        self.assertEqual(sent_discord[0][1], "existing-chan")
+
     def test_send_structured_uses_telegram_transport_when_enabled(self) -> None:
         sent_telegram: list[tuple[str, str, str, int | None]] = []
 
