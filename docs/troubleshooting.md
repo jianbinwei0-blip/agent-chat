@@ -13,7 +13,13 @@ python3 agent_chat_control_plane.py doctor --json
 python3 agent_chat_control_plane.py once --trace
 ```
 
-For a guided Telegram-first setup with prompts, run:
+For a guided setup flow with prompts, run:
+
+```bash
+bash scripts/setup-agent-chat-easy.sh
+```
+
+If you already know you want Telegram-only onboarding, you can still use:
 
 ```bash
 bash scripts/setup-telegram-easy.sh
@@ -27,8 +33,10 @@ bash scripts/setup-telegram-easy.sh
 2. Setup succeeds but Telegram send/receive is missing:
    - run `scripts/telegram-diagnose.sh`
    - confirm token, transport mode, chat ID bootstrap, and no `HTTP 409 Conflict`
+   - if you expected more or fewer autonomous updates, check `AGENT_CHAT_NOTIFICATION_LEVEL` (`quiet`, `default`, `verbose`)
 3. Telegram receives message but routing does nothing:
-   - in topic, send `@<session_ref> hello` once to bind topic/session
+   - in topic, send `bind @<session_ref>` once to bind topic/session (or `@<session_ref> hello`)
+   - send `where` to confirm what the topic is currently bound to
    - rerun `scripts/telegram-diagnose.sh --pause-launchd` for deterministic upstream probe
 4. Inbound remains disabled after setup:
    - rerun `setup-launchd`/`setup-permissions`
@@ -252,7 +260,7 @@ Symptoms:
 Checks:
 - run `scripts/telegram-diagnose.sh --pause-launchd` for deterministic upstream polling checks
 - if `AGENT_TELEGRAM_CHAT_ID` is empty, run `setup-launchd` and complete bootstrap by sending plain text from the target topic/group
-- ensure the topic is bound at least once: send `@<session_ref> ping` in that topic, then retry plain text.
+- ensure the topic is bound at least once: send `bind @<session_ref>` in that topic (or `@<session_ref> ping`), then retry plain text.
 - enable trace and inspect logs:
   - `AGENT_CHAT_TRACE=1`
   - `rg -n "telegram getUpdates|inbound rowid=" ~/Library/Logs/agent-chat.launchd.err.log | tail -n 80`
@@ -279,7 +287,7 @@ Checks:
 - enable **Message Content Intent** for the bot; without it, Discord messages may be visible to the gateway/API but arrive with empty `content`
 - set `AGENT_DISCORD_CHANNEL_ID` or `AGENT_DISCORD_CHANNEL_IDS` to the control-channel allowlist you expect the poller to watch
 - if `AGENT_DISCORD_SESSION_CHANNELS=1`, also verify the bot has permission to create channels (`Manage Channels`) and, when used, access to `AGENT_DISCORD_SESSION_CATEGORY_ID`
-- if you are using threads, send one explicit bind message first (`@<session_ref> hello`) so the control plane stores a canonical conversation binding
+- if you are using threads, send one explicit bind message first (`bind @<session_ref>` or `@<session_ref> hello`) so the control plane stores a canonical conversation binding
 - enable trace and inspect launchd stderr for Discord polling failures
 - run `doctor --json` and verify `transport.discord_enabled`, `transport.discord_token_present`, and `transport.discord_channel_ids`
 

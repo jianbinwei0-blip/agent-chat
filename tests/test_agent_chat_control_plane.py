@@ -51,6 +51,85 @@ class TestAgentChatControlPlane(unittest.TestCase):
         text = warn_mock.call_args.args[0]
         self.assertIn("app or Python binary", text)
 
+    def test_run_guided_setup_telegram_writes_env_and_runs_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".env.telegram.local"
+            with (
+                mock.patch.dict(cp.os.environ, {}, clear=True),
+                mock.patch.object(cp, "_ensure_tmux_available_for_setup", return_value=("/opt/homebrew/bin/tmux", None)),
+                mock.patch.object(cp, "_run_setup_notify_hook", return_value=0) as notify_mock,
+                mock.patch.object(cp, "_run_setup_launchd", return_value=0) as launchd_mock,
+                mock.patch.object(cp, "_run_doctor", return_value=0) as doctor_mock,
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                rc = cp._run_guided_setup(  # type: ignore[attr-defined]
+                    agent="claude",
+                    transport="telegram",
+                    recipient=None,
+                    telegram_token="telegram-token",
+                    telegram_chat_id="",
+                    discord_token=None,
+                    discord_control_channel_id=None,
+                    discord_session_channels=None,
+                    discord_session_category_id=None,
+                    env_file=str(env_file),
+                    python_bin="/usr/bin/python3",
+                    open_settings=False,
+                    input_fn=lambda prompt: "",
+                )
+
+            self.assertEqual(rc, 0)
+            notify_mock.assert_called_once()
+            launchd_mock.assert_called_once()
+            doctor_mock.assert_called_once()
+            text = env_file.read_text(encoding="utf-8")
+            self.assertIn('export AGENT_CHAT_AGENT="claude"', text)
+            self.assertIn('export AGENT_CHAT_TRANSPORT="telegram"', text)
+            self.assertIn('export AGENT_TELEGRAM_BOT_TOKEN="telegram-token"', text)
+            self.assertIn('unset AGENT_IMESSAGE_TO', text)
+            self.assertIn("guided setup", out.getvalue().lower())
+
+    def test_run_guided_setup_prompts_for_missing_values(self) -> None:
+        answers = iter(["pi", "discord", "555555", "", "yes", ""])
+
+        def fake_input(prompt: str) -> str:
+            return next(answers)
+
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".env.agent-chat.local"
+            with (
+                mock.patch.dict(cp.os.environ, {}, clear=True),
+                mock.patch.object(cp, "_ensure_tmux_available_for_setup", return_value=("/opt/homebrew/bin/tmux", None)),
+                mock.patch.object(cp, "_run_setup_notify_hook", return_value=0),
+                mock.patch.object(cp, "_run_setup_launchd", return_value=0),
+                mock.patch.object(cp, "_run_doctor", return_value=0),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                rc = cp._run_guided_setup(  # type: ignore[attr-defined]
+                    agent=None,
+                    transport=None,
+                    recipient=None,
+                    telegram_token=None,
+                    telegram_chat_id=None,
+                    discord_token=None,
+                    discord_control_channel_id=None,
+                    discord_session_channels=None,
+                    discord_session_category_id=None,
+                    env_file=str(env_file),
+                    python_bin="/usr/bin/python3",
+                    open_settings=False,
+                    input_fn=fake_input,
+                    secret_input_fn=lambda prompt: "discord-token",
+                )
+
+            self.assertEqual(rc, 0)
+            text = env_file.read_text(encoding="utf-8")
+            self.assertIn('export AGENT_CHAT_AGENT="pi"', text)
+            self.assertIn('export AGENT_CHAT_TRANSPORT="discord"', text)
+            self.assertIn('export AGENT_DISCORD_BOT_TOKEN="discord-token"', text)
+            self.assertIn('export AGENT_DISCORD_CONTROL_CHANNEL_ID="555555"', text)
+            self.assertIn('export AGENT_DISCORD_SESSION_CHANNELS="1"', text)
+
     def test_parse_inbound_command_help(self) -> None:
         cmd = cp._parse_inbound_command("help")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "help")
@@ -58,6 +137,15 @@ class TestAgentChatControlPlane(unittest.TestCase):
     def test_parse_inbound_command_list(self) -> None:
         cmd = cp._parse_inbound_command("list")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "list")
+
+    def test_parse_inbound_command_context(self) -> None:
+        cmd = cp._parse_inbound_command("where")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "context")
+
+    def test_parse_inbound_command_bind(self) -> None:
+        cmd = cp._parse_inbound_command("bind @019c33b4")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "bind")
+        self.assertEqual(cmd.get("session_ref"), "019c33b4")
 
     def test_parse_inbound_command_status_with_ref(self) -> None:
         cmd = cp._parse_inbound_command("status @019c33b4")  # type: ignore[attr-defined]
@@ -90,6 +178,10 @@ class TestAgentChatControlPlane(unittest.TestCase):
         cmd = cp._parse_inbound_command("/help@agentchat_bot")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "help")
 
+    def test_parse_inbound_command_context_with_slash_command(self) -> None:
+        cmd = cp._parse_inbound_command("/context@agentchat_bot")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "context")
+
     def test_parse_inbound_command_resume_with_slash_command(self) -> None:
         cmd = cp._parse_inbound_command("/resume@agentchat_bot @019c33b4 apply patch")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "resume")
@@ -106,6 +198,84 @@ class TestAgentChatControlPlane(unittest.TestCase):
         cmd = cp._parse_inbound_command("please continue")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "implicit")
         self.assertEqual(cmd.get("prompt"), "please continue")
+
+    def test_render_session_list_includes_activity_and_binding_summary(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-1": {
+                    "session_id": "sid-1",
+                    "ref": "abcd1234",
+                    "alias": "bugfix",
+                    "agent": "claude",
+                    "awaiting_input": True,
+                    "last_response_ts": 700,
+                }
+            },
+            "telegram_thread_bindings": {"123456:99": "sid-1"},
+            "conversation_bindings": {},
+        }
+
+        with mock.patch.object(cp.time, "time", return_value=1000):
+            rendered = cp._render_session_list(registry=registry)  # type: ignore[attr-defined]
+
+        self.assertIn("@abcd1234 (bugfix)", rendered)
+        self.assertIn("waiting", rendered)
+        self.assertIn("5m ago", rendered)
+        self.assertIn("Telegram topic 123456:99", rendered)
+
+    def test_render_context_status_for_bound_telegram_topic(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-1": {
+                    "session_id": "sid-1",
+                    "ref": "abcd1234",
+                    "alias": "bugfix",
+                    "agent": "claude",
+                }
+            },
+            "telegram_thread_bindings": {"123456:99": "sid-1"},
+            "conversation_bindings": {},
+        }
+
+        rendered = cp._render_context_status(  # type: ignore[attr-defined]
+            registry=registry,
+            transport="telegram",
+            recipient="+15551234567",
+            telegram_chat_id="123456",
+            telegram_message_thread_id=99,
+        )
+
+        self.assertIn("Telegram topic 123456:99", rendered)
+        self.assertIn("@abcd1234 (bugfix, Claude)", rendered)
+        self.assertIn("bind @<session_ref>", rendered)
+
+    def test_append_surface_onboarding_hint_only_once_per_surface(self) -> None:
+        registry: dict[str, object] = {
+            "surface_onboarding_control": {},
+            "surface_onboarding_session": {},
+        }
+
+        first = cp._append_surface_onboarding_hint(  # type: ignore[attr-defined]
+            registry=registry,
+            text="Sessions:",
+            bucket="control",
+            transport="telegram",
+            recipient="+15551234567",
+            telegram_chat_id="123456",
+            telegram_message_thread_id=99,
+        )
+        second = cp._append_surface_onboarding_hint(  # type: ignore[attr-defined]
+            registry=registry,
+            text="Sessions:",
+            bucket="control",
+            transport="telegram",
+            recipient="+15551234567",
+            telegram_chat_id="123456",
+            telegram_message_thread_id=99,
+        )
+
+        self.assertIn("Quick start:", first)
+        self.assertEqual(second, "Sessions:")
 
     def test_bind_telegram_thread_to_session_rebinds_session_to_single_topic(self) -> None:
         registry: dict[str, object] = {
@@ -2834,6 +3004,182 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 301)
         resolve_context_mock.assert_not_called()
         self.assertTrue(any(msg.get("session_id") == "sid-123" for msg in sent))
+
+    def test_process_inbound_replies_context_command_returns_bound_telegram_topic_status(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-123": {
+                    "session_id": "sid-123",
+                    "ref": "abcd1234",
+                    "alias": "bugfix",
+                    "agent": "claude",
+                }
+            },
+            "telegram_thread_bindings": {"123456:888": "sid-123"},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                302: {
+                    "transport": "telegram",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 888,
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(302, "where", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 302)
+        self.assertTrue(any(msg.get("kind") == "status" for msg in sent))
+        self.assertTrue(any("Bound session" in str(msg.get("text", "")) for msg in sent))
+
+    def test_process_inbound_replies_bind_command_binds_current_telegram_topic(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-123": {
+                    "session_id": "sid-123",
+                    "ref": "abcd1234",
+                    "agent": "claude",
+                }
+            },
+            "aliases": {"abcd1234": "sid-123"},
+            "telegram_thread_bindings": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                303: {
+                    "transport": "telegram",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 888,
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(303, "bind @abcd1234", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 303)
+        bindings = registry.get("telegram_thread_bindings")
+        self.assertIsInstance(bindings, dict)
+        if not isinstance(bindings, dict):
+            self.fail("expected telegram thread bindings")
+        self.assertEqual(bindings.get("123456:888"), "sid-123")
+        self.assertTrue(any("Bound this Telegram topic" in str(msg.get("text", "")) for msg in sent))
+
+    def test_process_inbound_replies_new_session_auto_binds_current_telegram_topic(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {},
+            "telegram_thread_bindings": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                304: {
+                    "transport": "telegram",
+                    "telegram_chat_id": "123456",
+                    "telegram_message_thread_id": 888,
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(304, "new bugfix: inspect failing tests", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_create_new_session", return_value=("sid-new", "/tmp/sessions/sid-new.jsonl", "ok")),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=["+15551234567"],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 304)
+        bindings = registry.get("telegram_thread_bindings")
+        self.assertIsInstance(bindings, dict)
+        if not isinstance(bindings, dict):
+            self.fail("expected telegram thread bindings")
+        self.assertEqual(bindings.get("123456:888"), "sid-new")
+        self.assertTrue(any("Plain-text replies in this topic" in str(msg.get("text", "")) for msg in sent))
 
     def test_lookup_session_by_discord_channel_id_prefers_session_metadata(self) -> None:
         registry: dict[str, object] = {
@@ -5801,6 +6147,39 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rc, 0)
         setup_mock.assert_not_called()
         self.assertIn("only required when AGENT_CHAT_TRANSPORT includes iMessage", out.getvalue())
+
+    def test_main_guided_setup_uses_new_command(self) -> None:
+        with mock.patch.object(cp, "_run_guided_setup", return_value=0) as guided_mock:
+            rc = cp.main(
+                [
+                    "guided-setup",
+                    "--agent",
+                    "codex",
+                    "--transport",
+                    "telegram",
+                    "--telegram-token",
+                    "token-123",
+                    "--env-file",
+                    "/tmp/agent-chat.env",
+                    "--no-open",
+                ]
+            )
+
+        self.assertEqual(rc, 0)
+        guided_mock.assert_called_once_with(
+            agent="codex",
+            transport="telegram",
+            recipient="",
+            telegram_token="token-123",
+            telegram_chat_id="",
+            discord_token="",
+            discord_control_channel_id="",
+            discord_session_channels=None,
+            discord_session_category_id="",
+            env_file="/tmp/agent-chat.env",
+            python_bin=str(Path(cp.sys.executable).resolve()),  # type: ignore[attr-defined]
+            open_settings=False,
+        )
 
     def test_main_setup_notify_hook_uses_new_command(self) -> None:
         with (

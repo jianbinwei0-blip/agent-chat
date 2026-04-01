@@ -122,6 +122,7 @@ That metadata-first lookup keeps an existing session channel sticky across resta
 Use commands like:
 - `help`
 - `list`
+- `where` / `context`
 - `status @abcd1234`
 - `new bugfix: investigate failing test`
 
@@ -139,6 +140,9 @@ Just send plain text, for example:
 - `fix the failing test`
 
 You do not need `@<ref>` in a bound session channel.
+If you need to move the current channel/thread to another session, send `bind @<session_ref>`.
+If you want the current channel/thread explained back to you, send `where` or `context`.
+On first use, agent-chat also appends a one-time quick-start hint so users can learn the control/session channel model in-context.
 
 ## Launchd Notes
 

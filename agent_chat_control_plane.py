@@ -143,10 +143,12 @@ _TCC_MISMATCH_SUBSTRING = "Failed to match existing code requirement for subject
 _MAX_DOCTOR_PANE_SAMPLE = 8
 _HELP_TEXT = (
     "Commands:\n"
-    "- list\n"
-    "- status @<session_ref>\n"
-    "- @<session_ref> <instruction>\n"
-    "- new <label>: <instruction>\n"
+    "- list — recent sessions\n"
+    "- where / context — explain this surface\n"
+    "- status @<session_ref> — inspect one session\n"
+    "- bind @<session_ref> — bind this Telegram topic or Discord channel/thread\n"
+    "- @<session_ref> <instruction> — send work to a session\n"
+    "- new <label>: <instruction> — start a new session\n"
     "- help"
 )
 
@@ -3326,6 +3328,563 @@ def _run_setup_permissions(
     sys.stdout.flush()
     return 1
 
+def _guided_setup_default_env_file(*, transport: str) -> Path:
+    normalized = transport.strip().lower()
+    if normalized == "telegram":
+        return Path(".env.telegram.local")
+    return Path(".env.agent-chat.local")
+
+
+_GUIDED_SETUP_TRANSPORTS = ("telegram", "discord", "imessage")
+_GUIDED_SETUP_RUNTIME_CHOICES = tuple(sorted(_SUPPORTED_AGENTS))
+
+
+
+def _prompt_choice(
+    *,
+    prompt: str,
+    choices: tuple[str, ...],
+    default: str,
+    input_fn: Callable[[str], str] = input,
+) -> str:
+    allowed = {item.strip().lower() for item in choices if item.strip()}
+    default_norm = default.strip().lower()
+    while True:
+        raw = input_fn(prompt).strip().lower()
+        if not raw:
+            raw = default_norm
+        if raw in allowed:
+            return raw
+        sys.stdout.write(f"Invalid choice '{raw}'. Choose one of: {', '.join(choices)}.\n")
+        sys.stdout.flush()
+
+
+
+def _prompt_text(
+    *,
+    prompt: str,
+    default: str | None = None,
+    allow_empty: bool = False,
+    secret: bool = False,
+    input_fn: Callable[[str], str] = input,
+    secret_input_fn: Callable[[str], str] | None = None,
+) -> str:
+    while True:
+        raw: str
+        if secret:
+            reader = secret_input_fn
+            if reader is None:
+                try:
+                    import getpass
+
+                    reader = getpass.getpass
+                except Exception:
+                    reader = input_fn
+            try:
+                raw = reader(prompt)
+            except Exception:
+                raw = input_fn(prompt)
+        else:
+            raw = input_fn(prompt)
+        value = raw.strip()
+        if not value and isinstance(default, str):
+            value = default.strip()
+        if value or allow_empty:
+            return value
+        sys.stdout.write("A value is required.\n")
+        sys.stdout.flush()
+
+
+
+def _prompt_bool(
+    *,
+    prompt: str,
+    default: bool,
+    input_fn: Callable[[str], str] = input,
+) -> bool:
+    while True:
+        raw = input_fn(prompt).strip().lower()
+        if not raw:
+            return bool(default)
+        if raw in {"y", "yes", "true", "1"}:
+            return True
+        if raw in {"n", "no", "false", "0"}:
+            return False
+        sys.stdout.write("Please answer yes or no.\n")
+        sys.stdout.flush()
+
+
+
+def _guided_setup_file_lines(path: Path) -> list[str]:
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    return []
+
+
+
+def _guided_setup_write_shell_var(*, path: Path, key: str, value: str | None, unset: bool = False) -> None:
+    lines = _guided_setup_file_lines(path)
+    export_prefix = f"export {key}="
+    unset_line = f"unset {key}"
+    if unset:
+        new_line = unset_line
+    else:
+        safe = (value or "").replace("\\", "\\\\").replace('"', '\\"')
+        new_line = f'export {key}="{safe}"'
+
+    out: list[str] = []
+    updated = False
+    for line in lines:
+        stripped = line.strip()
+        if line.startswith(export_prefix) or stripped == unset_line:
+            if not updated:
+                out.append(new_line)
+                updated = True
+            continue
+        out.append(line)
+    if not updated:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(new_line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+
+def _guided_setup_runtime_home_value(*, agent: str) -> str | None:
+    normalized = _normalize_agent(agent=agent)
+    if normalized == "claude":
+        return os.environ.get("CLAUDE_HOME", "").strip() or str(Path.home() / ".claude")
+    if normalized == "pi":
+        return (
+            os.environ.get("AGENT_CHAT_PI_HOME", "").strip()
+            or os.environ.get("PI_CODING_AGENT_DIR", "").strip()
+            or str(Path.home() / ".pi" / "agent")
+        )
+    return os.environ.get("AGENT_CHAT_HOME", "").strip() or str(Path.home() / ".codex")
+
+
+
+def _guided_setup_write_env_file(
+    *,
+    path: Path,
+    agent: str,
+    transport: str,
+    recipient: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+    discord_token: str | None,
+    discord_control_channel_id: str | None,
+    discord_session_channels: bool,
+    discord_session_category_id: str | None,
+) -> None:
+    normalized_agent = _normalize_agent(agent=agent)
+    normalized_transport = transport.strip().lower()
+
+    _guided_setup_write_shell_var(path=path, key="AGENT_CHAT_AGENT", value=normalized_agent)
+    _guided_setup_write_shell_var(path=path, key="AGENT_CHAT_TRANSPORT", value=normalized_transport)
+    _guided_setup_write_shell_var(path=path, key="AGENT_CHAT_NOTIFY_MODE", value="route")
+    _guided_setup_write_shell_var(
+        path=path,
+        key="AGENT_CHAT_HOME",
+        value=os.environ.get("AGENT_CHAT_HOME", "").strip() or str(Path.home() / ".codex"),
+    )
+    _guided_setup_write_shell_var(
+        path=path,
+        key="CLAUDE_HOME",
+        value=os.environ.get("CLAUDE_HOME", "").strip() or str(Path.home() / ".claude"),
+    )
+    _guided_setup_write_shell_var(
+        path=path,
+        key="AGENT_CHAT_PI_HOME",
+        value=(
+            os.environ.get("AGENT_CHAT_PI_HOME", "").strip()
+            or os.environ.get("PI_CODING_AGENT_DIR", "").strip()
+            or str(Path.home() / ".pi" / "agent")
+        ),
+    )
+
+    if normalized_transport == "imessage":
+        _guided_setup_write_shell_var(path=path, key="AGENT_IMESSAGE_TO", value=recipient or "")
+    else:
+        _guided_setup_write_shell_var(path=path, key="AGENT_IMESSAGE_TO", value=None, unset=True)
+
+    if normalized_transport == "telegram":
+        _guided_setup_write_shell_var(path=path, key="AGENT_TELEGRAM_BOT_TOKEN", value=telegram_token or "")
+        _guided_setup_write_shell_var(path=path, key="AGENT_TELEGRAM_CHAT_ID", value=telegram_chat_id or "")
+        _guided_setup_write_shell_var(path=path, key="AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID", value="1")
+    else:
+        _guided_setup_write_shell_var(path=path, key="AGENT_TELEGRAM_BOT_TOKEN", value=None, unset=True)
+        _guided_setup_write_shell_var(path=path, key="AGENT_TELEGRAM_CHAT_ID", value=None, unset=True)
+
+    if normalized_transport == "discord":
+        control_channel_id = (discord_control_channel_id or "").strip()
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_BOT_TOKEN", value=discord_token or "")
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_CONTROL_CHANNEL_ID", value=control_channel_id)
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_CHANNEL_ID", value=control_channel_id)
+        _guided_setup_write_shell_var(
+            path=path,
+            key="AGENT_DISCORD_SESSION_CHANNELS",
+            value="1" if discord_session_channels else "0",
+        )
+        if isinstance(discord_session_category_id, str) and discord_session_category_id.strip():
+            _guided_setup_write_shell_var(
+                path=path,
+                key="AGENT_DISCORD_SESSION_CATEGORY_ID",
+                value=discord_session_category_id.strip(),
+            )
+        else:
+            _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_SESSION_CATEGORY_ID", value=None, unset=True)
+    else:
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_BOT_TOKEN", value=None, unset=True)
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_CONTROL_CHANNEL_ID", value=None, unset=True)
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_CHANNEL_ID", value=None, unset=True)
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_SESSION_CHANNELS", value=None, unset=True)
+        _guided_setup_write_shell_var(path=path, key="AGENT_DISCORD_SESSION_CATEGORY_ID", value=None, unset=True)
+
+
+
+def _guided_setup_apply_env(
+    *,
+    agent: str,
+    transport: str,
+    recipient: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+    discord_token: str | None,
+    discord_control_channel_id: str | None,
+    discord_session_channels: bool,
+    discord_session_category_id: str | None,
+) -> None:
+    normalized_agent = _normalize_agent(agent=agent)
+    normalized_transport = transport.strip().lower()
+    os.environ["AGENT_CHAT_AGENT"] = normalized_agent
+    os.environ["AGENT_CHAT_TRANSPORT"] = normalized_transport
+    os.environ["AGENT_CHAT_NOTIFY_MODE"] = "route"
+    os.environ.setdefault("AGENT_CHAT_HOME", str(Path.home() / ".codex"))
+    os.environ.setdefault("CLAUDE_HOME", str(Path.home() / ".claude"))
+    os.environ.setdefault("AGENT_CHAT_PI_HOME", str(Path.home() / ".pi" / "agent"))
+
+    if normalized_transport == "imessage":
+        os.environ["AGENT_IMESSAGE_TO"] = recipient or ""
+    else:
+        os.environ.pop("AGENT_IMESSAGE_TO", None)
+
+    if normalized_transport == "telegram":
+        os.environ["AGENT_TELEGRAM_BOT_TOKEN"] = telegram_token or ""
+        if isinstance(telegram_chat_id, str):
+            os.environ["AGENT_TELEGRAM_CHAT_ID"] = telegram_chat_id
+        os.environ.setdefault("AGENT_TELEGRAM_GENERAL_TOPIC_THREAD_ID", "1")
+    else:
+        os.environ.pop("AGENT_TELEGRAM_BOT_TOKEN", None)
+        os.environ.pop("AGENT_TELEGRAM_CHAT_ID", None)
+
+    if normalized_transport == "discord":
+        control_channel_id = (discord_control_channel_id or "").strip()
+        os.environ["AGENT_DISCORD_BOT_TOKEN"] = discord_token or ""
+        os.environ["AGENT_DISCORD_CONTROL_CHANNEL_ID"] = control_channel_id
+        os.environ["AGENT_DISCORD_CHANNEL_ID"] = control_channel_id
+        os.environ["AGENT_DISCORD_SESSION_CHANNELS"] = "1" if discord_session_channels else "0"
+        if isinstance(discord_session_category_id, str) and discord_session_category_id.strip():
+            os.environ["AGENT_DISCORD_SESSION_CATEGORY_ID"] = discord_session_category_id.strip()
+        else:
+            os.environ.pop("AGENT_DISCORD_SESSION_CATEGORY_ID", None)
+    else:
+        os.environ.pop("AGENT_DISCORD_BOT_TOKEN", None)
+        os.environ.pop("AGENT_DISCORD_CONTROL_CHANNEL_ID", None)
+        os.environ.pop("AGENT_DISCORD_CHANNEL_ID", None)
+        os.environ.pop("AGENT_DISCORD_SESSION_CHANNELS", None)
+        os.environ.pop("AGENT_DISCORD_SESSION_CATEGORY_ID", None)
+
+
+
+def _render_guided_setup_preflight(
+    *,
+    transport: str,
+    discord_session_channels: bool,
+    telegram_chat_id: str | None,
+) -> str:
+    normalized_transport = transport.strip().lower()
+    lines = ["Before setup:"]
+    if normalized_transport == "telegram":
+        lines.extend(
+            [
+                "1) Create or pick your Telegram group/topic.",
+                "2) In @BotFather, disable bot privacy with /setprivacy.",
+                "3) Add the bot to the group and promote it to admin.",
+            ]
+        )
+        if not (isinstance(telegram_chat_id, str) and telegram_chat_id.strip()):
+            lines.append("4) If setup-launchd pauses, send one plain message there to bootstrap chat id.")
+    elif normalized_transport == "discord":
+        lines.extend(
+            [
+                "1) Enable Message Content Intent for the Discord bot.",
+                "2) Invite the bot and confirm it can view/send/read the control channel.",
+            ]
+        )
+        if discord_session_channels:
+            lines.append("3) Grant Manage Channels if you want auto-created session channels.")
+    else:
+        lines.extend(
+            [
+                "1) Make sure Messages is signed in on this Mac.",
+                "2) Keep setup running while you grant Automation and Full Disk Access.",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+
+def _render_guided_setup_success(
+    *,
+    transport: str,
+    discord_session_channels: bool,
+) -> str:
+    normalized_transport = transport.strip().lower()
+    lines = ["Setup complete. First check:"]
+    if normalized_transport == "telegram":
+        lines.extend(
+            [
+                "1) In the target topic/group, send `list`.",
+                "2) Bind once with `bind @<session_ref>`.",
+                "3) Optionally send `where`.",
+                "4) Then send plain text in that topic.",
+            ]
+        )
+    elif normalized_transport == "discord":
+        lines.extend(
+            [
+                "1) In the control channel, send `list`.",
+                "2) Create or target a session with `new bugfix: investigate failing test`.",
+                "3) If needed, inspect routing with `where`.",
+            ]
+        )
+        if discord_session_channels:
+            lines.append("4) In a bound session channel, plain text continues the same session.")
+        else:
+            lines.append("4) In the control channel, route explicitly with `@<session_ref> <instruction>`.")
+    else:
+        lines.extend(
+            [
+                "1) Let the permission prompts settle, then run `doctor`.",
+                "2) Send yourself `list`.",
+                "3) Continue a session with `@<session_ref> <instruction>`.",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+
+def _run_guided_setup(
+    *,
+    agent: str | None,
+    transport: str | None,
+    recipient: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+    discord_token: str | None,
+    discord_control_channel_id: str | None,
+    discord_session_channels: bool | None,
+    discord_session_category_id: str | None,
+    env_file: str | None,
+    python_bin: str,
+    open_settings: bool,
+    input_fn: Callable[[str], str] = input,
+    secret_input_fn: Callable[[str], str] | None = None,
+) -> int:
+    selected_agent = _normalize_agent(agent=agent) if isinstance(agent, str) and agent.strip() else _prompt_choice(
+        prompt=(
+            "Choose runtime [codex/claude/pi] "
+            f"(default: {_normalize_agent(agent=os.environ.get('AGENT_CHAT_AGENT'))}): "
+        ),
+        choices=_GUIDED_SETUP_RUNTIME_CHOICES,
+        default=_normalize_agent(agent=os.environ.get("AGENT_CHAT_AGENT")),
+        input_fn=input_fn,
+    )
+
+    transport_default = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "telegram"
+    if transport_default not in _GUIDED_SETUP_TRANSPORTS:
+        transport_default = "telegram"
+    selected_transport = transport_default if isinstance(transport, str) and transport.strip() else _prompt_choice(
+        prompt=f"Choose transport [telegram/discord/imessage] (default: {transport_default}): ",
+        choices=_GUIDED_SETUP_TRANSPORTS,
+        default=transport_default,
+        input_fn=input_fn,
+    )
+
+    normalized_recipient = _normalize_recipient(recipient) if isinstance(recipient, str) and recipient.strip() else ""
+    if selected_transport == "imessage" and not normalized_recipient:
+        normalized_recipient = _normalize_recipient(
+            _prompt_text(
+                prompt="Enter your iMessage destination (+15555550123 or email): ",
+                input_fn=input_fn,
+            )
+        )
+
+    selected_telegram_token = telegram_token.strip() if isinstance(telegram_token, str) else ""
+    selected_telegram_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) else ""
+    if selected_transport == "telegram":
+        if not selected_telegram_token:
+            selected_telegram_token = _prompt_text(
+                prompt="Paste your Telegram bot token (from @BotFather): ",
+                secret=True,
+                input_fn=input_fn,
+                secret_input_fn=secret_input_fn,
+            )
+        if not selected_telegram_chat_id:
+            selected_telegram_chat_id = _prompt_text(
+                prompt="Optional Telegram group/topic chat id (leave blank to bootstrap during setup-launchd): ",
+                allow_empty=True,
+                input_fn=input_fn,
+            )
+
+    selected_discord_token = discord_token.strip() if isinstance(discord_token, str) else ""
+    selected_discord_control_channel_id = discord_control_channel_id.strip() if isinstance(discord_control_channel_id, str) else ""
+    selected_discord_session_channels = bool(discord_session_channels) if discord_session_channels is not None else True
+    selected_discord_session_category_id = discord_session_category_id.strip() if isinstance(discord_session_category_id, str) else ""
+    if selected_transport == "discord":
+        if not selected_discord_token:
+            selected_discord_token = _prompt_text(
+                prompt="Paste your Discord bot token: ",
+                secret=True,
+                input_fn=input_fn,
+                secret_input_fn=secret_input_fn,
+            )
+        if not selected_discord_control_channel_id:
+            selected_discord_control_channel_id = _prompt_text(
+                prompt="Enter the Discord control channel id: ",
+                input_fn=input_fn,
+            )
+        if discord_session_channels is None:
+            selected_discord_session_channels = _prompt_bool(
+                prompt="Create per-session Discord channels automatically? [Y/n]: ",
+                default=True,
+                input_fn=input_fn,
+            )
+        if selected_discord_session_channels and not selected_discord_session_category_id:
+            selected_discord_session_category_id = _prompt_text(
+                prompt="Optional Discord category id for session channels (leave blank to skip): ",
+                allow_empty=True,
+                input_fn=input_fn,
+            )
+
+    env_path = Path(env_file).expanduser() if isinstance(env_file, str) and env_file.strip() else _guided_setup_default_env_file(
+        transport=selected_transport
+    )
+    env_path = env_path.resolve()
+
+    _guided_setup_write_env_file(
+        path=env_path,
+        agent=selected_agent,
+        transport=selected_transport,
+        recipient=normalized_recipient,
+        telegram_token=selected_telegram_token,
+        telegram_chat_id=selected_telegram_chat_id,
+        discord_token=selected_discord_token,
+        discord_control_channel_id=selected_discord_control_channel_id,
+        discord_session_channels=selected_discord_session_channels,
+        discord_session_category_id=selected_discord_session_category_id,
+    )
+    _guided_setup_apply_env(
+        agent=selected_agent,
+        transport=selected_transport,
+        recipient=normalized_recipient,
+        telegram_token=selected_telegram_token,
+        telegram_chat_id=selected_telegram_chat_id,
+        discord_token=selected_discord_token,
+        discord_control_channel_id=selected_discord_control_channel_id,
+        discord_session_channels=selected_discord_session_channels,
+        discord_session_category_id=selected_discord_session_category_id,
+    )
+
+    sys.stdout.write("agent-chat guided setup\n\n")
+    sys.stdout.write(f"Runtime: {_agent_display_name(agent=selected_agent)}\n")
+    sys.stdout.write(f"Transport: {selected_transport}\n")
+    sys.stdout.write(f"Env file: {env_path}\n")
+    if selected_transport == "telegram":
+        sys.stdout.write(
+            "Telegram chat id: "
+            f"{selected_telegram_chat_id or '(bootstrap from first inbound message during setup-launchd)'}\n"
+        )
+    elif selected_transport == "discord":
+        sys.stdout.write(f"Discord control channel: {selected_discord_control_channel_id}\n")
+        sys.stdout.write(
+            f"Discord session channels: {'enabled' if selected_discord_session_channels else 'disabled'}\n"
+        )
+    else:
+        sys.stdout.write(f"iMessage recipient: {normalized_recipient}\n")
+    sys.stdout.write("\n")
+    sys.stdout.write(
+        _render_guided_setup_preflight(
+            transport=selected_transport,
+            discord_session_channels=selected_discord_session_channels,
+            telegram_chat_id=selected_telegram_chat_id,
+        )
+    )
+    sys.stdout.write("\nRunning setup commands...\n")
+    sys.stdout.flush()
+
+    tmux_bin, tmux_setup_err = _ensure_tmux_available_for_setup()
+    if isinstance(tmux_setup_err, str):
+        sys.stdout.write(tmux_setup_err)
+        return 1
+    if isinstance(tmux_bin, str) and tmux_bin.strip():
+        os.environ["AGENT_CHAT_TMUX_BIN"] = tmux_bin.strip()
+
+    codex_home = _agent_home_path(agent=selected_agent)
+    python_text = _resolve_python_bin_for_notify_hook(python_bin=python_bin)
+    script_path = Path(__file__).resolve()
+
+    notify_rc = _run_setup_notify_hook(
+        codex_home=codex_home,
+        recipient=normalized_recipient,
+        python_bin=python_text,
+        script_path=script_path,
+    )
+    if notify_rc != 0:
+        return int(notify_rc)
+
+    if selected_transport == "telegram" and not selected_telegram_chat_id:
+        sys.stdout.write(
+            "\nIf setup-launchd pauses waiting for Telegram bootstrap, send one plain message in the target group/topic now.\n"
+        )
+        sys.stdout.flush()
+
+    launchd_rc = _run_setup_launchd(
+        codex_home=codex_home,
+        recipient=normalized_recipient,
+        label=os.environ.get("AGENT_CHAT_LAUNCHD_LABEL", _DEFAULT_LAUNCHD_LABEL),
+        python_bin=python_text,
+        script_path=script_path,
+        setup_permissions=True,
+        timeout_s=float(_DEFAULT_SETUP_PERMISSIONS_TIMEOUT_S),
+        poll_s=float(_DEFAULT_SETUP_PERMISSIONS_POLL_S),
+        open_settings=open_settings,
+        repair_tcc=False,
+    )
+    if launchd_rc != 0:
+        return int(launchd_rc)
+
+    doctor_rc = _run_doctor(codex_home=codex_home, recipient=normalized_recipient or None, as_json=False)
+    sys.stdout.write("\n")
+    sys.stdout.write(
+        _render_guided_setup_success(
+            transport=selected_transport,
+            discord_session_channels=selected_discord_session_channels,
+        )
+    )
+    if env_path.name == ".env.telegram.local":
+        sys.stdout.write(f"Source this config in future shells if needed: source {env_path}\n")
+    else:
+        sys.stdout.write(f"Source this config in future shells if needed: source {env_path}\n")
+    return int(doctor_rc)
+
+
+
 def _doctor_report(*, codex_home: Path, recipient: str | None) -> dict[str, Any]:
     now_ts = int(time.time())
     agent = _current_agent()
@@ -3670,8 +4229,176 @@ def _default_registry() -> dict[str, Any]:
         "pending_new_session_choice_by_thread": {},
         "telegram_thread_bindings": {},
         "telegram_thread_tmux_bindings": {},
+        "surface_onboarding_control": {},
+        "surface_onboarding_session": {},
         "ts": int(time.time()),
     }
+
+
+
+def _normalize_surface_onboarding_state(*, raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        surface_key = key.strip() if isinstance(key, str) else ""
+        ts = int(value) if isinstance(value, int) else None
+        if not surface_key or not isinstance(ts, int) or ts <= 0:
+            continue
+        out[surface_key] = ts
+    return out
+
+
+
+def _surface_key_for_context(
+    *,
+    transport: str | None,
+    recipient: str | None = None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str | None:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram":
+        conv_key = _conversation_key(
+            transport="telegram",
+            channel_id=telegram_chat_id,
+            thread_id=telegram_message_thread_id,
+        )
+        if conv_key:
+            return conv_key
+        chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else ""
+        return f"telegram:{chat_id}:0" if chat_id else None
+    if normalized_transport == "discord":
+        context_channel_id = discord_parent_channel_id or discord_channel_id
+        context_thread_id: int | str | None = 0
+        if (
+            isinstance(discord_parent_channel_id, str)
+            and discord_parent_channel_id.strip()
+            and isinstance(discord_channel_id, str)
+            and discord_channel_id.strip()
+            and discord_parent_channel_id.strip() != discord_channel_id.strip()
+        ):
+            context_thread_id = discord_channel_id.strip()
+        return _conversation_key(
+            transport="discord",
+            channel_id=context_channel_id,
+            thread_id=context_thread_id,
+        )
+    recipient_text = recipient.strip() if isinstance(recipient, str) and recipient.strip() else "global"
+    return f"imessage:{recipient_text}:0"
+
+
+
+def _surface_onboarding_bucket(*, registry: dict[str, Any], bucket: str) -> dict[str, int]:
+    key = "surface_onboarding_session" if bucket == "session" else "surface_onboarding_control"
+    raw = registry.get(key)
+    normalized = _normalize_surface_onboarding_state(raw=raw)
+    registry[key] = normalized
+    return normalized
+
+
+
+def _surface_onboarding_seen(*, registry: dict[str, Any], bucket: str, surface_key: str | None) -> bool:
+    key = surface_key.strip() if isinstance(surface_key, str) else ""
+    if not key:
+        return False
+    state = _surface_onboarding_bucket(registry=registry, bucket=bucket)
+    return key in state
+
+
+
+def _mark_surface_onboarding_seen(*, registry: dict[str, Any], bucket: str, surface_key: str | None) -> None:
+    key = surface_key.strip() if isinstance(surface_key, str) else ""
+    if not key:
+        return
+    state = _surface_onboarding_bucket(registry=registry, bucket=bucket)
+    state[key] = int(time.time())
+
+
+
+def _control_surface_onboarding_hint(*, transport: str | None) -> str:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram":
+        return (
+            "\n\nQuick start:\n"
+            "- `list` shows sessions\n"
+            "- `where` explains this topic\n"
+            "- `bind @<session_ref>` binds this topic\n"
+            "- `new <label>: <instruction>` starts a session"
+        )
+    if normalized_transport == "discord":
+        return (
+            "\n\nQuick start:\n"
+            "- `list` shows sessions\n"
+            "- `where` explains this channel or thread\n"
+            "- `bind @<session_ref>` rebinds this surface\n"
+            "- `new <label>: <instruction>` starts a session"
+        )
+    return (
+        "\n\nQuick start:\n"
+        "- `list` shows sessions\n"
+        "- `where` explains this routing surface\n"
+        "- `@<session_ref> <instruction>` targets one session\n"
+        "- `new <label>: <instruction>` starts a session"
+    )
+
+
+
+def _session_surface_onboarding_hint(*, transport: str | None) -> str:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "discord":
+        return (
+            "\n\nThis surface is now session-bound:\n"
+            "- plain text continues the same session\n"
+            "- `where` explains the binding\n"
+            "- `bind @<session_ref>` moves it to another session"
+        )
+    if normalized_transport == "telegram":
+        return (
+            "\n\nThis topic is now session-bound:\n"
+            "- plain text continues the same session\n"
+            "- `where` explains the binding\n"
+            "- `bind @<session_ref>` moves it to another session"
+        )
+    return (
+        "\n\nThis session is active here:\n"
+        "- plain text continues it\n"
+        "- `where` explains the routing context\n"
+        "- `list` shows other sessions"
+    )
+
+
+
+def _append_surface_onboarding_hint(
+    *,
+    registry: dict[str, Any] | None,
+    text: str,
+    bucket: str,
+    transport: str | None,
+    recipient: str | None = None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    active_registry = registry if isinstance(registry, dict) else None
+    if active_registry is None:
+        return text
+    surface_key = _surface_key_for_context(
+        transport=transport,
+        recipient=recipient,
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
+        discord_channel_id=discord_channel_id,
+        discord_parent_channel_id=discord_parent_channel_id,
+    )
+    if _surface_onboarding_seen(registry=active_registry, bucket=bucket, surface_key=surface_key):
+        return text
+    _mark_surface_onboarding_seen(registry=active_registry, bucket=bucket, surface_key=surface_key)
+    hint = _session_surface_onboarding_hint(transport=transport) if bucket == "session" else _control_surface_onboarding_hint(transport=transport)
+    return text.rstrip() + hint
 
 
 def _normalize_pending_new_session_choice_payload(*, raw: object) -> dict[str, Any] | None:
@@ -3894,6 +4621,8 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
     pending_new_session_choice_by_context = _normalize_pending_new_session_choice_by_context(
         raw=raw.get("pending_new_session_choice_by_context")
     )
+    surface_onboarding_control = _normalize_surface_onboarding_state(raw=raw.get("surface_onboarding_control"))
+    surface_onboarding_session = _normalize_surface_onboarding_state(raw=raw.get("surface_onboarding_session"))
     telegram_thread_bindings = _canonicalize_telegram_thread_state(
         sessions=sessions_map,
         raw_bindings=raw.get("telegram_thread_bindings"),
@@ -3928,6 +4657,8 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
         "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
         "telegram_thread_bindings": telegram_thread_bindings,
         "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
+        "surface_onboarding_control": surface_onboarding_control,
+        "surface_onboarding_session": surface_onboarding_session,
         "ts": int(time.time()),
     }
     return out
@@ -3949,6 +4680,8 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
     pending_new_session_choice_by_context = _normalize_pending_new_session_choice_by_context(
         raw=registry.get("pending_new_session_choice_by_context")
     )
+    surface_onboarding_control = _normalize_surface_onboarding_state(raw=registry.get("surface_onboarding_control"))
+    surface_onboarding_session = _normalize_surface_onboarding_state(raw=registry.get("surface_onboarding_session"))
     conversation_bindings = _normalize_conversation_bindings_for_registry(
         raw=registry.get("conversation_bindings"),
         legacy_telegram_raw=registry.get("telegram_thread_bindings"),
@@ -4041,6 +4774,8 @@ def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
             "pending_new_session_choice_by_thread": pending_new_session_choice_by_thread,
             "telegram_thread_bindings": telegram_thread_bindings,
             "telegram_thread_tmux_bindings": telegram_thread_tmux_bindings,
+            "surface_onboarding_control": surface_onboarding_control,
+            "surface_onboarding_session": surface_onboarding_session,
             "ts": int(time.time()),
         },
     )
@@ -4845,7 +5580,7 @@ def _strip_leading_telegram_mention_for_command(*, text: str) -> str:
         return raw
     first_token = remainder.split(None, 1)[0]
     first_lower = first_token.lower()
-    if first_token.startswith("@") or first_lower in {"help", "list", "status", "new"}:
+    if first_token.startswith("@") or first_lower in {"help", "list", "where", "context", "status", "bind", "new"}:
         return remainder
     return raw
 
@@ -4866,8 +5601,12 @@ def _normalize_telegram_slash_command(*, text: str) -> str:
         return "help"
     if command == "list":
         return "list"
+    if command in {"where", "context"}:
+        return "context"
     if command == "status":
         return f"status {remainder}".strip()
+    if command == "bind":
+        return f"bind {remainder}".strip()
     if command == "new":
         return f"new {remainder}".strip()
     if command in {"resume", "r", "reply"}:
@@ -4896,10 +5635,16 @@ def _parse_inbound_command(text: str) -> dict[str, str]:
         return {"action": "help"}
     if lowered == "list":
         return {"action": "list"}
+    if lowered in {"where", "context"}:
+        return {"action": "context"}
 
     m_status = re.match(r"^status\s+@?(\S+)\s*$", raw, flags=re.IGNORECASE)
     if m_status:
         return {"action": "status", "session_ref": m_status.group(1).strip()}
+
+    m_bind = re.match(r"^bind\s+@?(\S+)\s*$", raw, flags=re.IGNORECASE)
+    if m_bind:
+        return {"action": "bind", "session_ref": m_bind.group(1).strip()}
 
     m_new = re.match(r"^new\s+([A-Za-z0-9._-]+)\s*:\s*(.+)$", raw, flags=re.IGNORECASE | re.DOTALL)
     if m_new:
@@ -5064,7 +5809,7 @@ def _resolve_session_ref(
     if len(alias_matches) == 1:
         return alias_matches[0], None
     if len(alias_matches) > 1:
-        return None, f"Ambiguous alias '{ref}'. Send list and use @<ref>."
+        return None, f"Ambiguous alias '{ref}'. Send `list` and use a longer `@<ref>` command."
 
     # Prefix match.
     prefix_matches: list[str] = []
@@ -5076,15 +5821,15 @@ def _resolve_session_ref(
     if len(prefix_matches) == 1:
         return prefix_matches[0], None
     if len(prefix_matches) > 1:
-        return None, f"Ambiguous session ref '{ref}'. Send list and use a longer @<ref>."
+        return None, f"Ambiguous session ref '{ref}'. Send `list` and use a longer `@<ref>` command."
 
-    return None, f"No session found for ref '{ref}'. Send list to view active refs."
+    return None, f"No session found for ref '{ref}'. Send `list` to view active refs, or `new <label>: <instruction>` to start one."
 
 
 def _choose_implicit_session(*, registry: dict[str, Any]) -> tuple[str | None, str | None]:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict) or not sessions:
-        return None, "No tracked sessions. Send list, @<ref> ..., or new <label>: ..."
+        return None, "No tracked sessions yet. Send `new <label>: <instruction>` to start one, or `list` to inspect active refs."
 
     waiting: list[tuple[str, int]] = []
     for sid, rec in sessions.items():
@@ -5099,9 +5844,9 @@ def _choose_implicit_session(*, registry: dict[str, Any]) -> tuple[str | None, s
     if len(waiting) > 1:
         waiting_sorted = sorted(waiting, key=lambda item: item[1], reverse=True)
         refs = [f"@{_session_ref(sid)}" for sid, _ in waiting_sorted[:6]]
-        return None, "Ambiguous target session. Use explicit ref: " + ", ".join(refs)
+        return None, "Ambiguous target session. Use an explicit ref: " + ", ".join(refs)
 
-    return None, "No session is currently awaiting input. Use @<ref> ... or new <label>: ..."
+    return None, "No session here is currently awaiting input. Send `where`, `list`, `bind @<session_ref>`, or `@<session_ref> <instruction>`."
 
 
 def _session_is_waiting_for_input(*, session_rec: dict[str, Any] | None) -> bool:
@@ -5315,6 +6060,30 @@ def _save_inbound_cursor(
     if handles:
         payload["handle_ids"] = handles
     _write_json(_inbound_cursor_path(codex_home=codex_home), payload)
+
+
+def _notification_level() -> str:
+    raw = os.environ.get("AGENT_CHAT_NOTIFICATION_LEVEL", "default")
+    level = raw.strip().lower() if isinstance(raw, str) else "default"
+    if level in {"quiet", "default", "verbose"}:
+        return level
+    return "default"
+
+
+
+def _should_emit_session_completion_notification() -> bool:
+    return _notification_level() != "quiet"
+
+
+
+def _should_emit_session_progress_update() -> bool:
+    level = _notification_level()
+    if level == "verbose":
+        return True
+    if level == "quiet":
+        return False
+    return _transport_discord_enabled() and _discord_session_channels_enabled()
+
 
 
 def _send_structured(
@@ -5603,21 +6372,22 @@ def _process_session_file(
                 sessions = registry.get("sessions")
                 rec = sessions.get(sid) if isinstance(sessions, dict) else None
                 pending_completion = isinstance(rec, dict) and rec.get("pending_completion") is True
-                should_emit_update = _transport_discord_enabled() and _discord_session_channels_enabled()
+                should_emit_update = _should_emit_session_progress_update()
 
                 if pending_completion:
-                    _send_structured(
-                        codex_home=codex_home,
-                        recipient=recipient,
-                        session_id=sid,
-                        kind="responded",
-                        text=text,
-                        max_message_chars=max_message_chars,
-                        dry_run=dry_run,
-                        message_index=message_index,
-                        agent=session_agent,
-                        registry=registry,
-                    )
+                    if _should_emit_session_completion_notification():
+                        _send_structured(
+                            codex_home=codex_home,
+                            recipient=recipient,
+                            session_id=sid,
+                            kind="responded",
+                            text=text,
+                            max_message_chars=max_message_chars,
+                            dry_run=dry_run,
+                            message_index=message_index,
+                            agent=session_agent,
+                            registry=registry,
+                        )
 
                     _upsert_session(
                         registry=registry,
@@ -5655,18 +6425,125 @@ def _process_session_file(
         return offset
 
 
+def _session_last_active_ts(*, session_rec: dict[str, Any] | None) -> int | None:
+    if not isinstance(session_rec, dict):
+        return None
+    candidates: list[int] = []
+    for key in ("last_attention_ts", "last_response_ts", "last_resume_ts", "last_update_ts", "created_ts"):
+        value = session_rec.get(key)
+        if isinstance(value, int) and value > 0:
+            candidates.append(int(value))
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+
+def _format_relative_age(*, ts: int | None, now_ts: int | None = None) -> str:
+    if not isinstance(ts, int) or ts <= 0:
+        return "-"
+    current = int(now_ts) if isinstance(now_ts, int) else int(time.time())
+    delta = max(0, current - int(ts))
+    if delta < 15:
+        return "just now"
+    if delta < 60:
+        return f"{delta}s ago"
+    minutes = max(1, delta // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = max(1, delta // 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = max(1, delta // 86400)
+    return f"{days}d ago"
+
+
+
+def _session_binding_descriptions(*, registry: dict[str, Any], session_id: str) -> list[str]:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _push(label: str) -> None:
+        text = label.strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        out.append(text)
+
+    telegram_bindings = registry.get("telegram_thread_bindings")
+    if isinstance(telegram_bindings, dict):
+        for thread_key, bound_sid in telegram_bindings.items():
+            if not isinstance(bound_sid, str) or bound_sid != sid:
+                continue
+            chat_id = _telegram_thread_chat_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+            thread_id = _telegram_thread_id_from_key(thread_key=thread_key if isinstance(thread_key, str) else None)
+            if isinstance(chat_id, str) and chat_id.strip() and thread_id is not None:
+                _push(f"Telegram topic {chat_id.strip()}:{thread_id}")
+
+    conversation_bindings = registry.get("conversation_bindings")
+    if isinstance(conversation_bindings, dict):
+        for conv_key, bound_sid in conversation_bindings.items():
+            if not isinstance(bound_sid, str) or bound_sid != sid:
+                continue
+            if not isinstance(conv_key, str):
+                continue
+            parts = conv_key.split(":", 2)
+            if len(parts) != 3:
+                continue
+            transport, channel_id_raw, thread_raw = parts
+            channel_id = channel_id_raw.strip()
+            thread_text = thread_raw.strip()
+            if transport == "telegram" and channel_id:
+                thread_id = _normalize_telegram_thread_id(thread_text)
+                if thread_id is not None:
+                    _push(f"Telegram topic {channel_id}:{thread_id}")
+                else:
+                    _push(f"Telegram chat {channel_id}")
+            elif transport == "discord" and channel_id:
+                if thread_text and thread_text != "0":
+                    _push(f"Discord thread {thread_text} (channel {channel_id})")
+                elif not _discord_is_control_channel(channel_id=channel_id):
+                    _push(f"Discord channel {channel_id}")
+
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if isinstance(rec, dict):
+        direct_discord_channel_id = rec.get("discord_channel_id")
+        if isinstance(direct_discord_channel_id, str) and direct_discord_channel_id.strip():
+            channel_id = direct_discord_channel_id.strip()
+            if not _discord_is_control_channel(channel_id=channel_id):
+                _push(f"Discord channel {channel_id}")
+
+    return out
+
+
+
+def _render_session_identity(*, registry: dict[str, Any], session_id: str) -> str:
+    sessions = registry.get("sessions")
+    rec = sessions.get(session_id) if isinstance(sessions, dict) else None
+    alias = rec.get("alias") if isinstance(rec, dict) and isinstance(rec.get("alias"), str) else ""
+    agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec, dict) and isinstance(rec.get("agent"), str) else None)
+    ref = rec.get("ref") if isinstance(rec, dict) and isinstance(rec.get("ref"), str) else _session_ref(session_id)
+    if alias:
+        return f"@{ref} ({alias}, {_agent_display_name(agent=agent)})"
+    return f"@{ref} ({_agent_display_name(agent=agent)})"
+
+
+
 def _render_session_list(*, registry: dict[str, Any]) -> str:
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict) or not sessions:
-        return "No tracked sessions yet."
+        return "No tracked sessions yet. Send `new <label>: <instruction>` to start one."
 
     rows: list[tuple[int, str, dict[str, Any]]] = []
     for sid, rec in sessions.items():
         if not isinstance(sid, str) or not isinstance(rec, dict):
             continue
-        ts = rec.get("last_attention_ts")
-        if not isinstance(ts, int):
-            ts = rec.get("last_update_ts")
+        ts = _session_last_active_ts(session_rec=rec)
         rows.append((int(ts) if isinstance(ts, int) else 0, sid, rec))
 
     rows.sort(key=lambda item: item[0], reverse=True)
@@ -5676,15 +6553,19 @@ def _render_session_list(*, registry: dict[str, Any]) -> str:
         ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(sid)
         alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
         agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
-        waiting = "waiting" if rec.get("awaiting_input") is True else "idle"
-        cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else ""
-        prefix = f"[{_agent_display_name(agent=agent)}] "
+        waiting = "waiting" if _session_is_waiting_for_input(session_rec=rec) else "active"
+        last_active = _format_relative_age(ts=_session_last_active_ts(session_rec=rec))
+        bindings = _session_binding_descriptions(registry=registry, session_id=sid)
+        binding_summary = bindings[0] if bindings else "unbound"
         if alias:
-            lines.append(f"- {prefix}@{ref} ({alias}) — {waiting} — {cwd}")
+            lines.append(
+                f"- [{_agent_display_name(agent=agent)}] @{ref} ({alias}) — {waiting} — {last_active} — {binding_summary}"
+            )
         else:
-            lines.append(f"- {prefix}@{ref} — {waiting} — {cwd}")
+            lines.append(f"- [{_agent_display_name(agent=agent)}] @{ref} — {waiting} — {last_active} — {binding_summary}")
 
     return "\n".join(lines)
+
 
 
 def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
@@ -5697,12 +6578,14 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
 
     ref = rec.get("ref") if isinstance(rec.get("ref"), str) else _session_ref(session_id)
     alias = rec.get("alias") if isinstance(rec.get("alias"), str) else ""
-    waiting = "yes" if rec.get("awaiting_input") is True else "no"
+    waiting = "yes" if _session_is_waiting_for_input(session_rec=rec) else "no"
     agent = _normalize_agent(agent=rec.get("agent") if isinstance(rec.get("agent"), str) else None)
     cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else ""
     path = rec.get("session_path") if isinstance(rec.get("session_path"), str) else ""
     pane = rec.get("tmux_pane") if isinstance(rec.get("tmux_pane"), str) else ""
     socket_value = rec.get("tmux_socket") if isinstance(rec.get("tmux_socket"), str) else ""
+    bindings = _session_binding_descriptions(registry=registry, session_id=session_id)
+    last_active = _format_relative_age(ts=_session_last_active_ts(session_rec=rec))
 
     lines = [
         f"Session: {session_id}",
@@ -5710,10 +6593,13 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
         f"Alias: {alias or '-'}",
         f"Agent: {_agent_display_name(agent=agent)}",
         f"Awaiting input: {waiting}",
+        f"Last active: {last_active}",
+        f"Bindings: {', '.join(bindings) if bindings else '-'}",
         f"CWD: {cwd or '-'}",
         f"Session path: {path or '-'}",
         f"Tmux pane: {pane or '-'}",
         f"Tmux socket: {socket_value or '-'}",
+        f"Next: reply in a bound topic/channel, or send @{ref} <instruction> from any control surface.",
     ]
     return "\n".join(lines)
 
@@ -5883,15 +6769,254 @@ def _clear_last_dispatch_error(*, registry: dict[str, Any]) -> None:
     registry["last_dispatch_error"] = None
 
 
+
+def _bound_session_for_inbound_context(
+    *,
+    registry: dict[str, Any],
+    transport: str | None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str | None:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram":
+        sid = _lookup_session_by_telegram_thread(
+            registry=registry,
+            chat_id=telegram_chat_id,
+            message_thread_id=telegram_message_thread_id,
+        )
+        if sid:
+            return sid
+        return _lookup_single_session_by_telegram_chat(registry=registry, chat_id=telegram_chat_id)
+
+    if normalized_transport == "discord":
+        sid = _lookup_session_by_discord_channel_id(registry=registry, channel_id=discord_channel_id)
+        if sid:
+            return sid
+        context_channel_id = discord_parent_channel_id or discord_channel_id
+        context_thread_id: int | str | None = 0
+        if (
+            isinstance(discord_parent_channel_id, str)
+            and discord_parent_channel_id.strip()
+            and isinstance(discord_channel_id, str)
+            and discord_channel_id.strip()
+            and discord_parent_channel_id.strip() != discord_channel_id.strip()
+        ):
+            context_thread_id = discord_channel_id.strip()
+        return _lookup_session_by_conversation(
+            registry=registry,
+            transport="discord",
+            channel_id=context_channel_id,
+            thread_id=context_thread_id,
+        )
+
+    return None
+
+
+
+def _context_surface_label(
+    *,
+    transport: str | None,
+    recipient: str | None = None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram":
+        if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() and telegram_message_thread_id is not None:
+            return f"Telegram topic {telegram_chat_id.strip()}:{telegram_message_thread_id}"
+        if isinstance(telegram_chat_id, str) and telegram_chat_id.strip():
+            return f"Telegram chat {telegram_chat_id.strip()}"
+        return "Telegram conversation"
+    if normalized_transport == "discord":
+        if (
+            isinstance(discord_parent_channel_id, str)
+            and discord_parent_channel_id.strip()
+            and isinstance(discord_channel_id, str)
+            and discord_channel_id.strip()
+            and discord_parent_channel_id.strip() != discord_channel_id.strip()
+        ):
+            return f"Discord thread {discord_channel_id.strip()} (channel {discord_parent_channel_id.strip()})"
+        channel_id = discord_parent_channel_id or discord_channel_id
+        if isinstance(channel_id, str) and channel_id.strip():
+            label = f"Discord channel {channel_id.strip()}"
+            if _discord_is_control_channel(channel_id=channel_id.strip()):
+                label += " [control]"
+            return label
+        return "Discord conversation"
+    recipient_text = recipient.strip() if isinstance(recipient, str) else ""
+    if recipient_text:
+        return f"iMessage conversation with {recipient_text}"
+    return "iMessage conversation"
+
+
+
+def _context_followup_hint(
+    *,
+    transport: str | None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram" and telegram_message_thread_id is not None:
+        return " Plain-text replies in this topic will continue the same session."
+    if normalized_transport == "discord":
+        if (
+            isinstance(discord_parent_channel_id, str)
+            and discord_parent_channel_id.strip()
+            and isinstance(discord_channel_id, str)
+            and discord_channel_id.strip()
+            and discord_parent_channel_id.strip() != discord_channel_id.strip()
+        ):
+            return " Plain-text replies in this thread will continue the same session."
+        channel_id = discord_parent_channel_id or discord_channel_id
+        if isinstance(channel_id, str) and channel_id.strip():
+            if _discord_is_control_channel(channel_id=channel_id.strip()):
+                return " This is a control surface, so targeted follow-ups should use a session channel or `@<ref> ...`."
+            return " Plain-text replies here will continue the same session."
+    return ""
+
+
+
+def _render_bind_confirmation(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    transport: str | None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    session_label = _render_session_identity(registry=registry, session_id=session_id)
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    if normalized_transport == "telegram":
+        if telegram_message_thread_id is not None:
+            return f"Bound this Telegram topic to {session_label}. Future plain-text replies here will continue that session."
+        return f"Bound this Telegram chat to {session_label}."
+    if normalized_transport == "discord":
+        if (
+            isinstance(discord_parent_channel_id, str)
+            and discord_parent_channel_id.strip()
+            and isinstance(discord_channel_id, str)
+            and discord_channel_id.strip()
+            and discord_parent_channel_id.strip() != discord_channel_id.strip()
+        ):
+            return f"Bound this Discord thread to {session_label}. Future plain-text replies here will continue that session."
+        return f"Bound this Discord channel to {session_label}. Future plain-text replies here will continue that session."
+    return f"Bound this conversation to {session_label}."
+
+
+
+def _render_context_status(
+    *,
+    registry: dict[str, Any],
+    transport: str | None,
+    recipient: str | None,
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    normalized_transport = transport.strip().lower() if isinstance(transport, str) and transport.strip() else "imessage"
+    surface = _context_surface_label(
+        transport=normalized_transport,
+        recipient=recipient,
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
+        discord_channel_id=discord_channel_id,
+        discord_parent_channel_id=discord_parent_channel_id,
+    )
+    bound_sid = _bound_session_for_inbound_context(
+        registry=registry,
+        transport=normalized_transport,
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
+        discord_channel_id=discord_channel_id,
+        discord_parent_channel_id=discord_parent_channel_id,
+    )
+
+    lines = ["Context:", f"- Surface: {surface}"]
+
+    if isinstance(bound_sid, str) and bound_sid.strip():
+        lines.append(f"- Bound session: {_render_session_identity(registry=registry, session_id=bound_sid.strip())}")
+        followup_text = "reply here with plain text"
+        followup_hint = _context_followup_hint(
+            transport=normalized_transport,
+            telegram_message_thread_id=telegram_message_thread_id,
+            discord_channel_id=discord_channel_id,
+            discord_parent_channel_id=discord_parent_channel_id,
+        ).strip()
+        if followup_hint:
+            followup_text += f". {followup_hint}"
+        lines.append(f"- Follow-up: {followup_text}")
+        lines.append("- Rebind: send `bind @<session_ref>` to move this surface.")
+        return "\n".join(lines)
+
+    if normalized_transport == "telegram":
+        lines.append("- Bound session: none")
+        lines.append("- Next: send `bind @<session_ref>` to connect this topic, or `@<session_ref> <instruction>` once.")
+    elif normalized_transport == "discord":
+        channel_id = discord_parent_channel_id or discord_channel_id
+        if isinstance(channel_id, str) and channel_id.strip() and _discord_is_control_channel(channel_id=channel_id.strip()):
+            lines.append("- Role: control surface for `help`, `list`, `where`, `status`, and `new ...`.")
+            lines.append("- Next: send `new <label>: <instruction>`, `list`, or route explicitly with `@<session_ref> ...`.")
+        else:
+            lines.append("- Bound session: none")
+            lines.append("- Next: send `bind @<session_ref>` to attach this channel/thread, or `new <label>: <instruction>`.")
+    else:
+        lines.append("- Role: global control surface")
+        lines.append("- Next: send `list`, `status @<session_ref>`, or `@<session_ref> <instruction>`.")
+
+    return "\n".join(lines)
+
+
+
+def _render_missing_session_prompt(
+    *,
+    transport: str | None,
+    recipient: str | None,
+    registry: dict[str, Any],
+    telegram_chat_id: str | None = None,
+    telegram_message_thread_id: int | None = None,
+    discord_channel_id: str | None = None,
+    discord_parent_channel_id: str | None = None,
+) -> str:
+    surface = _context_surface_label(
+        transport=transport,
+        recipient=recipient,
+        telegram_chat_id=telegram_chat_id,
+        telegram_message_thread_id=telegram_message_thread_id,
+        discord_channel_id=discord_channel_id,
+        discord_parent_channel_id=discord_parent_channel_id,
+    )
+    lines = [
+        "I couldn't match that message to a session.",
+        f"Surface: {surface}",
+        "Choose a runtime for a new background session:",
+        "1) Codex",
+        "2) Claude",
+        "3) Pi",
+        "Reply with 1, 2, or 3 (or codex/claude/pi). Reply 'cancel' to abort.",
+        "Need an existing ref instead? Send `list`. If this is the right surface, send `bind @<session_ref>`.",
+    ]
+    return "\n".join(lines)
+
+
+
 def _dispatch_failure_text(*, session_id: str, mode: str, reason: str | None) -> str:
     ref = _session_ref(session_id) or session_id[:8]
     reason_key = reason.strip().lower() if isinstance(reason, str) and reason.strip() else ""
     reason_details = {
         "pane_missing": "no pane mapping was available",
-        "pane_stale": "stored pane mapping is stale",
-        "pane_discovery_ambiguous": "multiple Codex panes matched and routing is ambiguous",
-        "session_path_missing": "session path is missing for tmux correlation",
-        "session_path_mismatch": "session path did not match the target session",
+        "pane_stale": "the stored pane mapping is stale",
+        "pane_discovery_ambiguous": "multiple tmux panes matched and routing is ambiguous",
+        "session_path_missing": "session path metadata is missing for tmux correlation",
+        "session_path_mismatch": "the tmux pane did not match the target session",
         "send_failed": "tmux send-keys failed",
         "ack_timeout": "tmux did not acknowledge the prompt in time",
         "session_record_missing": "session metadata is missing",
@@ -5900,9 +7025,10 @@ def _dispatch_failure_text(*, session_id: str, mode: str, reason: str | None) ->
         "tmux routing failed" if mode == "tmux_failed" else "tmux pane routing is unavailable"
     )
     return (
-        f"Strict tmux routing for @{ref}: {detail}. "
-        "No fallback resume was run. Bring the target tmux Codex pane online and resend with "
-        "@<ref> <instruction>."
+        f"I couldn't deliver that to @{ref} because {detail}. "
+        "Strict tmux routing is enabled, so I did not fall back to resume. "
+        "Next: bring the target tmux pane online, then resend `@<ref> <instruction>`. "
+        "If you are unsure which session is bound here, send `where` or `list`."
     )
 
 
@@ -7903,18 +9029,19 @@ def _handle_notify_payload(
     if not response_text:
         response_text = "Turn completed."
 
-    message_index = _load_message_index(codex_home=codex_home)
-    _send_structured(
-        codex_home=codex_home,
-        recipient=recipient,
-        session_id=session_id,
-        kind="responded",
-        text=response_text,
-        max_message_chars=_DEFAULT_MAX_MESSAGE_CHARS,
-        dry_run=dry_run,
-        message_index=message_index,
-    )
-    _save_message_index(codex_home=codex_home, index=message_index)
+    if _should_emit_session_completion_notification():
+        message_index = _load_message_index(codex_home=codex_home)
+        _send_structured(
+            codex_home=codex_home,
+            recipient=recipient,
+            session_id=session_id,
+            kind="responded",
+            text=response_text,
+            max_message_chars=_DEFAULT_MAX_MESSAGE_CHARS,
+            dry_run=dry_run,
+            message_index=message_index,
+        )
+        _save_message_index(codex_home=codex_home, index=message_index)
 
     _upsert_session(
         registry=registry,
@@ -8239,16 +9366,33 @@ def _process_inbound_replies(
 
                 if created_via_tmux:
                     text_out = (
-                        f"Started new {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
+                        f"Started {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
                         f"in tmux pane {pane or '-'}."
                     )
                 else:
                     text_out = (
-                        f"Started new {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
+                        f"Started {_agent_display_name(agent=choice)} session @{_session_ref(sid)} "
                         "without tmux."
                     )
                 if isinstance(session_channel_id, str) and session_channel_id.strip() and not _discord_is_control_channel(channel_id=session_channel_id):
                     text_out += f" Session channel: <#{session_channel_id.strip()}>."
+                text_out += _context_followup_hint(
+                    transport=row_transport or "imessage",
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
+                )
+                text_out = _append_surface_onboarding_hint(
+                    registry=registry,
+                    text=text_out,
+                    bucket="session",
+                    transport=row_transport or "imessage",
+                    recipient=recipient,
+                    telegram_chat_id=row_telegram_chat_id,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
+                )
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
@@ -8272,12 +9416,23 @@ def _process_inbound_replies(
         _trace(f"parsed action={action} reply_to_guid={bool(reply_to_guid)}")
 
         if action == "help":
+            help_text = _append_surface_onboarding_hint(
+                registry=registry,
+                text=_HELP_TEXT,
+                bucket="control",
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=None,
                 kind="help",
-                text=_HELP_TEXT,
+                text=help_text,
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -8288,12 +9443,157 @@ def _process_inbound_replies(
             continue
 
         if action == "list":
+            list_text = _append_surface_onboarding_hint(
+                registry=registry,
+                text=_render_session_list(registry=registry),
+                bucket="control",
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=None,
                 kind="status",
-                text=_render_session_list(registry=registry),
+                text=list_text,
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+            )
+            continue
+
+        if action == "context":
+            context_bucket = "session" if _bound_session_for_inbound_context(
+                registry=registry,
+                transport=row_transport or "imessage",
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            ) else "control"
+            context_text = _append_surface_onboarding_hint(
+                registry=registry,
+                text=_render_context_status(
+                    registry=registry,
+                    transport=row_transport or "imessage",
+                    recipient=recipient,
+                    telegram_chat_id=row_telegram_chat_id,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
+                ),
+                bucket=context_bucket,
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=None,
+                kind="status",
+                text=context_text,
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+            )
+            continue
+
+        if action == "bind":
+            session_ref = cmd.get("session_ref", "")
+            sid, err = _resolve_session_ref(registry=registry, session_ref=session_ref, min_prefix=min_prefix)
+            if not sid:
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=None,
+                    kind="error",
+                    text=err or "Session not found.",
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
+
+            bound = False
+            if row_transport == "telegram" and row_thread_key:
+                _bind_telegram_thread_to_session(
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                    session_id=sid,
+                )
+                bound = True
+            elif row_transport == "discord" and row_context_channel_id and _should_bind_discord_context(
+                channel_id=row_context_channel_id,
+                thread_id=row_context_thread_id,
+            ):
+                _bind_conversation_to_session(
+                    registry=registry,
+                    transport="discord",
+                    channel_id=row_context_channel_id,
+                    thread_id=row_context_thread_id,
+                    session_id=sid,
+                )
+                bound = True
+
+            if not bound:
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=None,
+                    kind="error",
+                    text="`bind` works in Telegram topics and Discord channels/threads. In iMessage, send `@<session_ref> <instruction>` instead.",
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
+
+            bind_text = _append_surface_onboarding_hint(
+                registry=registry,
+                text=_render_bind_confirmation(
+                    registry=registry,
+                    session_id=sid,
+                    transport=row_transport or "imessage",
+                    telegram_chat_id=row_telegram_chat_id,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
+                ),
+                bucket="session",
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=sid,
+                kind="accepted",
+                text=bind_text,
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -8400,9 +9700,46 @@ def _process_inbound_replies(
                     session_id=sid,
                 )
 
-            created_text = f"Created session @{_session_ref(sid)} ({label})."
+            if row_thread_key and row_transport == "telegram":
+                _bind_telegram_thread_to_session(
+                    registry=registry,
+                    chat_id=row_telegram_chat_id,
+                    message_thread_id=row_telegram_thread_id,
+                    session_id=sid,
+                )
+            elif row_transport == "discord" and row_context_channel_id and _should_bind_discord_context(
+                channel_id=row_context_channel_id,
+                thread_id=row_context_thread_id,
+            ):
+                _bind_conversation_to_session(
+                    registry=registry,
+                    transport="discord",
+                    channel_id=row_context_channel_id,
+                    thread_id=row_context_thread_id,
+                    session_id=sid,
+                )
+
+            created_label = f" ({label})" if label else ""
+            created_text = f"Created @{_session_ref(sid)}{created_label}."
             if isinstance(session_channel_id, str) and session_channel_id.strip() and not _discord_is_control_channel(channel_id=session_channel_id):
                 created_text += f" Session channel: <#{session_channel_id.strip()}>."
+            created_text += _context_followup_hint(
+                transport=row_transport or "imessage",
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
+            created_text = _append_surface_onboarding_hint(
+                registry=registry,
+                text=created_text,
+                bucket="session",
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
 
             _send_structured(
                 codex_home=codex_home,
@@ -8560,7 +9897,9 @@ def _process_inbound_replies(
                 and isinstance(err, str)
                 and err.startswith(
                     (
+                        "No session here is currently awaiting input.",
                         "No session is currently awaiting input.",
+                        "No tracked sessions yet.",
                         "No tracked sessions.",
                     )
                 )
@@ -8608,12 +9947,24 @@ def _process_inbound_replies(
                         label=auto_create_label,
                         cwd=fallback_cwd,
                     )
-                pending_prompt = (
-                    "No matching session found. Choose runtime for a new background session:\n"
-                    "1) Codex\n"
-                    "2) Claude\n"
-                    "3) Pi\n"
-                    "Reply with 1, 2, or 3 (or codex/claude/pi). Reply 'cancel' to abort."
+                pending_prompt = _append_surface_onboarding_hint(
+                    registry=registry,
+                    text=_render_missing_session_prompt(
+                        transport=row_transport or "imessage",
+                        recipient=recipient,
+                        registry=registry,
+                        telegram_chat_id=row_telegram_chat_id,
+                        telegram_message_thread_id=row_telegram_thread_id,
+                        discord_channel_id=row_discord_channel_id,
+                        discord_parent_channel_id=row_discord_parent_channel_id,
+                    ),
+                    bucket="control",
+                    transport=row_transport or "imessage",
+                    recipient=recipient,
+                    telegram_chat_id=row_telegram_chat_id,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
                 )
                 _send_structured(
                     codex_home=codex_home,
@@ -8754,6 +10105,25 @@ def _process_inbound_replies(
             f"dispatch mode={dispatch_mode} sid={target_sid} "
             f"reason={dispatch_reason or '-'} strict_tmux={strict_tmux}"
         )
+        context_followup_text = _context_followup_hint(
+            transport=row_transport or "imessage",
+            telegram_message_thread_id=row_telegram_thread_id,
+            discord_channel_id=row_discord_channel_id,
+            discord_parent_channel_id=row_discord_parent_channel_id,
+        )
+
+        def _session_surface_text(base_text: str) -> str:
+            return _append_surface_onboarding_hint(
+                registry=registry,
+                text=base_text,
+                bucket="session",
+                transport=row_transport or "imessage",
+                recipient=recipient,
+                telegram_chat_id=row_telegram_chat_id,
+                telegram_message_thread_id=row_telegram_thread_id,
+                discord_channel_id=row_discord_channel_id,
+                discord_parent_channel_id=row_discord_parent_channel_id,
+            )
 
         if dispatch_mode == "tmux":
             _clear_last_dispatch_error(registry=registry)
@@ -8762,7 +10132,10 @@ def _process_inbound_replies(
                 recipient=recipient,
                 session_id=target_sid,
                 kind="accepted",
-                text=f"Sent to tmux pane for @{_session_ref(target_sid)}. Follow execution on your Mac.",
+                text=_session_surface_text(
+                    f"Sent to tmux pane for @{_session_ref(target_sid)}. "
+                    f"Check progress on your Mac.{context_followup_text}"
+                ),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -8792,9 +10165,9 @@ def _process_inbound_replies(
                 recipient=recipient,
                 session_id=target_sid,
                 kind="accepted",
-                text=(
+                text=_session_surface_text(
                     f"Sent to tmux pane for @{_session_ref(target_sid)}. "
-                    "Execution may be delayed; check the pane on your Mac."
+                    f"Execution may be delayed; check the pane on your Mac.{context_followup_text}"
                 ),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
@@ -8890,9 +10263,9 @@ def _process_inbound_replies(
                     recipient=recipient,
                     session_id=target_sid,
                     kind="accepted",
-                    text=(
+                    text=_session_surface_text(
                         f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
-                        "Waiting for session output."
+                        f"Waiting for output.{context_followup_text}"
                     ),
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
@@ -8981,9 +10354,9 @@ def _process_inbound_replies(
                 recipient=recipient,
                 session_id=target_sid,
                 kind="accepted",
-                text=(
+                text=_session_surface_text(
                     f"Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
-                    "Waiting for session output."
+                    f"Waiting for output.{context_followup_text}"
                 ),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
@@ -9419,6 +10792,56 @@ def main(argv: list[str]) -> int:
             "bundle id and rerun permission setup automatically"
         ),
     )
+    guided_setup = sub.add_parser(
+        "guided-setup",
+        help="Run an interactive onboarding flow for one runtime + one transport",
+    )
+    guided_setup.add_argument("--agent", default=None, choices=sorted(_SUPPORTED_AGENTS), help="Runtime to configure")
+    guided_setup.add_argument(
+        "--transport",
+        default=None,
+        choices=list(_GUIDED_SETUP_TRANSPORTS),
+        help="Transport to configure (guided setup supports one transport at a time)",
+    )
+    guided_setup.add_argument("--recipient", default="", help="iMessage destination for imessage transport")
+    guided_setup.add_argument("--telegram-token", default="", help="Telegram bot token")
+    guided_setup.add_argument("--telegram-chat-id", default="", help="Telegram group/topic chat id")
+    guided_setup.add_argument("--discord-token", default="", help="Discord bot token")
+    guided_setup.add_argument("--discord-control-channel-id", default="", help="Discord control channel id")
+    discord_session_mode = guided_setup.add_mutually_exclusive_group()
+    discord_session_mode.add_argument(
+        "--discord-session-channels",
+        dest="discord_session_channels",
+        action="store_true",
+        help="Enable auto-created per-session Discord channels",
+    )
+    discord_session_mode.add_argument(
+        "--no-discord-session-channels",
+        dest="discord_session_channels",
+        action="store_false",
+        help="Disable auto-created per-session Discord channels",
+    )
+    guided_setup.set_defaults(discord_session_channels=None)
+    guided_setup.add_argument(
+        "--discord-session-category-id",
+        default="",
+        help="Optional Discord category id for per-session channels",
+    )
+    guided_setup.add_argument(
+        "--env-file",
+        default="",
+        help="Shell env file to create/update (defaults to .env.telegram.local for Telegram, else .env.agent-chat.local)",
+    )
+    guided_setup.add_argument(
+        "--python-bin",
+        default=str(Path(sys.executable).resolve()),
+        help="Python binary to use for setup commands (defaults to current interpreter)",
+    )
+    guided_setup.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not auto-open System Settings during iMessage permission setup",
+    )
 
     args = parser.parse_args(argv)
 
@@ -9442,6 +10865,25 @@ def main(argv: list[str]) -> int:
     if args.cmd == "doctor":
         doctor_recipient: str | None = recipient if recipient else recipient_raw
         return _run_doctor(codex_home=codex_home, recipient=doctor_recipient, as_json=bool(args.json))
+    if args.cmd == "guided-setup":
+        return _run_guided_setup(
+            agent=str(args.agent) if isinstance(args.agent, str) else None,
+            transport=str(args.transport) if isinstance(args.transport, str) else None,
+            recipient=str(args.recipient) if isinstance(args.recipient, str) else None,
+            telegram_token=str(args.telegram_token) if isinstance(args.telegram_token, str) else None,
+            telegram_chat_id=str(args.telegram_chat_id) if isinstance(args.telegram_chat_id, str) else None,
+            discord_token=str(args.discord_token) if isinstance(args.discord_token, str) else None,
+            discord_control_channel_id=(
+                str(args.discord_control_channel_id) if isinstance(args.discord_control_channel_id, str) else None
+            ),
+            discord_session_channels=args.discord_session_channels,
+            discord_session_category_id=(
+                str(args.discord_session_category_id) if isinstance(args.discord_session_category_id, str) else None
+            ),
+            env_file=str(args.env_file) if isinstance(args.env_file, str) else None,
+            python_bin=str(args.python_bin),
+            open_settings=not bool(args.no_open),
+        )
     if args.cmd == "setup-notify-hook":
         notify_recipient_raw = args.recipient.strip() if isinstance(args.recipient, str) else ""
         if not notify_recipient_raw:

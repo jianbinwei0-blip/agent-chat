@@ -38,9 +38,27 @@ Privacy/Security permissions required on macOS:
 - Telegram-only / Discord-only mode (`AGENT_CHAT_TRANSPORT=telegram|discord` or `AGENT_CHAT_TRANSPORTS=telegram,discord` without iMessage): no Full Disk Access required.
 - iMessage mode (`imessage`, `both`, or any `AGENT_CHAT_TRANSPORTS` set that includes `imessage`): grant `Automation` (Messages control) and `Full Disk Access` (read `~/Library/Messages/chat.db`) to the runtime app/Python target printed by setup.
 
-## Non-Technical Setup (Telegram, Recommended)
+## Guided Setup (Recommended)
 
-If you want the fastest path with the least terminal work, use the guided script:
+If you want the fastest path with the least terminal work, use the guided setup flow:
+
+### Any supported transport
+
+```bash
+cd /path/to/agent-chat
+bash scripts/setup-agent-chat-easy.sh
+```
+
+This interactive flow helps you choose:
+- runtime: Codex, Claude, or Pi
+- transport: iMessage, Telegram, or Discord
+- the minimum required credentials/ids for that transport
+
+It then writes a local env file, runs `setup-notify-hook`, `setup-launchd`, and `doctor`, and prints a first-success checklist.
+
+### Telegram-first shortcut
+
+If you already know you want Telegram, you can still use the Telegram-specific wrapper:
 
 1. In Telegram (once):
    - create or open your bot in `@BotFather`
@@ -66,7 +84,8 @@ The script will:
 3. First-use check in Telegram:
    - if setup pauses, send one plain message in your target group/topic (this bootstraps chat id)
    - send `list`
-   - send `@<session_ref> hello` once to bind the topic to that session
+   - send `bind @<session_ref>` once to bind the topic to that session (or use `@<session_ref> hello`)
+   - send `where` if you want the current topic/session binding explained back to you
    - after binding, plain text in that topic routes automatically
    - if you see `group chat was upgraded to a supergroup`, set `AGENT_TELEGRAM_CHAT_ID` to the returned `migrate_to_chat_id` and rerun `setup-launchd`
 
@@ -74,7 +93,8 @@ The script will:
 
 Use this section when your goal is Telegram + one runtime with minimum branching.
 The full `Quickstart` below still covers iMessage and mixed transport setups.
-If you want the simplest guided flow, run `bash scripts/setup-telegram-easy.sh` instead.
+If you want the simplest guided flow for any supported transport, run `bash scripts/setup-agent-chat-easy.sh`.
+If you already know you want Telegram only, `bash scripts/setup-telegram-easy.sh` remains the shortest wrapper.
 
 ### Telegram + Codex (5-minute path)
 
@@ -230,10 +250,11 @@ Telegram topic/supergroup setup (recommended):
    - On macOS with default setup behavior (without `--no-open`), setup may also open a Telegram deep link (`startgroup`) to speed up bot/group onboarding.
    - Telegram Bot API cannot create a group on your behalf; group creation still happens in the Telegram client.
 8. In the target topic, send one explicit bind message to establish session/topic mapping:
-   - `@<session_ref> hello`
-9. After binding, plain text in that topic routes to the bound session. You do not need direct-reply or `@bot` mention for every message.
-10. Move an existing Codex session to a different topic:
-   - In the destination topic, send `@<session_ref> hello` once.
+   - `bind @<session_ref>` (or the legacy `@<session_ref> hello`)
+9. Optional: send `where` to see what the current topic is bound to.
+10. After binding, plain text in that topic routes to the bound session. You do not need direct-reply or `@bot` mention for every message.
+11. Move an existing Codex session to a different topic:
+   - In the destination topic, send `bind @<session_ref>` once.
    - Binding is canonicalized as one-topic-per-session and one-session-per-topic, so the session follows the new topic automatically.
 
 If topic messages are not received after setup:
@@ -253,9 +274,10 @@ High-level checklist:
 - set `AGENT_DISCORD_BOT_TOKEN`, `AGENT_DISCORD_CONTROL_CHANNEL_ID`, and `AGENT_DISCORD_SESSION_CHANNELS=1` as needed
 
 Behavior summary:
-- the control channel stays unbound and handles commands like `help`, `list`, `status`, and `new ...`
+- the control channel stays unbound and handles commands like `help`, `list`, `where`, `status`, and `new ...`
 - session channels are created lazily and bind one channel to one session
 - plain text in a bound session channel routes back to that same session without `@<ref>`
+- send `bind @<session_ref>` to move the current topic/channel/thread to another session
 
 6. Configure notify hook for your agent runtime.
 
@@ -368,10 +390,11 @@ Template for manual customization:
 After setup succeeds, validate real routing in under a minute:
 
 1. In the target Telegram topic/group, send `list` to inspect active session refs.
-2. Send one explicit bind message: `@<session_ref> hello`.
-3. Expect a routed response in the same topic; this establishes topic/session mapping.
-4. Send plain text (for example `status @<session_ref>` or `continue`) in the same topic.
-5. If no response arrives, run:
+2. Send one explicit bind message: `bind @<session_ref>` (or `@<session_ref> hello`).
+3. Optionally send `where` to confirm the topic/session binding in plain English.
+4. Expect a routed response in the same topic; this establishes topic/session mapping.
+5. Send plain text (for example `status @<session_ref>` or `continue`) in the same topic.
+6. If no response arrives, run:
 
 ```bash
 scripts/telegram-diagnose.sh --pause-launchd
@@ -454,6 +477,7 @@ python3 agent_chat_control_plane.py run [--agent codex|claude|pi] [--poll 0.5] [
 python3 agent_chat_control_plane.py once [--agent codex|claude|pi] [--dry-run] [--trace]
 python3 agent_chat_control_plane.py notify [--agent codex|claude|pi] [PAYLOAD_JSON] [--dry-run]
 python3 agent_chat_control_plane.py doctor [--agent codex|claude|pi] [--json]
+python3 agent_chat_control_plane.py guided-setup [--agent codex|claude|pi] [--transport telegram|discord|imessage] [--env-file PATH] [transport-specific options]
 python3 agent_chat_control_plane.py setup-notify-hook [--agent codex|claude|pi] [--recipient TO] [--python-bin PATH]
 python3 agent_chat_control_plane.py setup-permissions [--agent codex|claude|pi] [--timeout 180] [--poll 1.0] [--no-open]
 python3 agent_chat_control_plane.py setup-launchd [--agent codex|claude|pi] [--label LABEL] [--recipient TO] [--python-bin PATH] [--skip-permissions] [--timeout 180] [--poll 1.0] [--no-open]
@@ -474,9 +498,13 @@ agent-chat-reply ...
 Common inbound commands:
 - `help`
 - `list`
+- `where` / `context`
 - `status @<session_ref>`
+- `bind @<session_ref>`
 - `@<session_ref> <instruction>`
 - `new <label>: <instruction>`
+
+On first use in a Telegram topic, Discord channel/thread, or iMessage control surface, agent-chat now appends a short quick-start hint so users can discover `list`, `where`, `bind`, and `new ...` in-context.
 
 When no target session can be resolved, agent-chat asks which runtime to create:
 - `1` / `codex`
@@ -506,6 +534,12 @@ Frequently used advanced overrides:
 - `AGENT_CHAT_ENABLE_NEW_SESSION`
 - `AGENT_CHAT_AUTO_CREATE_ON_MISSING`
 - `AGENT_CHAT_LAUNCHD_LABEL`
+- `AGENT_CHAT_NOTIFICATION_LEVEL` (`quiet`, `default`, `verbose`)
+
+`AGENT_CHAT_NOTIFICATION_LEVEL` controls autonomous session-update noise:
+- `quiet`: only urgent prompts/errors; suppress automatic completion/update notifications
+- `default`: automatic completion notifications, plus Discord session-channel progress updates
+- `verbose`: automatic completion notifications and progress updates across enabled transports
 
 For the full environment reference, see:
 - `docs/control-plane.md`
@@ -525,6 +559,7 @@ To remove integration from a host machine (launchd + app bundle + hook wiring + 
 - `AGENTS.md` (table of contents for agents)
 - `docs/index.md` (knowledge-system entrypoint)
 - `docs/architecture.md`
+- `docs/changelog.md`
 - `docs/cleanup.md`
 - `docs/control-plane.md`
 - `docs/discord.md`

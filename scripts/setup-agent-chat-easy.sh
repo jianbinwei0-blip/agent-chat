@@ -12,4 +12,4 @@ if [ -z "$PYTHON_BIN" ]; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" agent_chat_control_plane.py guided-setup --transport telegram --env-file "$REPO_ROOT/.env.telegram.local" "$@"
+exec "$PYTHON_BIN" agent_chat_control_plane.py guided-setup "$@"

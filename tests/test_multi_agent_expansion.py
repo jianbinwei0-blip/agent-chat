@@ -257,6 +257,109 @@ class TestMultiAgentExpansion(unittest.TestCase):
         self.assertGreater(offset, 0)
         self.assertTrue(any(msg.get("kind") == "update" and msg.get("session_id") == "pi-sid" for msg in sent))
 
+    def test_process_session_file_quiet_notification_level_suppresses_final_response(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            session_path = codex_home / "sessions" / "sample.jsonl"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "session", "id": "sid-quiet", "cwd": "/tmp/project"}),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "done quietly"}],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            registry = {
+                "sessions": {"sid-quiet": {"session_id": "sid-quiet", "agent": "pi", "pending_completion": True}},
+                "aliases": {},
+                "conversation_bindings": {},
+            }
+            sent: list[dict[str, object]] = []
+
+            with (
+                mock.patch.dict(cp.os.environ, {"AGENT_CHAT_NOTIFICATION_LEVEL": "quiet"}, clear=False),
+                mock.patch.object(cp, "_agent_for_session_path", return_value="pi"),
+                mock.patch.object(cp, "_send_structured", side_effect=lambda **kwargs: sent.append(dict(kwargs))),
+            ):
+                cp._process_session_file(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    session_path=session_path,
+                    offset=0,
+                    recipient="+15551234567",
+                    max_message_chars=1800,
+                    dry_run=False,
+                    registry=registry,
+                    message_index={"messages": []},
+                    session_id_cache={},
+                    call_id_to_name={},
+                    seen_needs_input_call_ids={},
+                )
+
+        self.assertFalse(any(msg.get("kind") == "responded" for msg in sent))
+        self.assertFalse(registry["sessions"]["sid-quiet"]["pending_completion"])
+
+    def test_process_session_file_verbose_notification_level_emits_progress_update_without_discord(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            codex_home = Path(td)
+            session_path = codex_home / "sessions" / "sample.jsonl"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "session", "id": "sid-verbose", "cwd": "/tmp/project"}),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "progress update"}],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            registry = {
+                "sessions": {"sid-verbose": {"session_id": "sid-verbose", "agent": "pi", "pending_completion": False}},
+                "aliases": {},
+                "conversation_bindings": {},
+            }
+            sent: list[dict[str, object]] = []
+
+            with (
+                mock.patch.dict(cp.os.environ, {"AGENT_CHAT_NOTIFICATION_LEVEL": "verbose"}, clear=False),
+                mock.patch.object(cp, "_agent_for_session_path", return_value="pi"),
+                mock.patch.object(cp, "_send_structured", side_effect=lambda **kwargs: sent.append(dict(kwargs))),
+            ):
+                cp._process_session_file(  # type: ignore[attr-defined]
+                    codex_home=codex_home,
+                    session_path=session_path,
+                    offset=0,
+                    recipient="+15551234567",
+                    max_message_chars=1800,
+                    dry_run=False,
+                    registry=registry,
+                    message_index={"messages": []},
+                    session_id_cache={},
+                    call_id_to_name={},
+                    seen_needs_input_call_ids={},
+                )
+
+        self.assertTrue(any(msg.get("kind") == "update" and msg.get("session_id") == "sid-verbose" for msg in sent))
+
     def test_process_inbound_replies_implicit_discord_binding_resolves_target_first(self) -> None:
         registry = {
             "sessions": {"sid-dis": {"session_id": "sid-dis", "agent": "pi"}},

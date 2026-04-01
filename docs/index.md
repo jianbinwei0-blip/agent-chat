@@ -15,6 +15,7 @@ This repository treats in-repo docs as the system of record.
 docs/
 ├── index.md
 ├── architecture.md
+├── changelog.md
 ├── control-plane.md
 ├── discord.md
 ├── troubleshooting.md
@@ -30,6 +31,7 @@ docs/
 ## Domain References
 
 - Runtime architecture: `docs/architecture.md`
+- Change summary / release-style notes: `docs/changelog.md`
 - Control-plane behavior and command surface: `docs/control-plane.md`
 - Discord setup and session/channel routing: `docs/discord.md`
 - Failure recovery and diagnosis: `docs/troubleshooting.md`

@@ -58,6 +58,9 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 
 ## Routing Controls
 
+- first-use surface onboarding
+  - control surfaces and bound session surfaces now show a one-time quick-start hint in-context
+  - this teaches `list`, `where`, `bind`, and `new ...` without requiring users to open docs
 - `AGENT_CHAT_STRICT_TMUX` (default `1`)
   - `1`: keep strict tmux errors for general pane dispatch failures.
   - exception: if a target session exists but has no usable pane mapping (`tmux_stale` no-pane class), control plane falls back to `resume` so replies still append to that session.
@@ -68,13 +71,17 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - controls user-message ack wait window after tmux send.
 - `AGENT_CHAT_TRACE` or `run/once --trace`
   - emits per-message routing traces to stderr logs.
+- `AGENT_CHAT_NOTIFICATION_LEVEL` (`quiet`, `default`, `verbose`)
+  - `quiet`: suppress automatic completion/progress notifications from session activity
+  - `default`: keep automatic completion notifications and Discord session-channel progress updates
+  - `verbose`: emit automatic progress updates across enabled transports, not just Discord session channels
 
 ## Discord Session-Channel Mode
 
 See `docs/discord.md` for end-to-end Discord setup and operator guidance.
 
 When `AGENT_DISCORD_SESSION_CHANNELS=1`:
-- `AGENT_DISCORD_CONTROL_CHANNEL_ID` (or `AGENT_DISCORD_CHANNEL_ID`) is the control channel for `help`, `list`, `status`, and session creation.
+- `AGENT_DISCORD_CONTROL_CHANNEL_ID` (or `AGENT_DISCORD_CHANNEL_ID`) is the control channel for `help`, `list`, `where`, `status`, and session creation.
 - the control channel is intentionally not rebound to a session, so it remains usable as a command surface.
 - session output is mirrored to a dedicated Discord channel per session.
 - session channels are created lazily on first meaningful outbound delivery, not eagerly for every discovered session.
@@ -106,8 +113,10 @@ Pending choice scope:
 - Discord channel/thread inbound: one pending request per canonical Discord conversation key.
 
 When a runtime choice creates a session from Telegram topic input, the topic is bound to that session. Outbound session messages then include `message_thread_id` so updates stay in the same topic.
+Explicit `new <label>: <instruction>` requests created from a Telegram topic or other bindable conversational surface now bind that surface back to the new session as well.
 Registry migration/load/save keeps Telegram topic bindings canonical (one topic per session, one session per topic), and `telegram_thread_bindings` is treated as the source of truth when it conflicts with per-session topic fields.
-To move an existing Codex session to another Telegram topic, send one explicit bind message in the destination topic: `@<session_ref> hello`. The destination topic becomes the session's canonical binding.
+To inspect the current routing surface, send `where` or `context`.
+To move an existing session to another Telegram topic or Discord channel/thread, send `bind @<session_ref>` in the destination surface (legacy explicit-bind messages like `@<session_ref> hello` still work).
 
 ## Failure Modes
 
