@@ -9,6 +9,7 @@ With Discord transport enabled, the control plane can:
 - send outbound session updates to Discord
 - poll Discord for inbound plain-text messages
 - route replies back to Codex, Claude, or Pi sessions
+- surface Discord-origin Pi prompts on the desktop and report lifecycle milestones back to Discord
 - optionally create one dedicated Discord channel per session
 
 Discord can be used by itself or alongside iMessage and/or Telegram.
@@ -150,6 +151,37 @@ When Pi is blocked waiting on you, Discord now uses a clearer waiting-state mess
 - the active question/request is repeated in a cleaner plain-text block
 - the message ends with obvious next-step suggestions such as `continue`, `summarize`, `yes`, `no`, or numeric choices when Pi provided options
 - in a bound session channel, the message reminds you that plain text in that same channel continues the same session
+
+### Desktop visibility and origin-aware progress
+
+When a Pi session becomes Discord-bound, agent-chat now treats Discord visibility as a per-session policy instead of one global always-mirror behavior.
+
+Default behavior:
+- newly Discord-bound Pi sessions default to `origin_scoped`
+- existing explicit session mode is preserved when a session is rebound or reused
+- `origin_scoped` is the safe default for normal day-to-day use because it keeps Discord collaborators informed about Discord-origin work without mirroring unrelated local desktop exploration
+
+Per-session progress modes:
+- `origin_scoped` (default): send lifecycle updates only for prompts that came from Discord
+- `shared_status`: send milestone lifecycle updates for both Discord-origin and local desktop-origin prompts
+- `full_mirror`: send the broadest set of lifecycle updates for both origins; useful for demos or highly collaborative sessions
+- `local_only`: suppress automatic Discord lifecycle updates for every prompt origin
+
+What this means in practice:
+- a prompt sent from Discord is accepted into the target Pi session and surfaced on the desktop immediately
+- if the Pi surface is already foreground/visible, Discord says the prompt is visible on the desktop now
+- if the Pi surface is backgrounded or hidden, Discord says the prompt was queued and marked for desktop attention
+- in `origin_scoped`, later lifecycle milestones such as `working`, `needs_input`, `completed`, `failed`, and `cancelled` continue to post back to Discord only for that Discord-origin prompt
+- local desktop-only work is **not** mirrored back to Discord by default in `origin_scoped`
+
+Desktop attention states tracked for Discord-origin prompts:
+- `inline_visible`: the prompt is already visible in the active Pi desktop surface
+- `notification_visible`: the prompt was surfaced through desktop notification/attention handling because the session was not frontmost
+- `attention_badged`: the session still has unread remote attention to clear
+- `waiting_for_user`: Pi is blocked and waiting for a reply
+- `resolved`: the active prompt lifecycle finished
+
+This lifecycle metadata is persisted per session so progress gating stays stable across restarts and channel/session rebinding.
 
 ### Discord attachment handoff (first pass)
 

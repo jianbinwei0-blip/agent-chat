@@ -52,6 +52,18 @@ _SESSION_STATUS_LINE_UUID_RE = re.compile(
     r"·\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*·"
 )
 
+_DISCORD_PROGRESS_MODES = {"origin_scoped", "shared_status", "full_mirror", "local_only"}
+_DESKTOP_ATTENTION_STATES = {
+    "inline_visible",
+    "notification_visible",
+    "attention_badged",
+    "waiting_for_user",
+    "resolved",
+    "none",
+}
+_ACTIVE_PROMPT_STATUSES = {"accepted", "working", "needs_input", "completed", "failed", "cancelled"}
+_ACTIVE_PROMPT_ORIGINS = {"discord", "desktop"}
+
 
 def _is_supported_python_version(version: tuple[int, int, int]) -> bool:
     return (int(version[0]), int(version[1])) >= _MIN_PYTHON_VERSION
@@ -1882,6 +1894,7 @@ def _discord_store_session_channel_metadata(
     if isinstance(guild_id, str) and guild_id.strip():
         fields["discord_guild_id"] = guild_id.strip()
     _upsert_session(registry=registry, session_id=session_id, fields=fields)
+    _set_default_discord_progress_mode_for_session(registry=registry, session_id=session_id)
 
 
 def _discord_session_channel_for_session(*, registry: dict[str, Any], session_id: str | None) -> str | None:
@@ -2247,6 +2260,71 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _persist_attention_state(
+    *,
+    codex_home: Path,
+    registry: dict[str, Any],
+    session_id: str,
+    session_rec: dict[str, Any] | None,
+    state: str,
+    tmux_pane: str | None = None,
+    tmux_socket: str | None = None,
+    extra_fields: dict[str, Any] | None = None,
+) -> None:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return
+
+    normalized_state = _normalize_desktop_attention_state(state=state)
+    ts = int(time.time())
+    normalized_pane = tmux_pane.strip() if isinstance(tmux_pane, str) and tmux_pane.strip() else None
+    normalized_socket = _normalize_tmux_socket(tmux_socket=tmux_socket)
+
+    session_fields: dict[str, Any] = {
+        "desktop_attention_state": normalized_state,
+        "last_desktop_attention_ts": ts,
+        "last_attention_ts": ts,
+    }
+    if normalized_pane:
+        session_fields["tmux_pane"] = normalized_pane
+    if normalized_socket:
+        session_fields["tmux_socket"] = normalized_socket
+    if isinstance(extra_fields, dict):
+        session_fields.update(extra_fields)
+
+    if isinstance(session_rec, dict):
+        session_rec.update(session_fields)
+    _upsert_session(registry=registry, session_id=sid, fields=session_fields)
+
+    sessions = registry.get("sessions")
+    active_rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(active_rec, dict):
+        active_rec = session_rec if isinstance(session_rec, dict) else {}
+
+    record: dict[str, Any] = {
+        "ts": ts,
+        "session_id": sid,
+        "desktop_attention_state": normalized_state,
+    }
+    for key in ("agent", "cwd", "session_path"):
+        value = _coerce_nonempty_str(active_rec.get(key) if isinstance(active_rec, dict) else None)
+        if value:
+            record[key] = value
+    if normalized_pane:
+        record["tmux_pane"] = normalized_pane
+    if normalized_socket:
+        record["tmux_socket"] = normalized_socket
+
+    _write_json(_last_attention_state_path(codex_home=codex_home), record)
+    attention_index = _read_json(_attention_index_path(codex_home=codex_home)) or {}
+    attention_index[sid] = record
+    try:
+        attention_index = notify._prune_attention_index(attention_index, now_ts=ts)
+    except Exception:
+        pass
+    _write_json(_attention_index_path(codex_home=codex_home), attention_index)
+
+
 def _select_attention_context(
     *,
     session_id: str,
@@ -2437,13 +2515,16 @@ def _deliver_message_across_transports(
     telegram_chat_id: str | None = None,
     telegram_message_thread_id: int | None = None,
     discord_channel_id: str | None = None,
+    deliver_to_imessage: bool = True,
+    deliver_to_telegram: bool = True,
+    deliver_to_discord: bool = True,
 ) -> bool:
     queue_path = _queue_path(codex_home=codex_home)
     mode = _transport_mode()
     sent_any = False
     attempted = False
 
-    if _transport_imessage_enabled(mode=mode):
+    if deliver_to_imessage and _transport_imessage_enabled(mode=mode):
         recipient_text = imessage_recipient.strip()
         if recipient_text:
             attempted = True
@@ -2457,7 +2538,7 @@ def _deliver_message_across_transports(
                     message=message,
                 )
 
-    if _transport_telegram_enabled(mode=mode):
+    if deliver_to_telegram and _transport_telegram_enabled(mode=mode):
         chat_id = telegram_chat_id if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else _telegram_chat_id()
         if isinstance(chat_id, str) and chat_id.strip():
             attempted = True
@@ -2478,7 +2559,7 @@ def _deliver_message_across_transports(
                     telegram_message_thread_id=telegram_message_thread_id,
                 )
 
-    if _transport_discord_enabled(mode=mode):
+    if deliver_to_discord and _transport_discord_enabled(mode=mode):
         channel_id = discord_channel_id if isinstance(discord_channel_id, str) and discord_channel_id.strip() else _discord_channel_id()
         if isinstance(channel_id, str) and channel_id.strip():
             attempted = True
@@ -4876,10 +4957,12 @@ def _load_registry(*, codex_home: Path) -> dict[str, Any]:
         "surface_onboarding_session": surface_onboarding_session,
         "ts": int(time.time()),
     }
+    _normalize_session_records_in_registry(registry=out)
     return out
 
 
 def _save_registry(*, codex_home: Path, registry: dict[str, Any]) -> None:
+    _normalize_session_records_in_registry(registry=registry)
     sessions = registry.get("sessions")
     if not isinstance(sessions, dict):
         sessions = {}
@@ -5037,6 +5120,218 @@ def _upsert_session(
             aliases = {}
             registry["aliases"] = aliases
         aliases[alias_norm] = sid
+
+
+
+def _normalize_session_record_for_registry(*, session_rec: dict[str, Any]) -> None:
+    if not isinstance(session_rec, dict):
+        return
+
+    if "discord_progress_mode" in session_rec or (
+        isinstance(session_rec.get("discord_channel_id"), str) and session_rec.get("discord_channel_id").strip()
+    ):
+        session_rec["discord_progress_mode"] = _session_discord_progress_mode(session_rec=session_rec)
+
+    if "desktop_attention_state" in session_rec:
+        session_rec["desktop_attention_state"] = _normalize_desktop_attention_state(
+            session_rec.get("desktop_attention_state")
+        )
+
+    prompt_status = _normalize_active_prompt_status(session_rec.get("active_prompt_status"))
+    if prompt_status is None:
+        session_rec.pop("active_prompt_status", None)
+    else:
+        session_rec["active_prompt_status"] = prompt_status
+
+    prompt_origin = _normalize_active_prompt_origin(session_rec.get("active_prompt_origin"))
+    if prompt_origin is None:
+        session_rec.pop("active_prompt_origin", None)
+    else:
+        session_rec["active_prompt_origin"] = prompt_origin
+        if prompt_origin == "discord":
+            session_rec["active_prompt_transport"] = "discord"
+
+    prompt_transport = session_rec.get("active_prompt_transport")
+    if isinstance(prompt_transport, str):
+        prompt_transport = prompt_transport.strip().lower()
+        if prompt_transport:
+            session_rec["active_prompt_transport"] = prompt_transport
+        else:
+            session_rec.pop("active_prompt_transport", None)
+    else:
+        session_rec.pop("active_prompt_transport", None)
+
+
+
+def _normalize_session_records_in_registry(*, registry: dict[str, Any]) -> None:
+    sessions = registry.get("sessions")
+    if not isinstance(sessions, dict):
+        return
+    for rec in sessions.values():
+        if isinstance(rec, dict):
+            _normalize_session_record_for_registry(session_rec=rec)
+
+
+
+def _set_default_discord_progress_mode_for_session(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+) -> str:
+    sid = session_id.strip()
+    if not sid:
+        return "origin_scoped"
+    sessions = registry.setdefault("sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+        registry["sessions"] = sessions
+    rec = sessions.get(sid)
+    if not isinstance(rec, dict):
+        rec = {"session_id": sid, "ref": _session_ref(sid)}
+        sessions[sid] = rec
+    normalized = _session_discord_progress_mode(session_rec=rec)
+    rec["discord_progress_mode"] = normalized
+    return normalized
+
+
+
+def _build_prompt_lifecycle_id(*, session_id: str, context_key: str | None) -> str:
+    seed = f"{session_id.strip()}:{context_key or ''}:{time.time_ns()}"
+    digest = hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"prompt-{digest}"
+
+
+
+def _record_discord_prompt_acceptance(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    context_key: str | None,
+) -> str:
+    sid = session_id.strip()
+    if not sid:
+        return ""
+    prompt_id = _build_prompt_lifecycle_id(session_id=sid, context_key=context_key)
+    _upsert_session(
+        registry=registry,
+        session_id=sid,
+        fields={
+            "active_prompt_id": prompt_id,
+            "active_prompt_origin": "discord",
+            "active_prompt_transport": "discord",
+            "active_prompt_context": context_key.strip() if isinstance(context_key, str) and context_key.strip() else None,
+            "active_prompt_status": "accepted",
+            "last_discord_prompt_ts": int(time.time()),
+        },
+    )
+    _set_default_discord_progress_mode_for_session(registry=registry, session_id=sid)
+    return prompt_id
+
+
+
+def _update_active_prompt_lifecycle(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    status: str | None = None,
+    desktop_attention_state: str | None = None,
+) -> None:
+    sid = session_id.strip()
+    if not sid:
+        return
+
+    fields: dict[str, Any] = {}
+    normalized_status = _normalize_active_prompt_status(status)
+    if normalized_status is not None:
+        fields["active_prompt_status"] = normalized_status
+        if normalized_status == "needs_input" and desktop_attention_state is None:
+            desktop_attention_state = "waiting_for_user"
+        elif normalized_status in {"completed", "failed", "cancelled"} and desktop_attention_state is None:
+            desktop_attention_state = "resolved"
+
+    if desktop_attention_state is not None:
+        normalized_attention = _normalize_desktop_attention_state(desktop_attention_state)
+        fields["desktop_attention_state"] = normalized_attention
+        fields["last_desktop_attention_ts"] = int(time.time())
+
+    if fields:
+        _upsert_session(registry=registry, session_id=sid, fields=fields)
+
+
+_NOTIFY_TERMINAL_CANCELLED_VALUES = {
+    "cancel",
+    "cancelled",
+    "canceled",
+    "abort",
+    "aborted",
+    "interrupted",
+    "user_cancelled",
+    "user_canceled",
+}
+
+
+_NOTIFY_TERMINAL_FAILED_VALUES = {
+    "error",
+    "errored",
+    "failed",
+    "failure",
+    "exception",
+    "crash",
+    "crashed",
+    "timed_out",
+    "timeout",
+}
+
+
+def _infer_notify_terminal_status(*, payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return "completed"
+
+    def _string_candidates(source: dict[str, Any] | None) -> list[str]:
+        if not isinstance(source, dict):
+            return []
+        out: list[str] = []
+        for key in (
+            "status",
+            "state",
+            "result",
+            "outcome",
+            "reason",
+            "stop_reason",
+            "finish_reason",
+            "hook_event_name",
+            "hook-event-name",
+            "hookEventName",
+        ):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip().lower())
+        return out
+
+    candidates = _string_candidates(payload)
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else None
+    candidates.extend(_string_candidates(params))
+
+    if any(value in _NOTIFY_TERMINAL_CANCELLED_VALUES for value in candidates):
+        return "cancelled"
+    if any(value in _NOTIFY_TERMINAL_FAILED_VALUES for value in candidates):
+        return "failed"
+
+    for source in (payload, params):
+        if not isinstance(source, dict):
+            continue
+        for key in ("success", "ok"):
+            value = source.get(key)
+            if value is False:
+                return "failed"
+        for key in ("error", "errors", "exception"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return "failed"
+            if isinstance(value, (dict, list)) and value:
+                return "failed"
+
+    return "completed"
 
 
 def _set_alias(*, registry: dict[str, Any], session_id: str, label: str) -> None:
@@ -6350,6 +6645,155 @@ def _should_emit_session_progress_update() -> bool:
 
 
 
+def _normalize_discord_progress_mode(mode: object) -> str:
+    normalized = mode.strip().lower() if isinstance(mode, str) else ""
+    if normalized in _DISCORD_PROGRESS_MODES:
+        return normalized
+    return "origin_scoped"
+
+
+
+def _session_discord_progress_mode(*, session_rec: dict[str, Any] | None) -> str:
+    if not isinstance(session_rec, dict):
+        return "origin_scoped"
+    return _normalize_discord_progress_mode(session_rec.get("discord_progress_mode"))
+
+
+
+def _normalize_desktop_attention_state(state: object) -> str:
+    normalized = state.strip().lower() if isinstance(state, str) else ""
+    if normalized in _DESKTOP_ATTENTION_STATES:
+        return normalized
+    return "none"
+
+
+
+def _normalize_active_prompt_status(status: object) -> str | None:
+    normalized = status.strip().lower() if isinstance(status, str) else ""
+    if normalized in _ACTIVE_PROMPT_STATUSES:
+        return normalized
+    return None
+
+
+
+def _normalize_active_prompt_origin(origin: object) -> str | None:
+    normalized = origin.strip().lower() if isinstance(origin, str) else ""
+    if normalized in _ACTIVE_PROMPT_ORIGINS:
+        return normalized
+    return None
+
+
+
+def _is_discord_origin_prompt(*, session_rec: dict[str, Any] | None) -> bool:
+    if not isinstance(session_rec, dict):
+        return False
+    return _normalize_active_prompt_origin(session_rec.get("active_prompt_origin")) == "discord"
+
+
+
+def _should_emit_discord_lifecycle_event(
+    *,
+    session_rec: dict[str, Any] | None,
+    event_kind: str | None = None,
+) -> bool:
+    del event_kind
+    if not isinstance(session_rec, dict):
+        return False
+    mode = _session_discord_progress_mode(session_rec=session_rec)
+    if mode == "local_only":
+        return False
+    if mode == "origin_scoped":
+        return _is_discord_origin_prompt(session_rec=session_rec)
+    return True
+
+
+
+def _discord_lifecycle_kind_for_structured_kind(*, kind: str) -> str | None:
+    normalized = kind.strip().lower()
+    if normalized in {"accepted", "working", "needs_input", "failed", "cancelled", "completed"}:
+        return normalized
+    if normalized == "responded":
+        return "completed"
+    return None
+
+
+
+def _format_discord_progress_accepted(*, ref: str, origin: str | None, desktop_attention_state: str | None) -> str:
+    if origin == "desktop":
+        return f"Pi started local work in `@{ref}`."
+    normalized_attention = _normalize_desktop_attention_state(desktop_attention_state)
+    if normalized_attention == "inline_visible":
+        return f"Got it — sent to `@{ref}`. It's now visible on the desktop."
+    if normalized_attention in {"notification_visible", "attention_badged", "waiting_for_user"}:
+        return f"Got it — sent to `@{ref}`. It's queued in the session and marked for desktop attention."
+    return f"Got it — sent to `@{ref}`."
+
+
+
+def _render_discord_lifecycle_text(
+    *,
+    session_id: str | None,
+    kind: str,
+    text: str,
+    session_rec: dict[str, Any] | None,
+) -> str | None:
+    lifecycle_kind = _discord_lifecycle_kind_for_structured_kind(kind=kind)
+    if lifecycle_kind is None:
+        return None
+
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    ref = (
+        session_rec.get("ref")
+        if isinstance(session_rec, dict) and isinstance(session_rec.get("ref"), str) and session_rec.get("ref").strip()
+        else _session_ref(sid)
+    )
+    origin = _normalize_active_prompt_origin(session_rec.get("active_prompt_origin") if isinstance(session_rec, dict) else None)
+    desktop_attention_state = (
+        session_rec.get("desktop_attention_state") if isinstance(session_rec, dict) else None
+    )
+    prompt_text = text.strip()
+
+    if lifecycle_kind == "accepted":
+        return _format_discord_progress_accepted(
+            ref=ref,
+            origin=origin,
+            desktop_attention_state=desktop_attention_state,
+        )
+
+    if lifecycle_kind == "working":
+        if origin == "desktop":
+            return f"Pi is working locally in `@{ref}`."
+        return f"Pi is working on your request in `@{ref}`."
+
+    if lifecycle_kind == "needs_input":
+        questions = _pi_pending_questions(session_rec=session_rec)
+        rendered_questions = outbound._render_request_user_input_questions(questions) if questions else None
+        prompt_body = rendered_questions.strip() if isinstance(rendered_questions, str) and rendered_questions.strip() else prompt_text
+        if not prompt_body:
+            prompt_body = "Pi needs more information before it can continue."
+        lead = f"Pi needs input in `@{ref}`." if origin == "desktop" else f"Pi is waiting for your input on `@{ref}`."
+        suggestion = _pi_needs_input_suggestion_text(session_rec=session_rec, text=prompt_body)
+        lines = [lead, "", prompt_body, "", "Reply here to continue.", suggestion]
+        return "\n".join(lines).strip()
+
+    if lifecycle_kind == "completed":
+        lead = f"Pi completed local work in `@{ref}`." if origin == "desktop" else f"Done in `@{ref}`."
+        return f"{lead}\n{prompt_text}".strip() if prompt_text else lead
+
+    if lifecycle_kind == "failed":
+        lines = [f"Pi hit a problem in `@{ref}`."]
+        if prompt_text:
+            lines.extend(["", prompt_text])
+        lines.extend(["", "Reply here if you want Pi to try a different approach."])
+        return "\n".join(lines).strip()
+
+    if lifecycle_kind == "cancelled":
+        return f"Cancelled in `@{ref}`."
+
+    return prompt_text or None
+
+
+
 def _send_structured(
     *,
     codex_home: Path,
@@ -6365,6 +6809,10 @@ def _send_structured(
     telegram_message_thread_id: int | None = None,
     discord_channel_id: str | None = None,
     registry: dict[str, Any] | None = None,
+    deliver_to_imessage: bool = True,
+    deliver_to_telegram: bool = True,
+    deliver_to_discord: bool = True,
+    discord_lifecycle_event: bool = False,
 ) -> None:
     resolved_thread_id = _normalize_telegram_thread_id(telegram_message_thread_id)
     resolved_chat_id = telegram_chat_id.strip() if isinstance(telegram_chat_id, str) and telegram_chat_id.strip() else None
@@ -6427,6 +6875,18 @@ def _send_structured(
     except Exception:
         messages = [f"{header}\n{body}"]
 
+    discord_message: str | None = None
+    if discord_lifecycle_event:
+        discord_message = _render_discord_lifecycle_text(
+            session_id=session_id,
+            kind=kind,
+            text=text,
+            session_rec=session_rec,
+        )
+        if isinstance(discord_message, str):
+            discord_message = outbound._redact(discord_message.rstrip())
+
+    sent_discord_lifecycle = False
     for msg in messages:
         _record_outbound_message(
             index=message_index,
@@ -6447,7 +6907,29 @@ def _send_structured(
             telegram_chat_id=resolved_chat_id,
             telegram_message_thread_id=resolved_thread_id,
             discord_channel_id=resolved_discord_channel_id,
+            deliver_to_imessage=deliver_to_imessage,
+            deliver_to_telegram=deliver_to_telegram,
+            deliver_to_discord=deliver_to_discord and discord_message is None,
         )
+
+        if deliver_to_discord and discord_message is not None and not sent_discord_lifecycle:
+            _deliver_message_across_transports(
+                codex_home=codex_home,
+                imessage_recipient=recipient,
+                message=discord_message,
+                telegram_chat_id=resolved_chat_id,
+                telegram_message_thread_id=resolved_thread_id,
+                discord_channel_id=resolved_discord_channel_id,
+                deliver_to_imessage=False,
+                deliver_to_telegram=False,
+                deliver_to_discord=True,
+            )
+            sent_discord_lifecycle = True
+
+    if dry_run and discord_message and deliver_to_discord and discord_message not in messages:
+        sys.stdout.write("discord> ")
+        sys.stdout.write(discord_message)
+        sys.stdout.write("\n---\n")
 
 
 def _find_all_session_files(*, codex_home: Path, agent: str | None = None) -> list[Path]:
@@ -6577,6 +7059,37 @@ def _process_session_file(
                         if not agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
                             continue
 
+                        sessions = registry.get("sessions")
+                        rec = sessions.get(sid) if isinstance(sessions, dict) else None
+                        deliver_to_discord = _should_emit_discord_lifecycle_event(
+                            session_rec=rec if isinstance(rec, dict) else None,
+                            event_kind="needs_input",
+                        )
+                        active_prompt_status = _normalize_active_prompt_status(
+                            rec.get("active_prompt_status") if isinstance(rec, dict) else None
+                        )
+                        if active_prompt_status == "accepted" and deliver_to_discord:
+                            _send_structured(
+                                codex_home=codex_home,
+                                recipient=recipient,
+                                session_id=sid,
+                                kind="working",
+                                text="",
+                                max_message_chars=max_message_chars,
+                                dry_run=dry_run,
+                                message_index=message_index,
+                                agent=session_agent,
+                                registry=registry,
+                                deliver_to_imessage=False,
+                                deliver_to_telegram=False,
+                                deliver_to_discord=True,
+                                discord_lifecycle_event=True,
+                            )
+                            _update_active_prompt_lifecycle(
+                                registry=registry,
+                                session_id=sid,
+                                status="working",
+                            )
                         _send_structured(
                             codex_home=codex_home,
                             recipient=recipient,
@@ -6587,6 +7100,8 @@ def _process_session_file(
                             dry_run=dry_run,
                             message_index=message_index,
                             registry=registry,
+                            deliver_to_discord=deliver_to_discord,
+                            discord_lifecycle_event=deliver_to_discord,
                         )
 
                         session_fields: dict[str, Any] = {
@@ -6597,6 +7112,9 @@ def _process_session_file(
                             "pending_completion": True,
                             "last_attention_ts": int(time.time()),
                             "last_needs_input": text,
+                            "active_prompt_status": "needs_input",
+                            "desktop_attention_state": "waiting_for_user",
+                            "last_desktop_attention_ts": int(time.time()),
                         }
                         pending_request_user_input = outbound._extract_request_user_input_payload(payload)
                         if isinstance(pending_request_user_input, dict):
@@ -6660,6 +7178,37 @@ def _process_session_file(
                 rec = sessions.get(sid) if isinstance(sessions, dict) else None
                 pending_completion = isinstance(rec, dict) and rec.get("pending_completion") is True
                 should_emit_update = _should_emit_session_progress_update()
+                deliver_to_discord = _should_emit_discord_lifecycle_event(
+                    session_rec=rec if isinstance(rec, dict) else None,
+                    event_kind="update",
+                )
+                active_prompt_status = _normalize_active_prompt_status(
+                    rec.get("active_prompt_status") if isinstance(rec, dict) else None
+                )
+
+                if pending_completion and active_prompt_status == "accepted" and deliver_to_discord:
+                    _send_structured(
+                        codex_home=codex_home,
+                        recipient=recipient,
+                        session_id=sid,
+                        kind="working",
+                        text="",
+                        max_message_chars=max_message_chars,
+                        dry_run=dry_run,
+                        message_index=message_index,
+                        agent=session_agent,
+                        registry=registry,
+                        deliver_to_imessage=False,
+                        deliver_to_telegram=False,
+                        deliver_to_discord=True,
+                        discord_lifecycle_event=True,
+                    )
+                    _update_active_prompt_lifecycle(
+                        registry=registry,
+                        session_id=sid,
+                        status="working",
+                    )
+                    active_prompt_status = "working"
 
                 if pending_completion:
                     if _should_emit_session_completion_notification():
@@ -6674,8 +7223,15 @@ def _process_session_file(
                             message_index=message_index,
                             agent=session_agent,
                             registry=registry,
+                            deliver_to_discord=deliver_to_discord,
+                            discord_lifecycle_event=deliver_to_discord,
                         )
 
+                    _update_active_prompt_lifecycle(
+                        registry=registry,
+                        session_id=sid,
+                        status="completed",
+                    )
                     _upsert_session(
                         registry=registry,
                         session_id=sid,
@@ -6684,6 +7240,9 @@ def _process_session_file(
                             "pending_completion": False,
                             "last_response_ts": int(time.time()),
                             "pending_request_user_input": None,
+                            "active_prompt_status": "completed",
+                            "desktop_attention_state": "resolved",
+                            "last_desktop_attention_ts": int(time.time()),
                         },
                     )
                 elif should_emit_update:
@@ -6698,6 +7257,7 @@ def _process_session_file(
                         message_index=message_index,
                         agent=session_agent,
                         registry=registry,
+                        deliver_to_discord=False,
                     )
                     _upsert_session(
                         registry=registry,
@@ -7972,6 +8532,197 @@ def _tmux_pane_exists(*, pane: str, tmux_socket: str | None = None) -> bool:
         if raw.strip() == target:
             return True
     return False
+
+
+def _tmux_desktop_presence_for_pane(*, pane: str, tmux_socket: str | None = None) -> str:
+    target = pane.strip()
+    if not target:
+        return "hidden"
+
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{session_attached}\t#{window_active}\t#{pane_active}",
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return "hidden"
+
+    if proc.returncode != 0:
+        return "hidden"
+
+    parts = proc.stdout.strip().split("\t")
+    session_attached = parts[0].strip() if len(parts) > 0 else "0"
+    window_active = parts[1].strip() if len(parts) > 1 else "0"
+    pane_active = parts[2].strip() if len(parts) > 2 else "0"
+    if session_attached not in {"", "0"} and window_active == "1" and pane_active == "1":
+        return "foreground_attached"
+    if session_attached not in {"", "0"}:
+        return "background_attached"
+    return "hidden"
+
+
+def _tmux_show_desktop_visibility_banner(*, pane: str, message: str, tmux_socket: str | None = None) -> bool:
+    target = pane.strip()
+    text = message.strip()
+    if not target or not text:
+        return False
+
+    try:
+        proc = subprocess.run(
+            _tmux_cmd(
+                "display-message",
+                "-d",
+                "5000",
+                "-t",
+                target,
+                text,
+                tmux_socket=tmux_socket,
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return False
+
+    return proc.returncode == 0
+
+
+def _applescript_quote(*, text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _show_macos_desktop_notification(*, title: str, message: str, subtitle: str | None = None) -> bool:
+    title_text = title.strip()
+    message_text = message.strip()
+    subtitle_text = subtitle.strip() if isinstance(subtitle, str) and subtitle.strip() else None
+    if not title_text or not message_text:
+        return False
+
+    script = f"display notification {_applescript_quote(text=message_text)} with title {_applescript_quote(text=title_text)}"
+    if subtitle_text:
+        script += f" subtitle {_applescript_quote(text=subtitle_text)}"
+
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return False
+
+    return proc.returncode == 0
+
+
+def _desktop_visibility_prompt_excerpt(*, prompt: str, max_chars: int = 160) -> str:
+    collapsed = re.sub(r"\s+", " ", prompt or "").strip()
+    if not collapsed:
+        return "New Discord message routed to the session."
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[: max_chars - 1].rstrip() + "…"
+
+
+def _emit_desktop_visibility_for_discord_prompt(
+    *,
+    codex_home: Path,
+    registry: dict[str, Any],
+    session_id: str,
+    session_rec: dict[str, Any] | None,
+    prompt: str,
+    agent: str | None = None,
+) -> str:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    normalized_agent = _normalize_agent(
+        agent=agent if agent is not None else (session_rec.get("agent") if isinstance(session_rec, dict) else None)
+    )
+    if not sid or normalized_agent != "pi":
+        return "none"
+
+    tmux_pane = session_rec.get("tmux_pane") if isinstance(session_rec, dict) and isinstance(session_rec.get("tmux_pane"), str) else None
+    tmux_socket = _normalize_tmux_socket(
+        tmux_socket=session_rec.get("tmux_socket") if isinstance(session_rec, dict) and isinstance(session_rec.get("tmux_socket"), str) else None
+    )
+    if tmux_socket is None:
+        tmux_socket = _choose_registry_tmux_socket(registry=registry)
+
+    pane_norm = tmux_pane.strip() if isinstance(tmux_pane, str) and tmux_pane.strip() else ""
+    socket_norm = tmux_socket.strip() if isinstance(tmux_socket, str) and tmux_socket.strip() else None
+    pane_valid = False
+    if pane_norm:
+        pane_valid = _tmux_pane_exists(pane=pane_norm, tmux_socket=socket_norm)
+        if pane_valid:
+            pane_valid = _tmux_pane_matches_session(
+                pane=pane_norm,
+                session_rec=session_rec if isinstance(session_rec, dict) else {},
+                session_id=sid,
+                tmux_socket=socket_norm,
+                agent=normalized_agent,
+            )
+    if not pane_valid:
+        discovered_pane, discovered_socket = _tmux_discover_codex_pane_for_session(
+            session_rec=session_rec if isinstance(session_rec, dict) else {},
+            session_id=sid,
+            tmux_socket=socket_norm,
+            agent=normalized_agent,
+        )
+        if isinstance(discovered_pane, str) and discovered_pane.strip():
+            pane_norm = discovered_pane.strip()
+            pane_valid = True
+            if isinstance(discovered_socket, str) and discovered_socket.strip():
+                socket_norm = discovered_socket.strip()
+            if isinstance(session_rec, dict):
+                session_rec["tmux_pane"] = pane_norm
+                if socket_norm:
+                    session_rec["tmux_socket"] = socket_norm
+
+    prompt_excerpt = _desktop_visibility_prompt_excerpt(prompt=prompt)
+    session_ref = _session_ref(sid)
+    banner_text = f"Discord → Pi @{session_ref}: {prompt_excerpt}"
+    notification_title = f"Discord → Pi @{session_ref}"
+    notification_subtitle = "agent-chat desktop visibility"
+
+    state = "attention_badged"
+    presence = _tmux_desktop_presence_for_pane(pane=pane_norm, tmux_socket=socket_norm) if pane_valid and pane_norm else "hidden"
+    if presence == "foreground_attached" and pane_norm:
+        if _tmux_show_desktop_visibility_banner(pane=pane_norm, message=banner_text, tmux_socket=socket_norm):
+            state = "inline_visible"
+        elif _show_macos_desktop_notification(
+            title=notification_title,
+            subtitle=notification_subtitle,
+            message=prompt_excerpt,
+        ):
+            state = "notification_visible"
+    elif _show_macos_desktop_notification(
+        title=notification_title,
+        subtitle=notification_subtitle,
+        message=prompt_excerpt,
+    ):
+        state = "notification_visible"
+
+    _persist_attention_state(
+        codex_home=codex_home,
+        registry=registry,
+        session_id=sid,
+        session_rec=session_rec,
+        state=state,
+        tmux_pane=pane_norm or None,
+        tmux_socket=socket_norm,
+        extra_fields={"agent": normalized_agent},
+    )
+    return state
 
 
 def _normalize_path_for_match(path_value: str | None) -> str | None:
@@ -9366,6 +10117,10 @@ def _handle_notify_payload(
         )
         if agent_chat_dedupe.mark_once(codex_home=codex_home, key=semantic_key):
             message_index = _load_message_index(codex_home=codex_home)
+            deliver_to_discord = _should_emit_discord_lifecycle_event(
+                session_rec=rec if isinstance(rec, dict) else None,
+                event_kind="needs_input",
+            )
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
@@ -9375,6 +10130,8 @@ def _handle_notify_payload(
                 max_message_chars=_DEFAULT_MAX_MESSAGE_CHARS,
                 dry_run=dry_run,
                 message_index=message_index,
+                deliver_to_discord=deliver_to_discord,
+                discord_lifecycle_event=deliver_to_discord,
             )
             _save_message_index(codex_home=codex_home, index=message_index)
 
@@ -9388,6 +10145,11 @@ def _handle_notify_payload(
                 update_fields["pending_request_user_input"] = pending_request_user_input
             if isinstance(session_path, str) and session_path.strip():
                 update_fields["session_path"] = session_path.strip()
+            _update_active_prompt_lifecycle(
+                registry=registry,
+                session_id=session_id,
+                status="needs_input",
+            )
             _upsert_session(registry=registry, session_id=session_id, fields=update_fields)
 
     if not is_completion_event:
@@ -9423,23 +10185,43 @@ def _handle_notify_payload(
         if isinstance(sp, str) and sp.strip():
             response_text = reply._read_last_assistant_text_from_session(Path(sp.strip()))
 
+    terminal_status = _infer_notify_terminal_status(payload=payload)
+
     if not response_text:
-        response_text = "Turn completed."
+        if terminal_status == "failed":
+            response_text = "Turn failed."
+        elif terminal_status == "cancelled":
+            response_text = "Turn cancelled."
+        else:
+            response_text = "Turn completed."
+
+    structured_kind = "responded" if terminal_status == "completed" else terminal_status
 
     if _should_emit_session_completion_notification():
         message_index = _load_message_index(codex_home=codex_home)
+        deliver_to_discord = _should_emit_discord_lifecycle_event(
+            session_rec=rec if isinstance(rec, dict) else None,
+            event_kind=terminal_status,
+        )
         _send_structured(
             codex_home=codex_home,
             recipient=recipient,
             session_id=session_id,
-            kind="responded",
+            kind=structured_kind,
             text=response_text,
             max_message_chars=_DEFAULT_MAX_MESSAGE_CHARS,
             dry_run=dry_run,
             message_index=message_index,
+            deliver_to_discord=deliver_to_discord,
+            discord_lifecycle_event=deliver_to_discord,
         )
         _save_message_index(codex_home=codex_home, index=message_index)
 
+    _update_active_prompt_lifecycle(
+        registry=registry,
+        session_id=session_id,
+        status=terminal_status,
+    )
     _upsert_session(
         registry=registry,
         session_id=session_id,
@@ -10603,17 +11385,65 @@ def _process_inbound_replies(
                 discord_parent_channel_id=row_discord_parent_channel_id,
             )
 
-        if dispatch_mode == "tmux":
-            _clear_last_dispatch_error(registry=registry)
+        def _accepted_dispatch_text(mode: str) -> str:
+            if row_transport == "discord" and session_agent == "pi":
+                desktop_attention_state = _emit_desktop_visibility_for_discord_prompt(
+                    codex_home=codex_home,
+                    registry=registry,
+                    session_id=target_sid,
+                    session_rec=rec if isinstance(rec, dict) else None,
+                    prompt=prompt_for_dispatch,
+                    agent=session_agent,
+                )
+                if desktop_attention_state == "inline_visible":
+                    return _session_surface_text(
+                        f"{attachment_notice_prefix}Got it — sent to @{_session_ref(target_sid)}. "
+                        f"It's now visible on the desktop.{context_followup_text}"
+                    )
+                if desktop_attention_state in {"notification_visible", "attention_badged", "waiting_for_user"}:
+                    return _session_surface_text(
+                        f"{attachment_notice_prefix}Got it — sent to @{_session_ref(target_sid)}. "
+                        f"It's queued in the session and marked for desktop attention.{context_followup_text}"
+                    )
+            if mode == "tmux":
+                return _session_surface_text(
+                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
+                    f"Check progress on your Mac.{context_followup_text}"
+                )
+            if mode == "tmux_unconfirmed":
+                return _session_surface_text(
+                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
+                    f"Execution may be delayed; check the pane on your Mac.{context_followup_text}"
+                )
+            return _session_surface_text(
+                f"{attachment_notice_prefix}Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
+                f"Waiting for output.{context_followup_text}"
+            )
+
+        discord_prompt_lifecycle = row_transport == "discord" and session_agent == "pi"
+
+        def _record_discord_prompt_if_needed() -> None:
+            if discord_prompt_lifecycle:
+                _record_discord_prompt_acceptance(
+                    registry=registry,
+                    session_id=target_sid,
+                    context_key=row_context_key,
+                )
+
+        def _send_discord_failed_lifecycle(error_text: str) -> None:
+            if not discord_prompt_lifecycle:
+                return
+            if not _should_emit_discord_lifecycle_event(
+                session_rec=rec if isinstance(rec, dict) else None,
+                event_kind="failed",
+            ):
+                return
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=target_sid,
-                kind="accepted",
-                text=_session_surface_text(
-                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
-                    f"Check progress on your Mac.{context_followup_text}"
-                ),
+                kind="failed",
+                text=error_text,
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -10621,6 +11451,29 @@ def _process_inbound_replies(
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                deliver_to_imessage=False,
+                deliver_to_telegram=False,
+                deliver_to_discord=True,
+                discord_lifecycle_event=True,
+            )
+
+        if dispatch_mode == "tmux":
+            _clear_last_dispatch_error(registry=registry)
+            _record_discord_prompt_if_needed()
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=target_sid,
+                kind="accepted",
+                text=_accepted_dispatch_text("tmux"),
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                agent=session_agent,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+                discord_lifecycle_event=discord_prompt_lifecycle,
             )
             _upsert_session(
                 registry=registry,
@@ -10638,15 +11491,13 @@ def _process_inbound_replies(
 
         if dispatch_mode == "tmux_unconfirmed":
             _clear_last_dispatch_error(registry=registry)
+            _record_discord_prompt_if_needed()
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=target_sid,
                 kind="accepted",
-                text=_session_surface_text(
-                    f"{attachment_notice_prefix}Sent to tmux pane for @{_session_ref(target_sid)}. "
-                    f"Execution may be delayed; check the pane on your Mac.{context_followup_text}"
-                ),
+                text=_accepted_dispatch_text("tmux_unconfirmed"),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -10654,6 +11505,7 @@ def _process_inbound_replies(
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                discord_lifecycle_event=discord_prompt_lifecycle,
             )
             _upsert_session(
                 registry=registry,
@@ -10688,23 +11540,31 @@ def _process_inbound_replies(
                         preserved_pane = rec_pane
                 if dispatch_mode == "tmux_stale":
                     preserved_pane = ""
+                failure_text = _dispatch_failure_text(
+                    session_id=target_sid,
+                    mode=dispatch_mode,
+                    reason=dispatch_reason,
+                )
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
                     session_id=target_sid,
                     kind="error",
-                    text=_dispatch_failure_text(
-                        session_id=target_sid,
-                        mode=dispatch_mode,
-                        reason=dispatch_reason,
-                    ),
+                    text=failure_text,
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
-                discord_channel_id=row_reply_discord_channel_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                    deliver_to_discord=not discord_prompt_lifecycle,
+                )
+                _send_discord_failed_lifecycle(failure_text)
+                _update_active_prompt_lifecycle(
+                    registry=registry,
+                    session_id=target_sid,
+                    status="failed",
                 )
                 _upsert_session(
                     registry=registry,
@@ -10736,15 +11596,13 @@ def _process_inbound_replies(
             )
             if resume_mode == "resume_unconfirmed":
                 _clear_last_dispatch_error(registry=registry)
+                _record_discord_prompt_if_needed()
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
                     session_id=target_sid,
                     kind="accepted",
-                    text=_session_surface_text(
-                        f"{attachment_notice_prefix}Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
-                        f"Waiting for output.{context_followup_text}"
-                    ),
+                    text=_accepted_dispatch_text("resume_unconfirmed"),
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
@@ -10752,6 +11610,7 @@ def _process_inbound_replies(
                     telegram_message_thread_id=row_telegram_thread_id,
                     telegram_chat_id=row_telegram_chat_id,
                     discord_channel_id=row_reply_discord_channel_id,
+                    discord_lifecycle_event=discord_prompt_lifecycle,
                 )
                 _upsert_session(
                     registry=registry,
@@ -10768,19 +11627,27 @@ def _process_inbound_replies(
                 )
                 continue
             if not response:
+                failure_text = f"No response from {_agent_display_name(agent=session_agent).lower()} resume. Check session logs."
                 _send_structured(
                     codex_home=codex_home,
                     recipient=recipient,
                     session_id=target_sid,
                     kind="error",
-                    text=f"No response from {_agent_display_name(agent=session_agent).lower()} resume. Check session logs.",
+                    text=failure_text,
                     max_message_chars=max_message_chars,
                     dry_run=dry_run,
                     message_index=message_index,
                     agent=session_agent,
                     telegram_message_thread_id=row_telegram_thread_id,
-                telegram_chat_id=row_telegram_chat_id,
-                discord_channel_id=row_reply_discord_channel_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                    deliver_to_discord=not discord_prompt_lifecycle,
+                )
+                _send_discord_failed_lifecycle(failure_text)
+                _update_active_prompt_lifecycle(
+                    registry=registry,
+                    session_id=target_sid,
+                    status="failed",
                 )
                 _upsert_session(
                     registry=registry,
@@ -10796,6 +11663,7 @@ def _process_inbound_replies(
                 )
                 continue
 
+            _record_discord_prompt_if_needed()
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
@@ -10809,6 +11677,12 @@ def _process_inbound_replies(
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                discord_lifecycle_event=discord_prompt_lifecycle,
+            )
+            _update_active_prompt_lifecycle(
+                registry=registry,
+                session_id=target_sid,
+                status="completed",
             )
             _upsert_session(
                 registry=registry,
@@ -10827,15 +11701,13 @@ def _process_inbound_replies(
 
         _clear_last_dispatch_error(registry=registry)
         if dispatch_mode == "resume_unconfirmed":
+            _record_discord_prompt_if_needed()
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=target_sid,
                 kind="accepted",
-                text=_session_surface_text(
-                    f"{attachment_notice_prefix}Sent to {_agent_display_name(agent=session_agent)} session @{_session_ref(target_sid)}. "
-                    f"Waiting for output.{context_followup_text}"
-                ),
+                text=_accepted_dispatch_text("resume_unconfirmed"),
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -10843,6 +11715,7 @@ def _process_inbound_replies(
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                discord_lifecycle_event=discord_prompt_lifecycle,
             )
             _upsert_session(
                 registry=registry,
@@ -10858,12 +11731,13 @@ def _process_inbound_replies(
             )
             continue
         if not response:
+            failure_text = f"No response from {_agent_display_name(agent=session_agent).lower()} resume. Check session logs."
             _send_structured(
                 codex_home=codex_home,
                 recipient=recipient,
                 session_id=target_sid,
                 kind="error",
-                text=f"No response from {_agent_display_name(agent=session_agent).lower()} resume. Check session logs.",
+                text=failure_text,
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,
@@ -10871,9 +11745,17 @@ def _process_inbound_replies(
                 telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                deliver_to_discord=not discord_prompt_lifecycle,
+            )
+            _send_discord_failed_lifecycle(failure_text)
+            _update_active_prompt_lifecycle(
+                registry=registry,
+                session_id=target_sid,
+                status="failed",
             )
             continue
 
+        _record_discord_prompt_if_needed()
         _send_structured(
             codex_home=codex_home,
             recipient=recipient,
@@ -10887,8 +11769,14 @@ def _process_inbound_replies(
             telegram_message_thread_id=row_telegram_thread_id,
                 telegram_chat_id=row_telegram_chat_id,
                 discord_channel_id=row_reply_discord_channel_id,
+                discord_lifecycle_event=discord_prompt_lifecycle,
         )
 
+        _update_active_prompt_lifecycle(
+            registry=registry,
+            session_id=target_sid,
+            status="completed",
+        )
         _upsert_session(
             registry=registry,
             session_id=target_sid,

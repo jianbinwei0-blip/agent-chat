@@ -26,3 +26,5 @@ Use concise files and keep them updated as execution progresses.
 - `active/2026-03-31-discord-session-channel-mapping.md`
 - `active/2026-04-01-pi-discord-needs-input-ux-prd.md`
 - `active/2026-04-01-pi-discord-next-implementation-plan.md`
+- `active/2026-04-01-pi-discord-desktop-visibility-and-origin-aware-progress.md`
+- `active/2026-04-01-pi-discord-desktop-visibility-implementation-plan.md`

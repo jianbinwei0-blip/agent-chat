@@ -75,6 +75,7 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
   - `quiet`: suppress automatic completion/progress notifications from session activity
   - `default`: keep automatic completion notifications and Discord session-channel progress updates
   - `verbose`: emit automatic progress updates across enabled transports, not just Discord session channels
+  - note: notification level does not override per-session Discord origin/mode gating; a session in `origin_scoped` still suppresses desktop-origin lifecycle posts by default
 - Pi waiting-state UX in Discord
   - Pi `needs_input` deliveries now explicitly say Pi is waiting for the user on `@<session_ref>`
   - waiting messages append suggested plain-text replies such as `continue`, `summarize`, `yes`, `no`, or numeric option hints when Pi supplied structured choices
@@ -100,6 +101,43 @@ When `AGENT_DISCORD_SESSION_CHANNELS=1`:
 - auto-created session channels can be placed under `AGENT_DISCORD_SESSION_CATEGORY_ID` when configured.
 - setup requirements for this mode are: bot token, **Message Content Intent**, access to the control channel, and `Manage Channels` if automatic channel creation is enabled.
 - bound Discord session replies can also carry file attachments into Pi; files are stored locally under the control-plane state directory unless overridden by env.
+
+## Discord Origin-Aware Progress and Desktop Attention
+
+For Discord-bound Pi sessions, the control plane persists prompt-origin and desktop-attention metadata in the session registry so Discord lifecycle updates can be gated per session.
+
+Important session fields:
+- `discord_progress_mode`
+  - valid values: `origin_scoped`, `shared_status`, `full_mirror`, `local_only`
+  - missing/invalid values normalize to `origin_scoped`
+  - when a Pi session first becomes Discord-bound, the default mode is `origin_scoped` unless an explicit valid mode already exists
+- `active_prompt_origin`
+  - tracks whether the current prompt came from `discord` or another local/desktop path
+- `active_prompt_status`
+  - milestone lifecycle state such as `accepted`, `working`, `needs_input`, `completed`, `failed`, or `cancelled`
+- `desktop_attention_state`
+  - best-effort desktop visibility/attention state for the active prompt
+  - expected states: `none`, `inline_visible`, `notification_visible`, `attention_badged`, `waiting_for_user`, `resolved`
+- `last_desktop_attention_ts`
+  - timestamp for the latest attention-state transition
+
+Mode semantics:
+- `origin_scoped` (default): post Discord lifecycle updates only for Discord-origin prompts
+- `shared_status`: post milestone lifecycle updates for Discord-origin and desktop-origin prompts
+- `full_mirror`: allow the broadest lifecycle mirroring for both origins
+- `local_only`: suppress automatic Discord lifecycle updates for every origin
+
+Desktop visibility contract for Discord-origin Pi prompts:
+- accepted prompts should be surfaced on the desktop immediately
+- foreground/inline-visible sessions record `desktop_attention_state=inline_visible`
+- background or hidden sessions record a notification/attention outcome such as `notification_visible` or `attention_badged`
+- `needs_input` escalates attention to `waiting_for_user`
+- terminal lifecycle states resolve attention with `desktop_attention_state=resolved`
+
+Default operator-facing behavior:
+- Discord-origin prompts in `origin_scoped` receive accepted, working, needs-input, and terminal lifecycle updates in Discord
+- local desktop-origin work is not mirrored back to Discord by default in `origin_scoped`
+- broader collaboration requires explicitly using `shared_status` or `full_mirror`
 
 ## Missing-Session Choice Flow
 
