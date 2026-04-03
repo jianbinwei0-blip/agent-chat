@@ -155,6 +155,7 @@ Follow-up behavior:
 - `cancel`: clear the pending request.
 
 If tmux creation fails after runtime choice, control plane falls back to direct (non-tmux) session creation.
+Exception: for Discord-origin Pi session creation, control plane now fails loudly instead of silently creating a headless non-tmux Pi session, because foreground desktop visibility depends on a tmux-backed Pi pane.
 Pending choice scope:
 - iMessage / non-threaded: one global pending request; newest unresolved request replaces older state.
 - Telegram topics: one pending request per `chat_id:message_thread_id`.

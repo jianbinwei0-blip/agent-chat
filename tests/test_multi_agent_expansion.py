@@ -537,3 +537,73 @@ class TestMultiAgentExpansion(unittest.TestCase):
         self.assertEqual(registry["conversation_bindings"].get("discord:chan-1:thread-9"), "pi-sid")
         self.assertEqual(registry["sessions"]["pi-sid"].get("agent"), "pi")
         self.assertTrue(any(msg.get("session_id") == "pi-sid" for msg in sent))
+
+    def test_process_inbound_replies_pending_discord_pi_choice_does_not_fallback_without_tmux(self) -> None:
+        registry = {
+            "sessions": {},
+            "aliases": {},
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {
+                "discord:chan-1:thread-9": {
+                    "prompt": "continue",
+                    "action": "implicit",
+                    "source_text": "continue",
+                    "source_ref": None,
+                    "label": None,
+                    "cwd": "/tmp/project",
+                    "created_ts": 1,
+                }
+            },
+            "pending_new_session_choice_by_thread": {},
+            "telegram_thread_bindings": {},
+        }
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(204, "3", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value={"messages": []}),
+            mock.patch.object(cp, "_load_attention_index", return_value={}),
+            mock.patch.object(cp, "_load_last_attention_state", return_value=None),
+            mock.patch.object(cp, "_create_new_session_in_tmux", return_value=(None, None, None, "tmux failed")),
+            mock.patch.object(cp, "_create_new_session") as fallback_mock,
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="+15551234567",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=lambda **_: {
+                    204: {
+                        "transport": "discord",
+                        "discord_parent_channel_id": "chan-1",
+                        "discord_channel_id": "thread-9",
+                        "discord_sender_user_id": "owner-1",
+                    }
+                },
+            )
+
+        self.assertEqual(rowid, 204)
+        fallback_mock.assert_not_called()
+        self.assertEqual(registry.get("conversation_bindings"), {})
+        pending = registry.get("pending_new_session_choice_by_context")
+        self.assertIsInstance(pending, dict)
+        if not isinstance(pending, dict):
+            self.fail("expected pending context map")
+        self.assertIn("discord:chan-1:thread-9", pending)
+        self.assertTrue(any(msg.get("kind") == "error" for msg in sent))
+        self.assertTrue(any("tmux-backed pi session" in str(msg.get("text", "")).lower() for msg in sent))

@@ -134,6 +134,8 @@ If no target session can be resolved, the control plane asks which runtime to st
 - `3` / `pi` for Pi
 - `cancel`
 
+For Discord-origin Pi session creation, agent-chat now requires a tmux-backed Pi session when it needs foreground desktop visibility semantics. If tmux launch fails, it reports the tmux-backed creation failure instead of silently creating a headless Pi session.
+
 ### From a bound session channel
 
 Just send plain text, for example:

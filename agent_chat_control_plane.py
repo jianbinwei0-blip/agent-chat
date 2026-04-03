@@ -5228,6 +5228,10 @@ def _record_discord_prompt_acceptance(
     return prompt_id
 
 
+def _requires_tmux_backed_new_session_for_context(*, transport: str | None, agent: str | None) -> bool:
+    return (transport or "").strip().lower() == "discord" and _normalize_agent(agent=agent) == "pi"
+
+
 
 def _update_active_prompt_lifecycle(
     *,
@@ -10449,7 +10453,11 @@ def _process_inbound_replies(
                 created_via_tmux = bool(sid)
                 create_response: str | None = None
                 fallback_err: str | None = None
-                if not sid:
+                require_tmux_backed_session = _requires_tmux_backed_new_session_for_context(
+                    transport=row_transport,
+                    agent=choice,
+                )
+                if not sid and not require_tmux_backed_session:
                     sid, session_path, create_response = _create_new_session(
                         codex_home=codex_home,
                         label=selected_label or "session",
@@ -10459,12 +10467,21 @@ def _process_inbound_replies(
                     )
                     if not sid:
                         fallback_err = create_response
+                elif not sid:
+                    fallback_err = "skipped (Discord-origin Pi sessions require tmux-backed creation)"
 
                 if not sid:
-                    err_text = (
-                        "Failed to create new session after agent selection."
-                        f" tmux: {create_err or 'unknown'}; fallback: {fallback_err or 'unknown'}"
-                    )
+                    if require_tmux_backed_session:
+                        err_text = (
+                            "Couldn't start a tmux-backed Pi session for this Discord request. "
+                            "Foreground desktop visibility requires a tmux-backed Pi session. "
+                            f"tmux: {create_err or 'unknown'}. Reply `3` to retry after fixing tmux, or `cancel` to abort."
+                        )
+                    else:
+                        err_text = (
+                            "Failed to create new session after agent selection."
+                            f" tmux: {create_err or 'unknown'}; fallback: {fallback_err or 'unknown'}"
+                        )
                     _send_structured(
                         codex_home=codex_home,
                         recipient=recipient,
