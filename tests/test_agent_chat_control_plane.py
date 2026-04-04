@@ -152,6 +152,24 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(cmd.get("action"), "status")
         self.assertEqual(cmd.get("session_ref"), "019c33b4")
 
+    def test_parse_inbound_command_mode_with_ref_and_value(self) -> None:
+        cmd = cp._parse_inbound_command("mode @019c33b4 full_mirror")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "mode")
+        self.assertEqual(cmd.get("session_ref"), "019c33b4")
+        self.assertEqual(cmd.get("mode"), "full_mirror")
+
+    def test_parse_inbound_command_mode_with_bound_value_only(self) -> None:
+        cmd = cp._parse_inbound_command("mode shared_status")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "mode")
+        self.assertEqual(cmd.get("mode"), "shared_status")
+        self.assertIsNone(cmd.get("session_ref"))
+
+    def test_parse_inbound_command_mode_query_with_ref(self) -> None:
+        cmd = cp._parse_inbound_command("mode @019c33b4")  # type: ignore[attr-defined]
+        self.assertEqual(cmd.get("action"), "mode")
+        self.assertEqual(cmd.get("session_ref"), "019c33b4")
+        self.assertIsNone(cmd.get("mode"))
+
     def test_parse_inbound_command_new_session(self) -> None:
         cmd = cp._parse_inbound_command("new bugfix: inspect failing tests")  # type: ignore[attr-defined]
         self.assertEqual(cmd.get("action"), "new")
@@ -244,6 +262,11 @@ class TestAgentChatControlPlane(unittest.TestCase):
 
         self.assertIn("State: waiting on you", rendered)
         self.assertIn("Awaiting input: yes", rendered)
+        self.assertIn("Discord progress mode: shared_status", rendered)
+        self.assertIn("Discord sharing modes:", rendered)
+        self.assertIn("shared_status | Milestones for Discord + desktop work  ← current", rendered)
+        self.assertIn("full_mirror   | Milestones + interim updates", rendered)
+        self.assertIn("Change it with `mode @abcd1234 <origin_scoped|shared_status|full_mirror|local_only>`.", rendered)
         self.assertIn("Last Pi request: Should I patch the mock or update the assertion?", rendered)
         self.assertIn("Next: reply in the bound topic/channel, or send `summarize`.", rendered)
 
@@ -3716,8 +3739,8 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(sid, "sid-discord")
 
     def test_discord_progress_mode_helpers_normalize_and_gate_by_origin(self) -> None:
-        self.assertEqual(cp._normalize_discord_progress_mode(None), "origin_scoped")  # type: ignore[attr-defined]
-        self.assertEqual(cp._normalize_discord_progress_mode("bogus"), "origin_scoped")  # type: ignore[attr-defined]
+        self.assertEqual(cp._normalize_discord_progress_mode(None), "shared_status")  # type: ignore[attr-defined]
+        self.assertEqual(cp._normalize_discord_progress_mode("bogus"), "shared_status")  # type: ignore[attr-defined]
         self.assertEqual(cp._normalize_discord_progress_mode("shared_status"), "shared_status")  # type: ignore[attr-defined]
         self.assertFalse(
             cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
@@ -3770,7 +3793,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
             discord_parent_channel_id="chan-b",
         )
 
-        self.assertEqual(registry["sessions"]["sid-a"]["discord_progress_mode"], "origin_scoped")  # type: ignore[index]
+        self.assertEqual(registry["sessions"]["sid-a"]["discord_progress_mode"], "shared_status")  # type: ignore[index]
         self.assertEqual(registry["sessions"]["sid-b"]["discord_progress_mode"], "shared_status")  # type: ignore[index]
 
     def test_update_active_prompt_lifecycle_sets_attention_defaults(self) -> None:
@@ -3873,7 +3896,7 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rec.get("active_prompt_transport"), "discord")
         self.assertEqual(rec.get("active_prompt_context"), "discord:chan-123:0")
         self.assertEqual(rec.get("active_prompt_status"), "accepted")
-        self.assertEqual(rec.get("discord_progress_mode"), "origin_scoped")
+        self.assertEqual(rec.get("discord_progress_mode"), "shared_status")
         self.assertTrue(any(msg.get("session_id") == "sid-discord" for msg in sent))
 
     def test_process_inbound_replies_implicit_discord_session_channel_resolves_target_from_session_metadata(self) -> None:
@@ -3939,6 +3962,128 @@ class TestAgentChatControlPlane(unittest.TestCase):
         self.assertEqual(rowid, 351)
         resolve_context_mock.assert_not_called()
         self.assertTrue(any(msg.get("session_id") == "sid-discord" for msg in sent))
+
+    def test_process_inbound_replies_discord_mode_command_updates_bound_session(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-discord": {
+                    "session_id": "sid-discord",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "discord_progress_mode": "shared_status",
+                }
+            },
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                351: {
+                    "transport": "discord",
+                    "discord_channel_id": "chan-123",
+                    "discord_parent_channel_id": "chan-123",
+                    "discord_sender_user_id": "user-1",
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(351, "mode full_mirror", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="discord-recipient",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 351)
+        self.assertEqual(registry["sessions"]["sid-discord"]["discord_progress_mode"], "full_mirror")  # type: ignore[index]
+        self.assertTrue(any("Set Discord progress mode for `@abcd1234` to `full_mirror`." in str(msg.get("text", "")) for msg in sent))
+
+    def test_process_inbound_replies_discord_mode_query_reports_current_mode(self) -> None:
+        registry: dict[str, object] = {
+            "sessions": {
+                "sid-discord": {
+                    "session_id": "sid-discord",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "discord_progress_mode": "shared_status",
+                }
+            },
+            "conversation_bindings": {},
+            "pending_new_session_choice": None,
+            "pending_new_session_choice_by_context": {},
+            "pending_new_session_choice_by_thread": {},
+        }
+        message_index: dict[str, object] = {}
+        sent: list[dict[str, object]] = []
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        def _row_contexts(*, conn: sqlite3.Connection, after_rowid: int, handle_ids: list[str]) -> dict[int, dict[str, object]]:
+            del conn, after_rowid, handle_ids
+            return {
+                351: {
+                    "transport": "discord",
+                    "discord_channel_id": "chan-123",
+                    "discord_parent_channel_id": "chan-123",
+                    "discord_sender_user_id": "user-1",
+                }
+            }
+
+        with (
+            sqlite3.connect(":memory:") as conn,
+            mock.patch.object(cp.reply, "_fetch_new_replies", return_value=[(351, "mode", None)]),
+            mock.patch.object(cp.reply, "_is_attention_message", return_value=False),
+            mock.patch.object(cp.reply, "_is_bot_message", return_value=False),
+            mock.patch.object(cp, "_load_registry", return_value=registry),
+            mock.patch.object(cp, "_load_message_index", return_value=message_index),
+            mock.patch.object(cp, "_save_registry"),
+            mock.patch.object(cp, "_save_message_index"),
+            mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+        ):
+            rowid = cp._process_inbound_replies(  # type: ignore[attr-defined]
+                conn=conn,
+                after_rowid=0,
+                handle_ids=[],
+                codex_home=Path("/tmp/codex-home"),
+                recipient="discord-recipient",
+                max_message_chars=1800,
+                min_prefix=6,
+                dry_run=False,
+                row_contexts_fn=_row_contexts,
+            )
+
+        self.assertEqual(rowid, 351)
+        rendered_messages = [str(msg.get("text", "")) for msg in sent]
+        self.assertTrue(any("Discord progress mode for `@abcd1234` is `shared_status`." in text for text in rendered_messages))
+        self.assertTrue(any("Discord sharing modes:" in text for text in rendered_messages))
+        self.assertTrue(any("full_mirror   | Milestones + interim updates" in text for text in rendered_messages))
 
     def test_process_inbound_replies_discord_attachment_only_routes_to_bound_pi_session(self) -> None:
         registry: dict[str, object] = {
@@ -5753,6 +5898,12 @@ class TestAgentChatControlPlane(unittest.TestCase):
                 event_kind="responded",
             )
         )
+        self.assertFalse(
+            cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
+                session_rec={"discord_progress_mode": "origin_scoped", "active_prompt_origin": "discord"},
+                event_kind="update",
+            )
+        )
         self.assertTrue(
             cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
                 session_rec={"discord_progress_mode": "shared_status", "active_prompt_origin": "desktop"},
@@ -5761,9 +5912,38 @@ class TestAgentChatControlPlane(unittest.TestCase):
         )
         self.assertFalse(
             cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
+                session_rec={"discord_progress_mode": "shared_status", "active_prompt_origin": "desktop"},
+                event_kind="update",
+            )
+        )
+        self.assertTrue(
+            cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
+                session_rec={"discord_progress_mode": "full_mirror", "active_prompt_origin": "desktop"},
+                event_kind="update",
+            )
+        )
+        self.assertFalse(
+            cp._should_emit_discord_lifecycle_event(  # type: ignore[attr-defined]
                 session_rec={"discord_progress_mode": "local_only", "active_prompt_origin": "discord"},
                 event_kind="responded",
             )
+        )
+    def test_render_discord_lifecycle_text_formats_full_mirror_update_copy(self) -> None:
+        rendered = cp._render_discord_lifecycle_text(  # type: ignore[attr-defined]
+            session_id="sid-pi",
+            kind="update",
+            text="Investigating the failure and narrowing the repro.",
+            session_rec={
+                "session_id": "sid-pi",
+                "ref": "abcd1234",
+                "active_prompt_origin": "desktop",
+                "discord_progress_mode": "full_mirror",
+            },
+        )
+
+        self.assertEqual(
+            rendered,
+            "Pi update from local work in `@abcd1234`.\nInvestigating the failure and narrowing the repro.",
         )
 
     def test_send_structured_formats_discord_lifecycle_needs_input_copy(self) -> None:
@@ -6251,6 +6431,128 @@ class TestAgentChatControlPlane(unittest.TestCase):
         rec = registry["sessions"]["sid-pi"]  # type: ignore[index]
         self.assertEqual(rec.get("active_prompt_status"), "completed")
         self.assertEqual(rec.get("desktop_attention_state"), "resolved")
+
+    def test_process_session_file_suppresses_discord_update_for_shared_status(self) -> None:
+        sent: list[dict[str, object]] = []
+        registry = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "discord_progress_mode": "shared_status",
+                    "active_prompt_origin": "desktop",
+                    "active_prompt_status": "working",
+                    "pending_completion": False,
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            session_path = Path(td) / "sid-pi.jsonl"
+            session_path.write_text(
+                '{"type":"message","message":{"role":"assistant","content":"Interim summary"}}\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "AGENT_CHAT_TRANSPORT": "discord",
+                        "AGENT_DISCORD_BOT_TOKEN": "discord-token",
+                        "AGENT_DISCORD_CHANNEL_ID": "control-chan",
+                        "AGENT_DISCORD_SESSION_CHANNELS": "1",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp.outbound, "_read_session_id", return_value="sid-pi"),
+                mock.patch.object(cp.outbound, "_read_session_cwd", return_value="/tmp/project"),
+                mock.patch.object(cp, "_agent_for_session_path", return_value="pi"),
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            ):
+                cp._process_session_file(  # type: ignore[attr-defined]
+                    codex_home=Path(td),
+                    session_path=session_path,
+                    offset=0,
+                    recipient="discord-recipient",
+                    max_message_chars=1800,
+                    dry_run=False,
+                    registry=registry,
+                    message_index={},
+                    session_id_cache={},
+                    call_id_to_name={},
+                    seen_needs_input_call_ids={},
+                )
+
+        self.assertEqual([entry.get("kind") for entry in sent], ["update"])
+        self.assertEqual(sent[0].get("deliver_to_discord"), False)
+        self.assertFalse(sent[0].get("discord_lifecycle_event"))
+
+    def test_process_session_file_delivers_discord_update_for_full_mirror(self) -> None:
+        sent: list[dict[str, object]] = []
+        registry = {
+            "sessions": {
+                "sid-pi": {
+                    "session_id": "sid-pi",
+                    "ref": "abcd1234",
+                    "agent": "pi",
+                    "discord_channel_id": "chan-123",
+                    "discord_progress_mode": "full_mirror",
+                    "active_prompt_origin": "desktop",
+                    "active_prompt_status": "working",
+                    "pending_completion": False,
+                }
+            },
+            "conversation_bindings": {},
+        }
+
+        def _capture_send(**kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as td:
+            session_path = Path(td) / "sid-pi.jsonl"
+            session_path.write_text(
+                '{"type":"message","message":{"role":"assistant","content":"Interim summary"}}\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    cp.os.environ,  # type: ignore[attr-defined]
+                    {
+                        "AGENT_CHAT_TRANSPORT": "discord",
+                        "AGENT_DISCORD_BOT_TOKEN": "discord-token",
+                        "AGENT_DISCORD_CHANNEL_ID": "control-chan",
+                        "AGENT_DISCORD_SESSION_CHANNELS": "1",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(cp.outbound, "_read_session_id", return_value="sid-pi"),
+                mock.patch.object(cp.outbound, "_read_session_cwd", return_value="/tmp/project"),
+                mock.patch.object(cp, "_agent_for_session_path", return_value="pi"),
+                mock.patch.object(cp, "_send_structured", side_effect=_capture_send),
+            ):
+                cp._process_session_file(  # type: ignore[attr-defined]
+                    codex_home=Path(td),
+                    session_path=session_path,
+                    offset=0,
+                    recipient="discord-recipient",
+                    max_message_chars=1800,
+                    dry_run=False,
+                    registry=registry,
+                    message_index={},
+                    session_id_cache={},
+                    call_id_to_name={},
+                    seen_needs_input_call_ids={},
+                )
+
+        self.assertEqual([entry.get("kind") for entry in sent], ["update"])
+        self.assertEqual(sent[0].get("deliver_to_discord"), True)
+        self.assertTrue(sent[0].get("discord_lifecycle_event"))
 
     def test_send_structured_uses_telegram_transport_when_enabled(self) -> None:
         sent_telegram: list[tuple[str, str, str, int | None]] = []

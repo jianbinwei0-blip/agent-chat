@@ -61,6 +61,9 @@ Use `Launchd.permission_app` and `Launchd.runtime_python` as the authoritative F
 - first-use surface onboarding
   - control surfaces and bound session surfaces now show a one-time quick-start hint in-context
   - this teaches `list`, `where`, `bind`, and `new ...` without requiring users to open docs
+- inbound control commands
+  - `mode [@<session_ref>] [origin_scoped|shared_status|full_mirror|local_only]` inspects or changes per-session Discord progress sharing
+  - when sent inside a bound Discord session channel or Telegram topic, `mode <...>` targets the bound session automatically
 - `AGENT_CHAT_STRICT_TMUX` (default `1`)
   - `1`: keep strict tmux errors for general pane dispatch failures.
   - exception: if a target session exists but has no usable pane mapping (`tmux_stale` no-pane class), control plane falls back to `resume` so replies still append to that session.
@@ -109,8 +112,8 @@ For Discord-bound Pi sessions, the control plane persists prompt-origin and desk
 Important session fields:
 - `discord_progress_mode`
   - valid values: `origin_scoped`, `shared_status`, `full_mirror`, `local_only`
-  - missing/invalid values normalize to `origin_scoped`
-  - when a Pi session first becomes Discord-bound, the default mode is `origin_scoped` unless an explicit valid mode already exists
+  - missing/invalid values normalize to `shared_status`
+  - when a Pi session first becomes Discord-bound, the default mode is `shared_status` unless an explicit valid mode already exists
 - `active_prompt_origin`
   - tracks whether the current prompt came from `discord` or another local/desktop path
 - `active_prompt_status`
@@ -122,9 +125,9 @@ Important session fields:
   - timestamp for the latest attention-state transition
 
 Mode semantics:
-- `origin_scoped` (default): post Discord lifecycle updates only for Discord-origin prompts
-- `shared_status`: post milestone lifecycle updates for Discord-origin and desktop-origin prompts
-- `full_mirror`: allow the broadest lifecycle mirroring for both origins
+- `origin_scoped`: post Discord lifecycle updates only for Discord-origin prompts
+- `shared_status` (default): post milestone lifecycle updates for Discord-origin and desktop-origin prompts
+- `full_mirror`: allow the broadest lifecycle mirroring for both origins, including interim assistant update messages while work is in flight
 - `local_only`: suppress automatic Discord lifecycle updates for every origin
 
 Desktop visibility contract for Discord-origin Pi prompts:
@@ -135,9 +138,9 @@ Desktop visibility contract for Discord-origin Pi prompts:
 - terminal lifecycle states resolve attention with `desktop_attention_state=resolved`
 
 Default operator-facing behavior:
-- Discord-origin prompts in `origin_scoped` receive accepted, working, needs-input, and terminal lifecycle updates in Discord
-- local desktop-origin work is not mirrored back to Discord by default in `origin_scoped`
-- broader collaboration requires explicitly using `shared_status` or `full_mirror`
+- Discord-origin and local desktop-origin prompts in `shared_status` receive milestone lifecycle updates in Discord
+- `full_mirror` adds interim assistant update messages on top of those milestone events
+- use `origin_scoped` when you want local desktop-origin work to stay off Discord by default
 
 ## Missing-Session Choice Flow
 

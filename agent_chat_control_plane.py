@@ -52,7 +52,8 @@ _SESSION_STATUS_LINE_UUID_RE = re.compile(
     r"·\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*·"
 )
 
-_DISCORD_PROGRESS_MODES = {"origin_scoped", "shared_status", "full_mirror", "local_only"}
+_DISCORD_PROGRESS_MODE_ORDER = ("origin_scoped", "shared_status", "full_mirror", "local_only")
+_DISCORD_PROGRESS_MODES = set(_DISCORD_PROGRESS_MODE_ORDER)
 _DESKTOP_ATTENTION_STATES = {
     "inline_visible",
     "notification_visible",
@@ -159,6 +160,7 @@ _HELP_TEXT = (
     "- list — recent sessions\n"
     "- where / context — explain this surface\n"
     "- status @<session_ref> — inspect one session\n"
+    "- mode [@<session_ref>] [origin_scoped|shared_status|full_mirror|local_only] — inspect or change Discord progress sharing\n"
     "- bind @<session_ref> — bind this Telegram topic or Discord channel/thread\n"
     "- @<session_ref> <instruction> — send work to a session\n"
     "- new <label>: <instruction> — start a new session\n"
@@ -5180,7 +5182,7 @@ def _set_default_discord_progress_mode_for_session(
 ) -> str:
     sid = session_id.strip()
     if not sid:
-        return "origin_scoped"
+        return "shared_status"
     sessions = registry.setdefault("sessions", {})
     if not isinstance(sessions, dict):
         sessions = {}
@@ -6143,7 +6145,7 @@ def _strip_leading_telegram_mention_for_command(*, text: str) -> str:
         return raw
     first_token = remainder.split(None, 1)[0]
     first_lower = first_token.lower()
-    if first_token.startswith("@") or first_lower in {"help", "list", "where", "context", "status", "bind", "new"}:
+    if first_token.startswith("@") or first_lower in {"help", "list", "where", "context", "status", "mode", "progress", "bind", "new"}:
         return remainder
     return raw
 
@@ -6168,6 +6170,8 @@ def _normalize_telegram_slash_command(*, text: str) -> str:
         return "context"
     if command == "status":
         return f"status {remainder}".strip()
+    if command in {"mode", "progress"}:
+        return f"mode {remainder}".strip()
     if command == "bind":
         return f"bind {remainder}".strip()
     if command == "new":
@@ -6204,6 +6208,24 @@ def _parse_inbound_command(text: str) -> dict[str, str]:
     m_status = re.match(r"^status\s+@?(\S+)\s*$", raw, flags=re.IGNORECASE)
     if m_status:
         return {"action": "status", "session_ref": m_status.group(1).strip()}
+
+    m_mode = re.match(r"^(?:mode|progress)\b(?:\s+(.+))?\s*$", raw, flags=re.IGNORECASE | re.DOTALL)
+    if m_mode:
+        remainder = (m_mode.group(1) or "").strip()
+        if not remainder:
+            return {"action": "mode"}
+        tokens = remainder.split()
+        if len(tokens) == 1:
+            token = tokens[0].strip()
+            normalized = _parse_requested_discord_progress_mode(token)
+            if normalized:
+                return {"action": "mode", "mode": normalized}
+            if token.startswith("@"):
+                return {"action": "mode", "session_ref": token.lstrip("@")}
+            return {"action": "mode", "mode": token.lower()}
+        session_ref = tokens[0].strip().lstrip("@")
+        mode = tokens[1].strip().lower()
+        return {"action": "mode", "session_ref": session_ref, "mode": mode}
 
     m_bind = re.match(r"^bind\s+@?(\S+)\s*$", raw, flags=re.IGNORECASE)
     if m_bind:
@@ -6653,14 +6675,111 @@ def _normalize_discord_progress_mode(mode: object) -> str:
     normalized = mode.strip().lower() if isinstance(mode, str) else ""
     if normalized in _DISCORD_PROGRESS_MODES:
         return normalized
-    return "origin_scoped"
+    return "shared_status"
 
 
 
 def _session_discord_progress_mode(*, session_rec: dict[str, Any] | None) -> str:
     if not isinstance(session_rec, dict):
-        return "origin_scoped"
+        return "shared_status"
     return _normalize_discord_progress_mode(session_rec.get("discord_progress_mode"))
+
+
+
+def _parse_requested_discord_progress_mode(mode: object) -> str | None:
+    if not isinstance(mode, str):
+        return None
+    normalized = mode.strip().lower()
+    if normalized in _DISCORD_PROGRESS_MODES:
+        return normalized
+    return None
+
+
+
+def _discord_progress_mode_description(*, mode: str) -> str:
+    normalized = _normalize_discord_progress_mode(mode)
+    if normalized == "origin_scoped":
+        return "share lifecycle updates only for Discord-origin prompts"
+    if normalized == "shared_status":
+        return "share milestone lifecycle updates for Discord-origin and local desktop-origin prompts"
+    if normalized == "full_mirror":
+        return "share milestone lifecycle updates plus interim assistant update messages"
+    if normalized == "local_only":
+        return "suppress automatic Discord lifecycle updates"
+    return "share milestone lifecycle updates"
+
+
+
+def _discord_progress_mode_command_hint(*, ref: str | None = None) -> str:
+    ref_text = f" @{ref}" if isinstance(ref, str) and ref.strip() else ""
+    options = "|".join(_DISCORD_PROGRESS_MODE_ORDER)
+    return f"Change it with `mode{ref_text} <{options}>`."
+
+
+
+def _render_discord_progress_mode_table(*, current_mode: str, ref: str | None = None) -> str:
+    normalized_current = _normalize_discord_progress_mode(current_mode)
+    rows = [
+        ("origin_scoped", "Discord-origin lifecycle only"),
+        ("shared_status", "Milestones for Discord + desktop work"),
+        ("full_mirror", "Milestones + interim updates"),
+        ("local_only", "No automatic Discord updates"),
+    ]
+    mode_width = max(len("Mode"), max(len(mode) for mode, _ in rows))
+    lines = [
+        "Discord sharing modes:",
+        f"{'Mode'.ljust(mode_width)} | Behavior",
+        f"{'-' * mode_width}-|------------------------------------------",
+    ]
+    for mode, behavior in rows:
+        suffix = "  ← current" if mode == normalized_current else ""
+        lines.append(f"{mode.ljust(mode_width)} | {behavior}{suffix}")
+    lines.append(_discord_progress_mode_command_hint(ref=ref))
+    return "\n".join(lines)
+
+
+
+def _render_discord_progress_mode_status(*, session_id: str, registry: dict[str, Any]) -> str:
+    sessions = registry.get("sessions")
+    rec = sessions.get(session_id) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
+        return f"Session {session_id} not found."
+    ref = rec.get("ref") if isinstance(rec.get("ref"), str) and rec.get("ref").strip() else _session_ref(session_id)
+    mode = _session_discord_progress_mode(session_rec=rec)
+    lines = [
+        f"Discord progress mode for `@{ref}` is `{mode}`.",
+        f"Meaning: {_discord_progress_mode_description(mode=mode)}.",
+        "",
+        _render_discord_progress_mode_table(current_mode=mode, ref=ref),
+    ]
+    return "\n".join(lines)
+
+
+
+def _set_session_discord_progress_mode(
+    *,
+    registry: dict[str, Any],
+    session_id: str,
+    mode: str,
+) -> tuple[str | None, str | None]:
+    sid = session_id.strip() if isinstance(session_id, str) else ""
+    if not sid:
+        return None, "Session not found."
+    requested = _parse_requested_discord_progress_mode(mode)
+    if not requested:
+        options = "|".join(_DISCORD_PROGRESS_MODE_ORDER)
+        return None, f"Unknown Discord progress mode `{mode}`. Use one of `{options}`."
+    sessions = registry.get("sessions")
+    rec = sessions.get(sid) if isinstance(sessions, dict) else None
+    if not isinstance(rec, dict):
+        return None, f"Session {sid} not found."
+    rec["discord_progress_mode"] = requested
+    ref = rec.get("ref") if isinstance(rec.get("ref"), str) and rec.get("ref").strip() else _session_ref(sid)
+    text = (
+        f"Set Discord progress mode for `@{ref}` to `{requested}`.\n"
+        f"Meaning: {_discord_progress_mode_description(mode=requested)}."
+    )
+    return requested, text
 
 
 
@@ -6700,11 +6819,15 @@ def _should_emit_discord_lifecycle_event(
     session_rec: dict[str, Any] | None,
     event_kind: str | None = None,
 ) -> bool:
-    del event_kind
     if not isinstance(session_rec, dict):
         return False
     mode = _session_discord_progress_mode(session_rec=session_rec)
+    normalized_event = event_kind.strip().lower() if isinstance(event_kind, str) else ""
     if mode == "local_only":
+        return False
+    if mode == "full_mirror":
+        return True
+    if normalized_event == "update":
         return False
     if mode == "origin_scoped":
         return _is_discord_origin_prompt(session_rec=session_rec)
@@ -6714,7 +6837,7 @@ def _should_emit_discord_lifecycle_event(
 
 def _discord_lifecycle_kind_for_structured_kind(*, kind: str) -> str | None:
     normalized = kind.strip().lower()
-    if normalized in {"accepted", "working", "needs_input", "failed", "cancelled", "completed"}:
+    if normalized in {"accepted", "working", "needs_input", "failed", "cancelled", "completed", "update"}:
         return normalized
     if normalized == "responded":
         return "completed"
@@ -6768,6 +6891,10 @@ def _render_discord_lifecycle_text(
         if origin == "desktop":
             return f"Pi is working locally in `@{ref}`."
         return f"Pi is working on your request in `@{ref}`."
+
+    if lifecycle_kind == "update":
+        lead = f"Pi update from local work in `@{ref}`." if origin == "desktop" else f"Pi update in `@{ref}`."
+        return f"{lead}\n{prompt_text}".strip() if prompt_text else lead
 
     if lifecycle_kind == "needs_input":
         questions = _pi_pending_questions(session_rec=session_rec)
@@ -7182,7 +7309,15 @@ def _process_session_file(
                 rec = sessions.get(sid) if isinstance(sessions, dict) else None
                 pending_completion = isinstance(rec, dict) and rec.get("pending_completion") is True
                 should_emit_update = _should_emit_session_progress_update()
-                deliver_to_discord = _should_emit_discord_lifecycle_event(
+                deliver_working_to_discord = _should_emit_discord_lifecycle_event(
+                    session_rec=rec if isinstance(rec, dict) else None,
+                    event_kind="working",
+                )
+                deliver_completion_to_discord = _should_emit_discord_lifecycle_event(
+                    session_rec=rec if isinstance(rec, dict) else None,
+                    event_kind="responded",
+                )
+                deliver_update_to_discord = _should_emit_discord_lifecycle_event(
                     session_rec=rec if isinstance(rec, dict) else None,
                     event_kind="update",
                 )
@@ -7190,7 +7325,7 @@ def _process_session_file(
                     rec.get("active_prompt_status") if isinstance(rec, dict) else None
                 )
 
-                if pending_completion and active_prompt_status == "accepted" and deliver_to_discord:
+                if pending_completion and active_prompt_status == "accepted" and deliver_working_to_discord:
                     _send_structured(
                         codex_home=codex_home,
                         recipient=recipient,
@@ -7227,8 +7362,8 @@ def _process_session_file(
                             message_index=message_index,
                             agent=session_agent,
                             registry=registry,
-                            deliver_to_discord=deliver_to_discord,
-                            discord_lifecycle_event=deliver_to_discord,
+                            deliver_to_discord=deliver_completion_to_discord,
+                            discord_lifecycle_event=deliver_completion_to_discord,
                         )
 
                     _update_active_prompt_lifecycle(
@@ -7261,7 +7396,8 @@ def _process_session_file(
                         message_index=message_index,
                         agent=session_agent,
                         registry=registry,
-                        deliver_to_discord=False,
+                        deliver_to_discord=deliver_update_to_discord,
+                        discord_lifecycle_event=deliver_update_to_discord,
                     )
                     _upsert_session(
                         registry=registry,
@@ -7557,6 +7693,11 @@ def _render_session_status(*, session_id: str, registry: dict[str, Any]) -> str:
         f"Tmux pane: {pane or '-'}",
         f"Tmux socket: {socket_value or '-'}",
     ]
+    if agent == "pi" or (isinstance(rec.get("discord_channel_id"), str) and rec.get("discord_channel_id").strip()):
+        current_mode = _session_discord_progress_mode(session_rec=rec)
+        lines.append(f"Discord progress mode: {current_mode}")
+        lines.append("")
+        lines.append(_render_discord_progress_mode_table(current_mode=current_mode, ref=ref))
     if agent == "pi" and _session_is_waiting_for_input(session_rec=rec):
         last_request = _brief_text(text=rec.get("last_needs_input") if isinstance(rec.get("last_needs_input"), str) else None)
         if isinstance(last_request, str) and last_request:
@@ -10827,6 +10968,81 @@ def _process_inbound_replies(
                 session_id=sid,
                 kind="status",
                 text=_render_session_status(session_id=sid, registry=registry),
+                max_message_chars=max_message_chars,
+                dry_run=dry_run,
+                message_index=message_index,
+                telegram_message_thread_id=row_telegram_thread_id,
+                telegram_chat_id=row_telegram_chat_id,
+                discord_channel_id=row_reply_discord_channel_id,
+            )
+            continue
+
+        if action == "mode":
+            requested_mode = cmd.get("mode", "").strip().lower() if isinstance(cmd.get("mode"), str) else ""
+            explicit_ref = cmd.get("session_ref", "").strip() if isinstance(cmd.get("session_ref"), str) else ""
+            sid: str | None = None
+            err: str | None = None
+            if explicit_ref:
+                sid, err = _resolve_session_ref(registry=registry, session_ref=explicit_ref, min_prefix=min_prefix)
+            else:
+                sid = _bound_session_for_inbound_context(
+                    registry=registry,
+                    transport=row_transport or "imessage",
+                    telegram_chat_id=row_telegram_chat_id,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    discord_channel_id=row_discord_channel_id,
+                    discord_parent_channel_id=row_discord_parent_channel_id,
+                )
+                if not sid:
+                    err = (
+                        "Mode command needs a target session. Send `mode @<session_ref> <origin_scoped|shared_status|full_mirror|local_only>`, "
+                        "or run `mode <...>` inside a bound Telegram topic or Discord session channel."
+                    )
+            if not sid:
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=None,
+                    kind="error",
+                    text=err or "Session not found.",
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
+
+            if not requested_mode:
+                mode_text = _render_discord_progress_mode_status(session_id=sid, registry=registry)
+                _send_structured(
+                    codex_home=codex_home,
+                    recipient=recipient,
+                    session_id=sid,
+                    kind="status",
+                    text=mode_text,
+                    max_message_chars=max_message_chars,
+                    dry_run=dry_run,
+                    message_index=message_index,
+                    telegram_message_thread_id=row_telegram_thread_id,
+                    telegram_chat_id=row_telegram_chat_id,
+                    discord_channel_id=row_reply_discord_channel_id,
+                )
+                continue
+
+            _, mode_text = _set_session_discord_progress_mode(
+                registry=registry,
+                session_id=sid,
+                mode=requested_mode,
+            )
+            kind = "accepted" if isinstance(mode_text, str) and mode_text.startswith("Set Discord progress mode") else "error"
+            _send_structured(
+                codex_home=codex_home,
+                recipient=recipient,
+                session_id=sid if kind == "accepted" else None,
+                kind=kind,
+                text=mode_text or "Failed to update Discord progress mode.",
                 max_message_chars=max_message_chars,
                 dry_run=dry_run,
                 message_index=message_index,

@@ -277,9 +277,10 @@ Behavior summary:
 - the control channel stays unbound and handles commands like `help`, `list`, `where`, `status`, and `new ...`
 - session channels are created lazily and bind one channel to one session
 - plain text in a bound session channel routes back to that same session without `@<ref>`
-- newly Discord-bound Pi sessions default to the per-session `origin_scoped` progress mode
+- send `mode [@<session_ref>] <origin_scoped|shared_status|full_mirror|local_only>` to inspect or change Discord progress sharing
+- newly Discord-bound Pi sessions default to the per-session `shared_status` progress mode
 - Discord-origin Pi prompts are surfaced on the desktop immediately; accepted updates report whether the prompt is already visible inline or queued for desktop attention
-- in the default `origin_scoped` mode, automatic Discord lifecycle updates are sent for Discord-origin work, while local desktop work is not mirrored back to Discord unless you intentionally switch that session to a broader sharing mode
+- in the default `shared_status` mode, automatic Discord lifecycle updates are sent for both Discord-origin work and local desktop-origin work at milestone boundaries
 - send `bind @<session_ref>` to move the current topic/channel/thread to another session
 
 6. Configure notify hook for your agent runtime.
@@ -503,6 +504,7 @@ Common inbound commands:
 - `list`
 - `where` / `context`
 - `status @<session_ref>`
+- `mode [@<session_ref>] [origin_scoped|shared_status|full_mirror|local_only]`
 - `bind @<session_ref>`
 - `@<session_ref> <instruction>`
 - `new <label>: <instruction>`
@@ -545,9 +547,10 @@ Frequently used advanced overrides:
 - `verbose`: automatic completion notifications and progress updates across enabled transports
 
 For Discord-bound Pi sessions, notification level is layered on top of the per-session progress mode:
-- default mode is `origin_scoped`
-- `origin_scoped` shares lifecycle updates for Discord-origin prompts, but keeps local desktop-origin work local by default
-- broader sharing modes are documented in `docs/discord.md` and `docs/control-plane.md`
+- default mode is `shared_status`
+- `shared_status` shares milestone lifecycle updates for both Discord-origin and local desktop-origin prompts
+- `full_mirror` goes further and also mirrors interim Discord update messages during active work
+- broader/narrower sharing modes are documented in `docs/discord.md` and `docs/control-plane.md`
 
 For the full environment reference, see:
 - `docs/control-plane.md`

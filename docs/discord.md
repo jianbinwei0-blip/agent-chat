@@ -126,6 +126,7 @@ Use commands like:
 - `list`
 - `where` / `context`
 - `status @abcd1234`
+- `mode @abcd1234 full_mirror`
 - `new bugfix: investigate failing test`
 
 If no target session can be resolved, the control plane asks which runtime to start:
@@ -146,6 +147,8 @@ Just send plain text, for example:
 You do not need `@<ref>` in a bound session channel.
 If you need to move the current channel/thread to another session, send `bind @<session_ref>`.
 If you want the current channel/thread explained back to you, send `where` or `context`.
+If you want to inspect or change Discord progress sharing for the current bound session, send `mode` or `mode <origin_scoped|shared_status|full_mirror|local_only>`.
+`status @<session_ref>` now also includes a compact mode table so you can compare the sharing choices in-place.
 On first use, agent-chat also appends a one-time quick-start hint so users can learn the control/session channel model in-context.
 
 When Pi is blocked waiting on you, Discord now uses a clearer waiting-state message shape:
@@ -159,22 +162,23 @@ When Pi is blocked waiting on you, Discord now uses a clearer waiting-state mess
 When a Pi session becomes Discord-bound, agent-chat now treats Discord visibility as a per-session policy instead of one global always-mirror behavior.
 
 Default behavior:
-- newly Discord-bound Pi sessions default to `origin_scoped`
+- newly Discord-bound Pi sessions default to `shared_status`
 - existing explicit session mode is preserved when a session is rebound or reused
-- `origin_scoped` is the safe default for normal day-to-day use because it keeps Discord collaborators informed about Discord-origin work without mirroring unrelated local desktop exploration
+- `shared_status` is the collaborative default: it keeps Discord collaborators informed about both Discord-origin and local desktop-origin work using milestone updates rather than verbose streaming
 
 Per-session progress modes:
-- `origin_scoped` (default): send lifecycle updates only for prompts that came from Discord
-- `shared_status`: send milestone lifecycle updates for both Discord-origin and local desktop-origin prompts
-- `full_mirror`: send the broadest set of lifecycle updates for both origins; useful for demos or highly collaborative sessions
+- `origin_scoped`: send lifecycle updates only for prompts that came from Discord
+- `shared_status` (default): send milestone lifecycle updates for both Discord-origin and local desktop-origin prompts
+- `full_mirror`: send the broadest set of lifecycle updates for both origins, including interim assistant update messages while work is in flight; useful for demos or highly collaborative sessions
 - `local_only`: suppress automatic Discord lifecycle updates for every prompt origin
 
 What this means in practice:
 - a prompt sent from Discord is accepted into the target Pi session and surfaced on the desktop immediately
 - if the Pi surface is already foreground/visible, Discord says the prompt is visible on the desktop now
 - if the Pi surface is backgrounded or hidden, Discord says the prompt was queued and marked for desktop attention
-- in `origin_scoped`, later lifecycle milestones such as `working`, `needs_input`, `completed`, `failed`, and `cancelled` continue to post back to Discord only for that Discord-origin prompt
-- local desktop-only work is **not** mirrored back to Discord by default in `origin_scoped`
+- in `shared_status`, lifecycle milestones such as `working`, `needs_input`, `completed`, `failed`, and `cancelled` post back to Discord for both Discord-origin and local desktop-origin prompts
+- in `full_mirror`, those milestone updates remain, and Discord also receives interim assistant update messages during active work
+- use `origin_scoped` when you explicitly want local desktop-only work to stay off Discord
 
 Desktop attention states tracked for Discord-origin prompts:
 - `inline_visible`: the prompt is already visible in the active Pi desktop surface
